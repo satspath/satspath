@@ -18,6 +18,7 @@ satspath init
 ```
 
 Output:
+
 ```
 Created .satspath/registry.json
 Created .satspath/keys.json
@@ -33,6 +34,7 @@ satspath register rodrigo@satspath.dev
 ```
 
 Output:
+
 ```
 Registered: rodrigo@satspath.dev
 Identity pubkey: 02a1b2c3...
@@ -55,6 +57,7 @@ satspath show rodrigo@satspath.dev
 ```
 
 Output:
+
 ```
 Alias:           rodrigo@satspath.dev
 Identity pubkey: 02a1b2c3...
@@ -80,6 +83,7 @@ satspath encode rodrigo@satspath.dev 21000 --memo "coffee"
 ```
 
 Output:
+
 ```
 Encoded SatsPath URI:
 satspath:v1:eyJ2ZXJzaW9uIjoxLCJhbGlhcyI6InJvZHJpZ29Ac2F0c3BhdGguZGV2IiwiYW1vdW50X3NhdHMiOjIxMDAwLCJtZW1vIjoiY29mZmVlIiwicHJvZmlsZV9oaW50IjpudWxsfQ
@@ -92,6 +96,7 @@ satspath decode "satspath:v1:eyJ2ZXJzaW9uIjoxLCJhbGlhcyI6InJvZHJpZ29Ac2F0c3BhdGg
 ```
 
 Output:
+
 ```
 Decoded payment request:
   Version:     1
@@ -108,6 +113,7 @@ satspath quote rodrigo@satspath.dev 21000
 ```
 
 Output:
+
 ```
 Resolving alias 'rodrigo@satspath.dev'...
 Verifying signature...
@@ -129,6 +135,7 @@ satspath pay rodrigo@satspath.dev 21000
 ```
 
 Output:
+
 ```
 ─────────────────────────────────────────
 SatsPath Payment Simulation
@@ -161,6 +168,7 @@ satspath invite julian@example.com 21000
 ```
 
 Output:
+
 ```
 'julian@example.com' is not registered on SatsPath.
 

@@ -3,8 +3,21 @@ members = [
     "crates/satspath-core",
     "crates/satspath-router",
     "crates/satspath-cli",
+    "crates/satspath-swaps",
+    "crates/satspathd",
+    "crates/satspath-wasm",
+    "crates/satspath-pqc",
+    "crates/satspath-witness",
 ]
 resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["SatsPath Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/SatsPath/satspath"
+description = "Universal payment request and identity resolution over Nostr, Bitcoin, Lightning, and Ark."
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -12,13 +25,22 @@ serde_json = "1"
 thiserror = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-secp256k1 = { version = "0.29", features = ["rand-std", "global-context"] }
+secp256k1 = { version = "0.29", features = ["rand-std", "serde", "hashes", "global-context"] }
+hickory-resolver = { version = "0.24", features = ["dnssec-ring", "tokio-runtime"] }
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+bitcoin = { version = "0.32", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4"] }
-reqwest = { version = "0.12", features = ["json"] }
+uuid = { version = "1", features = ["v4", "js"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.30", features = ["__rustls-tls", "webpki-roots"] }
+futures-util = "0.3"
 url = "2"
 rand = "0.8"
+getrandom = { version = "0.4", features = ["wasm_js"] }
+aes-gcm = "0.10"
+lightning-invoice = { version = "0.32", features = ["std"] }
+bech32 = "0.9"
+rusqlite = { version = "0.32", features = ["bundled"] }

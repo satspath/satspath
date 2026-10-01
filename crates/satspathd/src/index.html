@@ -1,0 +1,1163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="referrer" content="no-referrer" />
+<title>SatsPath Dashboard</title>
+<style>
+  :root {
+    --bg: #09090b;
+    --card-bg: rgba(24, 24, 27, 0.65);
+    --border: rgba(63, 63, 70, 0.4);
+    --border-glow: rgba(251, 191, 36, 0.4);
+    --text: #f4f4f5;
+    --text-muted: #a1a1aa;
+    
+    /* Rails Colors */
+    --lightning: #fbbf24;
+    --onchain: #3b82f6;
+    --ark: #a855f7;
+    
+    --font-sans: Inter, ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  
+  body {
+    background: radial-gradient(circle at 50% 0%, #1e1b4b 0%, var(--bg) 70%);
+    color: var(--text);
+    font-family: var(--font-sans);
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 40px 20px;
+    overflow-x: hidden;
+  }
+
+  main {
+    width: 100%;
+    max-width: 1180px;
+    background: var(--card-bg);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    padding: 32px;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5), inset 0 1px 1px rgba(255, 255, 255, 0.05);
+    animation: fadeIn 0.6s ease-out;
+  }
+
+  .brand {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 20px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    text-align: center;
+    color: #fff;
+    margin-bottom: 32px;
+    position: relative;
+    display: inline-block;
+    width: 100%;
+  }
+
+  .brand span {
+    background: linear-gradient(to right, var(--lightning), var(--ark));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  nav {
+    display: flex;
+    background: rgba(39, 39, 42, 0.6);
+    border: 1px solid var(--border);
+    padding: 4px;
+    border-radius: 12px;
+    margin-bottom: 32px;
+  }
+
+  nav button {
+    flex: 1;
+    cursor: pointer;
+    background: none;
+    border: 0;
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+    font-weight: 600;
+    font-size: 14px;
+    padding: 10px;
+    border-radius: 8px;
+    transition: all 0.2s ease;
+  }
+
+  nav button.active {
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  }
+
+  h2 {
+    font-family: var(--font-mono);
+    font-size: 24px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    text-align: left;
+  }
+
+  .tagline {
+    color: var(--text-muted);
+    font-size: 14px;
+    margin-bottom: 24px;
+    text-align: left;
+  }
+
+  /* Form Styling */
+  .field-group {
+    margin-bottom: 20px;
+    text-align: left;
+  }
+
+  label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+
+  input {
+    width: 100%;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    color: #fff;
+    background: rgba(9, 9, 11, 0.5);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    outline: none;
+    transition: all 0.2s ease;
+  }
+
+  input:focus {
+    border-color: rgba(255, 255, 255, 0.25);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.05);
+  }
+
+  input:disabled {
+    opacity: 0.5;
+    background: rgba(24, 24, 27, 0.8);
+  }
+
+  .exp {
+    font-size: 9px;
+    background: rgba(168, 85, 247, 0.15);
+    color: var(--ark);
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 6px;
+    border: 1px solid rgba(168, 85, 247, 0.3);
+  }
+
+  /* Action Buttons */
+  button.action {
+    width: 100%;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    font-size: 15px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #000;
+    background: #fff;
+    border: none;
+    border-radius: 12px;
+    padding: 14px;
+    margin-top: 16px;
+    transition: all 0.2s ease;
+  }
+
+  button.action:hover {
+    background: #e4e4e7;
+    transform: translateY(-1px);
+  }
+
+  button.action:active {
+    transform: translateY(0);
+  }
+
+  button.action:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  button.ghost {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border);
+    margin-top: 10px;
+  }
+
+  button.ghost:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  /* Card Displays & Routing Map */
+  .card {
+    background: rgba(9, 9, 11, 0.8);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+    margin-top: 24px;
+    opacity: 0;
+    transform: translateY(10px);
+    transition: all 0.3s ease;
+  }
+
+  .card.show {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .qr {
+    background: #fff;
+    padding: 16px;
+    border-radius: 12px;
+    width: 200px;
+    height: 200px;
+    margin: 0 auto 20px;
+  }
+
+  .qr svg {
+    width: 100%;
+    height: 100%;
+  }
+
+  .rail-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 30px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+
+  .rail-badge.lightning { background: rgba(251, 191, 36, 0.15); color: var(--lightning); border: 1px solid rgba(251, 191, 36, 0.3); }
+  .rail-badge.onchain { background: rgba(59, 130, 246, 0.15); color: var(--onchain); border: 1px solid rgba(59, 130, 246, 0.3); }
+  .rail-badge.ark { background: rgba(168, 85, 247, 0.15); color: var(--ark); border: 1px solid rgba(168, 85, 247, 0.3); }
+
+  .who {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .reason {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+  }
+
+  .payload-box {
+    background: rgba(24, 24, 27, 0.9);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    word-break: break-all;
+    margin-bottom: 16px;
+    color: #e4e4e7;
+  }
+
+  .copy {
+    cursor: pointer;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    transition: all 0.2s ease;
+  }
+
+  .copy:hover {
+    color: #fff;
+    border-color: #fff;
+  }
+
+  /* Interactive Routing visualization */
+  .routing-map {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 20px 0;
+    padding: 16px;
+    background: rgba(24, 24, 27, 0.5);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+
+  .route-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .route-node svg {
+    width: 20px;
+    height: 20px;
+    fill: currentColor;
+  }
+
+  .route-node.active {
+    color: #fff;
+  }
+
+  .route-line {
+    flex: 1;
+    height: 2px;
+    background: var(--border);
+    margin: 0 10px;
+    position: relative;
+  }
+
+  .route-line.active::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(to right, var(--lightning), var(--ark));
+    animation: flow 1.5s infinite linear;
+  }
+
+  @keyframes flow {
+    0% { transform: scaleX(0); transform-origin: left; }
+    50% { transform: scaleX(1); transform-origin: left; }
+    50.1% { transform: scaleX(1); transform-origin: right; }
+    100% { transform: scaleX(0); transform-origin: right; }
+  }
+
+  .err {
+    color: #f87171;
+    background: rgba(248, 113, 113, 0.1);
+    border: 1px solid rgba(248, 113, 113, 0.2);
+    border-radius: 12px;
+    padding: 12px;
+    margin-top: 16px;
+    font-size: 13px;
+  }
+
+  .hidden { display: none !important; }
+
+  .explorer-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+  .metric, .panel { background: rgba(9,9,11,.72); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+  .metric { grid-column: span 3; min-height: 104px; }
+  .metric span { color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+  .metric strong { display: block; margin-top: 10px; font: 600 20px var(--font-mono); overflow: hidden; text-overflow: ellipsis; }
+  .panel { grid-column: span 6; min-width: 0; }
+  .panel.wide { grid-column: 1 / -1; }
+  .panel h3 { font: 600 14px var(--font-mono); margin-bottom: 12px; }
+  .hash { font-family: var(--font-mono); font-size: 11px; word-break: break-all; color: #c4b5fd; }
+  .status { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 4px 9px; font: 600 10px var(--font-mono); }
+  .status.ok { color: #6ee7b7; background: rgba(16,185,129,.12); }
+  .status.warn { color: #fcd34d; background: rgba(245,158,11,.12); }
+  .status.critical { color: #fca5a5; background: rgba(239,68,68,.16); }
+  .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .toolbar input { flex: 1; min-width: 210px; }
+  .small-button { cursor: pointer; border: 1px solid var(--border); border-radius: 8px; background: #27272a; color: var(--text); padding: 8px 11px; font: 600 11px var(--font-mono); }
+  #merkle-canvas { width: 100%; height: 330px; background: #050507; border: 1px solid var(--border); border-radius: 10px; cursor: grab; touch-action: none; }
+  #merkle-canvas:active { cursor: grabbing; }
+  .tree-link { stroke: #3f3f46; stroke-width: 1.5; }
+  .tree-link.proof { stroke: #fbbf24; stroke-width: 3; }
+  .tree-node { fill: #18181b; stroke: #71717a; stroke-width: 1.5; cursor: pointer; }
+  .tree-node.leaf { fill: #172554; stroke: #60a5fa; }
+  .tree-node.proof { fill: #422006; stroke: #fbbf24; stroke-width: 3; }
+  .timeline { display: grid; gap: 10px; max-height: 320px; overflow: auto; }
+  .timeline-item { border-left: 2px solid #52525b; padding: 6px 10px; }
+  .timeline-item.rotate_key { border-left-color: #fbbf24; }
+  textarea { width: 100%; min-height: 190px; resize: vertical; padding: 12px; border-radius: 10px; border: 1px solid var(--border); background: #09090b; color: #e4e4e7; font: 11px/1.5 var(--font-mono); }
+  .proof-steps { max-height: 260px; overflow: auto; display: grid; gap: 7px; margin-top: 12px; }
+  .proof-step { padding: 8px; border: 1px solid var(--border); border-radius: 7px; font: 10px var(--font-mono); word-break: break-all; }
+  .checkpoint-row { display: grid; grid-template-columns: 100px 1fr auto; gap: 12px; align-items: center; border-top: 1px solid var(--border); padding: 12px 0; }
+  @media (max-width: 760px) { body { padding: 10px; } main { padding: 18px; } nav { overflow-x: auto; } nav button { min-width: 90px; } .metric { grid-column: span 6; } .panel { grid-column: 1 / -1; } .checkpoint-row { grid-template-columns: 1fr; } }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+  footer {
+    margin-top: 32px;
+    font-size: 11px;
+    color: var(--text-muted);
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  /* Laser Animation */
+  .lasers-container {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    pointer-events: none;
+    z-index: 100;
+    overflow: hidden;
+  }
+  .laser {
+    position: absolute;
+    width: 2px;
+    height: 100vh;
+    background: linear-gradient(to bottom, transparent, var(--lightning), transparent);
+    opacity: 0;
+    transform: translateY(-100%);
+    box-shadow: 0 0 10px var(--lightning), 0 0 20px var(--lightning);
+  }
+  .laser.onchain {
+    background: linear-gradient(to bottom, transparent, var(--onchain), transparent);
+    box-shadow: 0 0 10px var(--onchain), 0 0 20px var(--onchain);
+  }
+  .laser.ark {
+    background: linear-gradient(to bottom, transparent, var(--ark), transparent);
+    box-shadow: 0 0 10px var(--ark), 0 0 20px var(--ark);
+  }
+  @keyframes fireLaser {
+    0% { transform: translateY(-100%); opacity: 0; }
+    10% { opacity: 1; }
+    90% { opacity: 1; }
+    100% { transform: translateY(100vh); opacity: 0; }
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+<div class="lasers-container" id="lasers-container"></div>
+<main>
+  <div class="brand">SATS<span>PATH</span></div>
+  <div class="chrome">
+    <nav>
+      <button data-tab="send" class="active">Send</button>
+      <button data-tab="receive">Receive</button>
+      <button data-tab="claim" id="nav-claim">Claim</button>
+      <button data-tab="profile">My Profile</button>
+      <button data-tab="transparency">Transparency</button>
+    </nav>
+
+    <!-- SEND -->
+    <section id="tab-send">
+      <div id="s-notifications" class="card hidden" style="margin-bottom:20px; border-color: rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.08);"></div>
+      <h2>Send Payment</h2>
+      <p class="tagline">Decentralized, non-custodial path routing.</p>
+      
+      <div class="field-group">
+        <label>Recipient Identifier</label>
+        <input id="s-recipient" type="text" placeholder="user@domain or ₿user@domain" autocomplete="off" />
+      </div>
+      
+      <div class="field-group">
+        <label>Amount (sats)</label>
+        <input id="s-amount" type="number" min="1" placeholder="100000" />
+      </div>
+      
+      <button class="action" id="s-go">Calculate Route</button>
+      
+      <div class="card hidden" id="s-card"></div>
+      <div class="err hidden" id="s-err"></div>
+    </section>
+
+    <!-- CLAIM -->
+    <section id="tab-claim" class="hidden">
+      <h2>Claim Payment Invite</h2>
+      <p class="tagline">Non-custodial claim &bull; keys generated locally &bull; SatsPath never sees your seed</p>
+      
+      <div class="card" id="c-inspect-card">
+        <div class="field-group">
+          <label>Invite ID or Claim Link</label>
+          <div style="display:flex; gap:8px;">
+            <input id="c-invite-id" type="text" placeholder="UUID or paste claim link" autocomplete="off" style="flex:1;" />
+            <button class="action" id="c-inspect-btn" style="width:auto; padding:0 20px; margin:0;">Inspect</button>
+          </div>
+        </div>
+        <div id="c-details" class="hidden" style="margin-top:16px;"></div>
+      </div>
+
+      <div class="card hidden" id="c-claim-box" style="margin-top:20px;">
+        <h3 style="font-family: var(--font-mono); font-size:16px; margin-bottom:8px;">Claim &amp; Publish Payment Profile</h3>
+        <p class="reason" style="margin-bottom:16px;">
+          Configure your public receive pointers. Your identity keys remain strictly local in your wallet/daemon.
+        </p>
+
+        <div class="field-group">
+          <label>Your Identifier / Alias</label>
+          <input id="c-alias" type="text" placeholder="alice@example.com" />
+        </div>
+
+        <div class="field-group">
+          <label>Lightning Address (optional)</label>
+          <input id="c-ln" type="text" placeholder="alice@getalby.com" />
+        </div>
+
+        <div class="field-group">
+          <label>Bitcoin On-chain Address (optional)</label>
+          <input id="c-onchain" type="text" placeholder="bc1q... or tb1q..." />
+        </div>
+
+        <div class="field-group">
+          <label>Ark Server URL (optional)</label>
+          <input id="c-ark-server" type="text" placeholder="https://ark.example.com" />
+        </div>
+
+        <button class="action" id="c-claim-go">Publish Profile &amp; Claim Payment</button>
+      </div>
+
+      <div class="card hidden" id="c-result-card" style="margin-top:20px;"></div>
+      <div class="err hidden" id="c-err" style="margin-top:20px;"></div>
+    </section>
+
+    <section id="tab-transparency" class="hidden" aria-live="polite">
+      <h2>Transparency Registry</h2>
+      <p class="tagline">Append-only identity history · proofs verified locally · identifiers hashed by default</p>
+      <div id="t-alert" class="err hidden" role="alert"></div>
+      <div class="explorer-grid">
+        <div class="metric"><span>Log size</span><strong id="t-log-size">—</strong></div>
+        <div class="metric"><span>Merkle root</span><strong class="hash" id="t-root">—</strong></div>
+        <div class="metric"><span>Identifiers</span><strong id="t-identifiers">—</strong></div>
+        <div class="metric"><span>Consistency</span><strong><span id="t-consistency" class="status warn">UNKNOWN</span></strong></div>
+        <div class="metric"><span>Key rotations</span><strong id="t-rotations">—</strong></div>
+        <div class="metric"><span>Revocations</span><strong id="t-revocations">—</strong></div>
+        <div class="metric"><span>Map root</span><strong class="hash" id="t-map-root">not implemented</strong></div>
+        <div class="metric"><span>Bitcoin anchor</span><strong><span id="t-anchor" class="status warn">NOT ANCHORED</span></strong></div>
+
+        <section class="panel wide">
+          <h3>Verification matrix</h3>
+          <div class="explorer-grid security-matrix">
+            <div class="metric"><span>PROFILE SIGNATURE</span><strong><span id="v-profile" class="status warn">UNVERIFIED</span></strong></div>
+            <div class="metric"><span>IDENTIFIER ATTESTATION</span><strong><span id="v-identifier" class="status warn">NOT CONFIGURED</span></strong></div>
+            <div class="metric"><span>KEY CONTINUITY</span><strong><span id="v-key" class="status warn">TOFU</span></strong></div>
+            <div class="metric"><span>MERKLE INCLUSION</span><strong><span id="v-inclusion" class="status warn">UNVERIFIED</span></strong></div>
+            <div class="metric"><span>CHECKPOINT BINDING</span><strong><span id="v-binding" class="status warn">UNVERIFIED</span></strong></div>
+            <div class="metric"><span>CHECKPOINT CONSISTENCY</span><strong><span id="v-consistency" class="status warn">TOFU</span></strong></div>
+            <div class="metric"><span>OPERATOR CONTINUITY</span><strong><span id="v-operator" class="status warn">TOFU</span></strong></div>
+            <div class="metric"><span>PAYMENT METHOD OWNERSHIP</span><strong><span id="v-methods" class="status warn">UNVERIFIED</span></strong></div>
+            <div class="metric"><span>BITCOIN ANCHOR</span><strong><span id="v-bitcoin" class="status warn">NOT CONFIGURED</span></strong></div>
+          </div>
+        </section>
+
+        <section class="panel wide">
+          <h3>Identifier / event search</h3>
+          <div class="toolbar"><input id="t-search" aria-label="Search identifier hash or event hash" placeholder="identifier hash or event hash" /><button class="small-button" id="t-search-go">Search</button></div>
+          <div id="t-search-result" class="hash">Public tree lookup never requires a plaintext email.</div>
+        </section>
+
+        <section class="panel wide">
+          <h3>Interactive Merkle tree</h3>
+          <div class="toolbar"><button class="small-button" id="t-zoom-in">Zoom +</button><button class="small-button" id="t-zoom-out">Zoom −</button><button class="small-button" id="t-reset">Reset</button><span id="t-selected" class="hash">Select a leaf to highlight its inclusion path</span></div>
+          <svg id="merkle-canvas" viewBox="0 0 1000 330" role="group" aria-label="Interactive Merkle tree"></svg>
+        </section>
+
+        <section class="panel">
+          <h3>Identifier history</h3>
+          <div id="t-history" class="timeline" tabindex="0" role="region" aria-label="Identifier event history"><div class="reason">Select an event or search an identifier hash.</div></div>
+        </section>
+        <section class="panel">
+          <h3>Proof inspector</h3>
+          <textarea id="t-proof-json" spellcheck="false" aria-label="Checkpoint-bound inclusion proof JSON" placeholder='Paste {"event_hash":...,"proof":...,"checkpoint":...}'></textarea>
+          <button class="small-button" id="t-verify-proof">Verify inclusion proof</button>
+          <span id="t-proof-result" class="status warn">WAITING</span>
+          <div id="t-proof-steps" class="proof-steps"></div>
+        </section>
+
+        <section class="panel wide">
+          <h3>Signed checkpoints</h3>
+          <div id="t-checkpoints"><div class="reason">No checkpoints loaded.</div></div>
+        </section>
+      </div>
+    </section>
+
+    <!-- RECEIVE -->
+    <section id="tab-receive" class="hidden">
+      <h2>My Receive Point</h2>
+      <p class="tagline">Non-custodial pointer generated locally.</p>
+      
+      <div class="field-group" style="display: flex; gap: 12px;">
+        <div style="flex: 1;">
+          <label>Preferred Rail</label>
+          <select id="r-rail-select" style="width: 100%; font-family: var(--font-sans); font-size: 14px; color: #fff; background: rgba(9, 9, 11, 0.5); border: 1px solid var(--border); border-radius: 10px; padding: 11px; outline: none; appearance: none;">
+            <option value="">Auto (Best Route)</option>
+            <option value="lightning">Lightning</option>
+            <option value="onchain">On-chain</option>
+            <option value="ark">Ark</option>
+          </select>
+        </div>
+        <div style="flex: 1;">
+          <label>Amount (sats)</label>
+          <input id="r-amount" type="number" min="1" placeholder="Any" />
+        </div>
+      </div>
+
+      <button class="action" id="r-go">Generate QR Code</button>
+      
+      <div class="card hidden" id="r-card">
+        <div class="qr" id="r-qr"></div>
+        <div class="rail-badge lightning" id="r-rail">Lightning</div>
+        <div class="who" id="r-alias"></div>
+        <div class="payload-box" id="r-payload"></div>
+        <button class="copy" id="r-copy">Copy Address</button>
+      </div>
+      <div class="err hidden" id="r-err"></div>
+    </section>
+
+    <!-- MY PROFILE -->
+    <section id="tab-profile" class="hidden">
+      <h2>My Profile Info</h2>
+      <p class="tagline">Setup public rails. Identity key remains encrypted locally.</p>
+      
+      <div class="field-group">
+        <label>Alias (email)</label>
+        <input id="p-alias" type="text" placeholder="you@domain.com" autocomplete="off" />
+      </div>
+      
+      <div class="field-group">
+        <label>Lightning Address (LNURL/BOLT12)</label>
+        <input id="p-ln" type="text" placeholder="you@domain.com" autocomplete="off" />
+      </div>
+      
+      <div class="field-group">
+        <label>On-chain address</label>
+        <input id="p-onchain" type="text" placeholder="bc1q... or sp1q..." autocomplete="off" />
+      </div>
+      
+      <div class="field-group">
+        <label>On-chain pubkey hint</label>
+        <input id="p-onchain-pubkey" type="text" placeholder="Compressed pubkey" autocomplete="off" />
+      </div>
+      
+      <div class="field-group">
+        <label>Ark server</label>
+        <input id="p-ark-server" type="text" placeholder="https://ark.satspath.dev" autocomplete="off" />
+      </div>
+      
+      <div class="field-group">
+        <label>Ark pubkey</label>
+        <input id="p-ark-pubkey" type="text" placeholder="Ark pubkey" autocomplete="off" />
+      </div>
+      
+      <button class="action" id="p-save">Save & Sign Profile</button>
+      <button class="action ghost" id="p-broadcast">Publish to Network (P2P)</button>
+      
+      <div class="card hidden" id="p-msg" style="border-color: var(--border);"></div>
+      <div class="err hidden" id="p-err"></div>
+    </section>
+
+    <footer>
+      <span>No funds moved</span>
+      <span>127.0.0.1</span>
+    </footer>
+  </div>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const show = (el) => { el.classList.remove("hidden"); requestAnimationFrame(() => el.classList.add("show")); };
+  const hide = (el) => { el.classList.add("hidden"); el.classList.remove("show"); };
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+  const fireLasers = (colorClass) => {
+    const container = $("lasers-container");
+    for(let i=0; i<6; i++) {
+      const laser = document.createElement("div");
+      laser.className = `laser ${colorClass}`;
+      laser.style.left = `${Math.random() * 100}%`;
+      laser.style.animation = `fireLaser ${0.3 + Math.random()*0.3}s ease-in-out ${Math.random()*0.2}s`;
+      container.appendChild(laser);
+      setTimeout(() => laser.remove(), 1000);
+    }
+  };
+
+  // Tab switching logic
+  const switchTab = (tabName) => {
+    document.querySelectorAll("nav button").forEach(x => x.classList.toggle("active", x.dataset.tab === tabName));
+    ["send","receive","claim","profile","transparency"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== tabName));
+    if (tabName === "transparency") loadTransparency();
+    if (tabName === "send") loadNotifications();
+  };
+  document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+
+  let transparencyLoaded = false, transparencyEvents = [], transparencyCheckpoints = [], latestCheckpoint = null, treeScale = 1, treePan = 0;
+  const hexBytes = h => new Uint8Array((h.match(/.{2}/g) || []).map(x => parseInt(x, 16)));
+  const bytesHex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2,"0")).join("");
+  const sha256 = async bytes => new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  const hashLeaf = async eventHash => sha256(new Uint8Array([0, ...hexBytes(eventHash)]));
+  const hashNode = async (a,b) => sha256(new Uint8Array([1, ...a, ...b]));
+  const largestPowerBelow = n => { let p=1; while (p*2<n) p*=2; return p; };
+
+  async function verifyProofLocal(proof) {
+    if (!proof || proof.tree_size < 1 || proof.leaf_index >= proof.tree_size) throw new Error("Invalid index or tree size");
+    let hash = hexBytes(proof.leaf_hash), index = Number(proof.leaf_index), last = Number(proof.tree_size)-1;
+    const steps = [];
+    for (const siblingHex of proof.audit_path || []) {
+      const sibling = hexBytes(siblingHex), siblingLeft = index % 2 === 1 || index === last;
+      hash = siblingLeft ? await hashNode(sibling, hash) : await hashNode(hash, sibling);
+      steps.push(`${siblingLeft ? "sibling || current" : "current || sibling"} → ${bytesHex(hash)}`);
+      if (siblingLeft) while (index % 2 === 0 && index !== 0) { index=Math.floor(index/2); last=Math.floor(last/2); }
+      index=Math.floor(index/2); last=Math.floor(last/2);
+    }
+    return { valid: bytesHex(hash) === proof.root_hash && last === 0, computed: bytesHex(hash), steps };
+  }
+
+  async function loadTransparency() {
+    if (transparencyLoaded) return;
+    transparencyLoaded = true;
+    try {
+      const [statusRes, eventsRes, checkpointsRes] = await Promise.all([
+        fetch("/v1/transparency/status"), fetch("/v1/transparency/events?limit=200"), fetch("/v1/transparency/checkpoints?limit=100")
+      ]);
+      const status = await statusRes.json(), eventPage = await eventsRes.json(), checkpointPage = await checkpointsRes.json();
+      if (!statusRes.ok || status.error) throw new Error(status.error || "Transparency status unavailable");
+      transparencyEvents = eventPage.items || [];
+      transparencyCheckpoints = checkpointPage.items || [];
+      latestCheckpoint = transparencyCheckpoints.at(-1) || null;
+      $("t-log-size").textContent = status.log_size.toLocaleString();
+      $("t-root").textContent = status.log_root;
+      $("t-identifiers").textContent = status.registered_identifiers;
+      $("t-rotations").textContent = status.key_rotations;
+      $("t-revocations").textContent = status.revocations;
+      $("t-consistency").textContent = status.consistency_status.toUpperCase();
+      $("t-consistency").className = "status " + (status.consistency_status === "valid" ? "ok" : status.consistency_status === "unanchored" ? "warn" : "critical");
+      $("v-consistency").textContent = status.consistency_status === "valid" ? "VALID" : status.consistency_status.toUpperCase();
+      $("v-consistency").className = "status " + (status.consistency_status === "valid" ? "ok" : "warn");
+      if (latestCheckpoint) {
+        $("v-operator").textContent = latestCheckpoint.operator_rotation ? "KEY CHANGED" : (transparencyCheckpoints.length > 1 ? "VALID" : "TOFU");
+        $("v-operator").className = "status " + (latestCheckpoint.operator_rotation ? "warn" : transparencyCheckpoints.length > 1 ? "ok" : "warn");
+      }
+      renderCheckpoints(checkpointPage.items || []);
+      await renderMerkleTree(transparencyEvents);
+    } catch (e) {
+      transparencyLoaded = false;
+      $("t-alert").textContent = `SECURITY STATUS UNAVAILABLE — ${e.message}`; show($("t-alert"));
+      $("t-consistency").textContent = "FAIL CLOSED"; $("t-consistency").className = "status critical";
+    }
+  }
+
+  function renderCheckpoints(checkpoints) {
+    if (!checkpoints.length) return;
+    $("t-checkpoints").innerHTML = checkpoints.slice().reverse().map((c,i) => `
+      <div class="checkpoint-row">
+        <strong>Checkpoint #${esc(c.log_size)}</strong>
+        <div><div class="hash">${esc(c.log_root)}</div><div class="reason">${new Date(c.created_at*1000).toLocaleString()} · operator ${esc(c.operator_pubkey.slice(0,16))}…</div></div>
+        <span class="status ${i===0?'ok':'warn'}">${c.bitcoin_anchor?.verified ? 'ANCHORED' : 'SIGNED'}</span>
+      </div>`).join("");
+    const latest = checkpoints[checkpoints.length-1];
+    if (latest.bitcoin_anchor) { $("t-anchor").textContent = latest.bitcoin_anchor.verified ? "CONFIRMED" : "UNCONFIRMED"; $("t-anchor").className = "status " + (latest.bitcoin_anchor.verified ? "ok" : "warn"); }
+    if (latest.bitcoin_anchor) { $("v-bitcoin").textContent = latest.bitcoin_anchor.verified ? "VALID" : "UNVERIFIED"; $("v-bitcoin").className = "status " + (latest.bitcoin_anchor.verified ? "ok" : "warn"); }
+  }
+
+  async function buildTree(events) {
+    const leaves = await Promise.all(events.map(async (e,i) => ({hash: bytesHex(await hashLeaf(await eventHash(e))), leaf:i, event:e})));
+    async function branch(nodes) {
+      if (nodes.length === 1) return nodes[0];
+      const split=largestPowerBelow(nodes.length), left=await branch(nodes.slice(0,split)), right=await branch(nodes.slice(split));
+      return {hash:bytesHex(await hashNode(hexBytes(left.hash),hexBytes(right.hash))), left,right};
+    }
+    return leaves.length ? branch(leaves) : null;
+  }
+
+  function canonical(value) {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+    return value;
+  }
+
+  async function eventHash(e) {
+    const encoded = new TextEncoder().encode(JSON.stringify(canonical(e)));
+    return bytesHex(await sha256(new Uint8Array([...new TextEncoder().encode("SatsPathSignedNameEventV1"), ...encoded])));
+  }
+
+  async function renderMerkleTree(events, proofPath=[]) {
+    const svg=$("merkle-canvas"); svg.innerHTML="";
+    if (!events.length) { svg.innerHTML='<text x="500" y="165" text-anchor="middle" fill="#a1a1aa">Empty append-only log</text>'; return; }
+    const root=await buildTree(events), nodes=[], links=[];
+    let leafCounter=0;
+    function layout(n,depth=0) {
+      if (n.leaf != null) { n.x=70+leafCounter++*(860/Math.max(1,events.length-1)); n.y=285; }
+      else { layout(n.left,depth+1); layout(n.right,depth+1); n.x=(n.left.x+n.right.x)/2; n.y=35+depth*58; links.push([n,n.left],[n,n.right]); }
+      nodes.push(n);
+    } layout(root);
+    const proofHashes=new Set(proofPath);
+    const ns="http://www.w3.org/2000/svg", group=document.createElementNS(ns,"g"); group.setAttribute("transform",`translate(${treePan} 0) scale(${treeScale})`); svg.appendChild(group);
+    links.forEach(([a,b])=>{ const line=document.createElementNS(ns,"line"); line.setAttribute("x1",a.x);line.setAttribute("y1",a.y);line.setAttribute("x2",b.x);line.setAttribute("y2",b.y);line.setAttribute("class","tree-link "+(proofHashes.has(b.hash)?"proof":""));group.appendChild(line); });
+    nodes.forEach(n=>{ const c=document.createElementNS(ns,"circle");c.setAttribute("cx",n.x);c.setAttribute("cy",n.y);c.setAttribute("r",n.leaf!=null?9:7);c.setAttribute("class",`tree-node ${n.leaf!=null?'leaf':''} ${proofHashes.has(n.hash)?'proof':''}`);c.setAttribute("role",n.leaf!=null?"button":"img");c.setAttribute("aria-label",`${n.leaf!=null?'Leaf '+n.leaf:'Merkle node'} ${n.hash}`); if(n.leaf!=null){c.setAttribute("tabindex","0");c.addEventListener("click",()=>selectLeaf(n).catch(e=>{$("t-alert").textContent=e.message;show($("t-alert"));}));c.addEventListener("keydown",event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();selectLeaf(n).catch(e=>{$("t-alert").textContent=e.message;show($("t-alert"));});}});}group.appendChild(c); });
+  }
+
+  async function selectLeaf(node) {
+    const hash=await eventHash(node.event), response=await fetch(`/v1/transparency/inclusion/${hash}`), proof=await response.json();
+    if (!response.ok) throw new Error(proof.error || "Proof unavailable");
+    $("t-selected").textContent=`Leaf ${proof.leaf_index} · ${hash}`;
+    if (!latestCheckpoint) throw new Error("Signed checkpoint unavailable");
+    $("t-proof-json").value=JSON.stringify({event_hash:hash,proof,checkpoint:latestCheckpoint},null,2);
+    showHistory(node.event.identifier_hash);
+    await renderMerkleTree(transparencyEvents,[proof.leaf_hash,...proof.audit_path]);
+  }
+
+  function showHistory(identifier) {
+    const events=transparencyEvents.filter(e=>e.identifier_hash===identifier);
+    $("t-history").innerHTML=events.map(e=>`<div class="timeline-item ${esc(e.action)}"><strong>${esc(e.action.replaceAll('_',' '))}</strong><div class="reason">Sequence ${e.sequence} · ${new Date(e.created_at*1000).toLocaleString()}</div><div class="hash">key ${esc(e.identity_pubkey.slice(0,20))}…<br>profile ${esc(e.profile_hash)}</div>${e.action==='rotate_key'?'<span class="status warn">OLD AUTH + NEW ACCEPTANCE</span>':''}${e.removed_method_hashes?.length?`<div><span class="status warn">PAYMENT METHOD REMOVED</span><div class="hash">${e.removed_method_hashes.map(esc).join('<br>')}</div></div>`:''}</div>`).join("") || '<div class="reason">No matching identifier history.</div>';
+  }
+
+  $("t-search-go").addEventListener("click",async()=>{ try { const q=$("t-search").value.trim(); if(!q)return; const byId=transparencyEvents.filter(e=>e.identifier_hash===q); if(byId.length){showHistory(q);$("t-search-result").textContent=`${byId.length} linked event(s) · latest key ${byId.at(-1).identity_pubkey}`;return;} const byEvent=await Promise.all(transparencyEvents.map(async e=>({e,h:await eventHash(e)}))); const found=byEvent.find(x=>x.h===q); $("t-search-result").textContent=found?`${found.e.action} · identifier ${found.e.identifier_hash} · profile ${found.e.profile_hash}`:"No public log match"; if(found)showHistory(found.e.identifier_hash); } catch(e){ $("t-search-result").textContent = e.message; } });
+  $("t-verify-proof").addEventListener("click",async()=>{ try {
+    const bundle=JSON.parse($("t-proof-json").value), result=await verifyProofLocal(bundle.proof);
+    const expectedLeaf=bytesHex(await hashLeaf(bundle.event_hash));
+    if (!result.valid || bundle.proof.root_hash!==bundle.checkpoint.log_root || bundle.proof.tree_size!==bundle.checkpoint.log_size || bundle.proof.leaf_hash!==expectedLeaf) throw new Error("PROFILE NOT INCLUDED — proof/checkpoint/event binding mismatch");
+    const response=await fetch("/v1/transparency/verify/inclusion",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(bundle)}), verified=await response.json();
+    if (!response.ok || !verified.valid) throw new Error(verified.error || "checkpoint signature invalid");
+    $("t-proof-result").textContent="VALID";$("t-proof-result").className="status ok";
+    $("v-inclusion").textContent="VALID";$("v-inclusion").className="status ok";$("v-binding").textContent="VALID";$("v-binding").className="status ok";
+    $("t-proof-steps").innerHTML=result.steps.map((s,i)=>`<div class="proof-step">${i+1}. ${esc(s)}</div>`).join("")+`<div class="proof-step">computed root: ${result.computed}</div><div class="proof-step">signed checkpoint binding: valid</div>`;
+  } catch(e){$("t-proof-result").textContent="INVALID";$("t-proof-result").className="status critical";$("v-inclusion").textContent="INVALID";$("v-inclusion").className="status critical";$("v-binding").textContent="PROFILE NOT INCLUDED";$("v-binding").className="status critical";$("t-proof-steps").textContent=e.message;} });
+  $("t-zoom-in").onclick=()=>{treeScale=Math.min(2.5,treeScale+.2);renderMerkleTree(transparencyEvents)}; $("t-zoom-out").onclick=()=>{treeScale=Math.max(.5,treeScale-.2);renderMerkleTree(transparencyEvents)}; $("t-reset").onclick=()=>{treeScale=1;treePan=0;renderMerkleTree(transparencyEvents)};
+  let dragStart=null; $("merkle-canvas").addEventListener("pointerdown",e=>dragStart=e.clientX); $("merkle-canvas").addEventListener("pointerup",e=>{if(dragStart!=null){treePan+=e.clientX-dragStart;dragStart=null;renderMerkleTree(transparencyEvents)}});
+
+  // SEND
+  $("s-go").addEventListener("click", async () => {
+    const btn = $("s-go"), card = $("s-card"), err = $("s-err");
+    hide(card); hide(err); btn.disabled = true;
+    try {
+      const recipient = $("s-recipient").value.trim();
+      const amount_sats = parseInt($("s-amount").value, 10);
+      if (!recipient || !amount_sats) throw new Error("Enter a recipient and an amount.");
+      
+      const r = await fetch("/v1/send", {
+        method: "POST", headers: {"content-type": "application/json"},
+        body: JSON.stringify({recipient, amount_sats})
+      });
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      
+      if (d.status === "ok") {
+        const railLower = d.rail.toLowerCase();
+        fireLasers(railLower);
+        card.innerHTML = `
+          <div class="routing-map">
+            <div class="route-node active">
+              <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
+              <span>Me</span>
+            </div>
+            <div class="route-line active"></div>
+            <div class="route-node active" style="color: var(--${railLower})">
+              <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-4 6h-4v2h4v2h-4v2h4v2H9V7h6v2z"/></svg>
+              <span>${d.rail}</span>
+            </div>
+            <div class="route-line active"></div>
+            <div class="route-node active">
+              <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
+              <span>Recipient</span>
+            </div>
+          </div>
+          <div class="qr">${d.qr_svg}</div>
+          <div class="rail-badge ${railLower}">${d.rail}</div>
+          <div class="who">→ ${esc(d.recipient)}</div>
+          <div class="reason">${esc(d.reason)}</div>
+          <div class="payload-box">${esc(d.payload)}</div>
+          <p class="reason" style="font-size: 11px; margin-top: 10px;">
+            ✓ Profile signature verified &bull; ${d.identifier_verified ? 'Identity verified' : 'Identity self-asserted'}
+          </p>
+        `;
+      } else if (d.status === "invite") {
+        card.innerHTML = `
+          <div class="rail-badge onchain" style="background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3);">Invite Mode</div>
+          <div class="who">${esc(d.recipient_hint)}</div>
+          <p class="reason" style="margin-top: 8px;">No profile found. An invitation mailto link has been generated so the receiver can claim.</p>
+          <div class="payload-box" style="white-space: pre-wrap; text-align: left;">${esc(d.email.subject)}\n\n${esc(d.email.body)}</div>
+          <a href="${esc(d.email.mailto)}"><button class="action">Send Invite Email</button></a>
+        `;
+      } else if (d.status === "invalid_signature") {
+        throw new Error("Target profile signature is invalid.");
+      } else {
+        throw new Error(d.reason || "No route available.");
+      }
+      show(card);
+    } catch (e) { err.textContent = e.message; show(err); }
+    finally { btn.disabled = false; }
+  });
+
+  // RECEIVE
+  $("r-go").addEventListener("click", async () => {
+    const btn = $("r-go"), card = $("r-card"), err = $("r-err");
+    hide(card); hide(err); btn.disabled = true;
+    try {
+      const railVal = $("r-rail-select").value;
+      const amtVal = $("r-amount").value.trim();
+      
+      const payload = {};
+      if (railVal) payload.rail = railVal;
+      if (amtVal) payload.amount_sats = parseInt(amtVal, 10);
+      
+      const r = await fetch("/v1/receive", {
+        method: "POST", headers: {"content-type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || "Failed to calculate route");
+      
+      const railLower = d.rail.toLowerCase();
+      fireLasers(railLower);
+      
+      $("r-qr").innerHTML = d.qr_svg;
+      $("r-rail").textContent = d.rail;
+      $("r-rail").className = `rail-badge ${railLower}`;
+      $("r-alias").textContent = d.alias;
+      $("r-payload").textContent = d.payload;
+      show(card);
+      $("r-copy").onclick = async () => {
+        await navigator.clipboard.writeText(d.payload);
+        $("r-copy").textContent = "Copied ✓"; setTimeout(() => ($("r-copy").textContent = "Copy Address"), 1400);
+      };
+    } catch (e) { err.textContent = e.message; show(err); }
+    finally { btn.disabled = false; }
+  });
+
+  // MY PROFILE
+  $("p-save").addEventListener("click", async () => {
+    const btn = $("p-save"), msg = $("p-msg"), err = $("p-err");
+    hide(msg); hide(err); btn.disabled = true;
+    try {
+      let alias = $("p-alias").value.trim() || undefined;
+      
+      if (alias) {
+        const cRes = await fetch("/v1/profile/challenge", {
+          method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({ alias })
+        });
+        const cData = await cRes.json();
+        if (cData.error) throw new Error(cData.error);
+        
+        const token = prompt(cData.message + "\n\nEnter verification token for " + alias + ":");
+        if (!token) throw new Error("Verification cancelled.");
+        
+        const vRes = await fetch("/v1/profile/verify", {
+          method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({ alias, token: token.trim() })
+        });
+        const vData = await vRes.json();
+        if (vData.error) throw new Error(vData.error);
+        alias = undefined; // Already updated and verified
+      }
+
+      const payload = {
+        alias,
+        lightning_address: $("p-ln").value.trim() || undefined,
+        onchain_address: $("p-onchain").value.trim() || undefined,
+        onchain_pubkey: $("p-onchain-pubkey").value.trim() || undefined,
+        ark_server: $("p-ark-server").value.trim() || undefined,
+        ark_pubkey: $("p-ark-pubkey").value.trim() || undefined,
+      };
+      
+      if (payload.lightning_address || payload.onchain_address || payload.onchain_pubkey || payload.ark_server || payload.alias) {
+        const r = await fetch("/v1/profile", {
+          method: "PUT", headers: {"content-type": "application/json"}, body: JSON.stringify(payload)
+        });
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        msg.innerHTML = `<span style="color: #34d399">✓ Profile signed & saved!</span><br/><span style="font-size: 11px; color: var(--text-muted)">Valid signature verified. Your profile is active.</span>`;
+      } else {
+        msg.innerHTML = `<span style="color: #34d399">✓ Alias verified & saved.</span>`;
+      }
+      show(msg);
+    } catch (e) { err.textContent = e.message; show(err); }
+    finally { btn.disabled = false; }
+  });
+
+  $("p-broadcast").addEventListener("click", async () => {
+    const btn = $("p-broadcast"), msg = $("p-msg"), err = $("p-err");
+    hide(msg); hide(err); btn.disabled = true;
+    try {
+      const r = await fetch("/v1/broadcast", {method: "POST"});
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      msg.innerHTML = d.broadcasting
+        ? `<span style="color: #60a5fa">Broadcast Active</span><br/><span style="font-size: 11px; color: var(--text-muted)">Profile published over P2P network (${esc(d.status)}).</span>`
+        : `<span style="color: #f87171">Broadcast Failed</span><br/><span style="font-size: 11px; color: var(--text-muted)">P2P is inactive: ${esc(d.status)}.</span>`;
+      show(msg);
+    } catch (e) { err.textContent = e.message; show(err); }
+    finally { btn.disabled = false; }
+  });
+
+  // CLAIM & NOTIFICATIONS
+  const loadNotifications = async () => {
+    try {
+      const box = $("s-notifications");
+      const r = await fetch("/v1/invites/notifications");
+      if (!r.ok) return;
+      const notes = await r.json();
+      const unread = notes.filter(n => !n.read);
+      if (unread.length === 0) {
+        hide(box);
+        return;
+      }
+      box.innerHTML = unread.map(n => `
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+          <div>
+            <span style="color:#34d399; font-weight:700;">[Claimed Invite]</span>
+            <strong>${esc(n.display_hint)}</strong> has claimed their invite for <strong>${n.amount_sats.toLocaleString()} sats</strong>!
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button class="action" style="width:auto; padding:6px 14px; margin:0; font-size:12px;" onclick="fillSend('${esc(n.display_hint)}', ${n.amount_sats}, '${esc(n.notification_id)}')">
+              Send Payment Now
+            </button>
+            <button style="background:none; border:1px solid var(--border); color:var(--text-muted); border-radius:6px; padding:4px 8px; cursor:pointer;" onclick="dismissNotification('${esc(n.notification_id)}')">
+              Dismiss
+            </button>
+          </div>
+        </div>
+      `).join("");
+      show(box);
+    } catch (_) {}
+  };
+
+  window.fillSend = async (recipient, amount, notificationId) => {
+    if (notificationId) {
+      fetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
+    }
+    $("s-recipient").value = recipient;
+    $("s-amount").value = amount;
+    switchTab("send");
+    $("s-go").click();
+  };
+
+  window.dismissNotification = async (notificationId) => {
+    await fetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
+    loadNotifications();
+  };
+
+  const inspectInvite = async (rawInput) => {
+    const input = (rawInput || $("c-invite-id").value).trim();
+    if (!input) return;
+    let inviteId = input;
+    if (input.includes("invite_id=")) {
+      const match = input.match(/[?&]invite_id=([^&#]+)/);
+      if (match) inviteId = decodeURIComponent(match[1]);
+    } else if (input.includes("/")) {
+      inviteId = input.split("/").pop().split("?")[0];
+    }
+    $("c-invite-id").value = inviteId;
+
+    const details = $("c-details"), claimBox = $("c-claim-box"), resCard = $("c-result-card"), err = $("c-err");
+    hide(details); hide(claimBox); hide(resCard); hide(err);
+
+    try {
+      const r = await fetch("/v1/claim?invite_id=" + encodeURIComponent(inviteId));
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+
+      details.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <span class="rail-badge ${d.is_claimable ? 'ark' : 'onchain'}">${esc(d.status)}</span>
+          <span style="font-family:var(--font-mono); font-size:18px; color:var(--lightning); font-weight:700;">
+            ${d.amount_sats.toLocaleString()} sats
+          </span>
+        </div>
+        <div class="who">Recipient: ${esc(d.display_hint)}</div>
+        ${d.memo ? `<div class="reason" style="margin-top:6px;">Memo: ${esc(d.memo)}</div>` : ''}
+        <div style="font-size:12px; color:var(--text-muted); margin-top:10px;">
+          ${d.sender_verified ? '<span style="color:#34d399;">&check; Sender signature verified</span>' : 'Sender signature not attached'}
+          &bull; ${d.is_expired ? '<span style="color:#f87171;">Expired</span>' : 'Expires in ' + Math.max(0, Math.round((d.expires_at - Math.floor(Date.now()/1000))/3600)) + ' hours'}
+        </div>
+      `;
+      show(details);
+
+      if (d.is_claimable) {
+        show(claimBox);
+      } else {
+        resCard.innerHTML = `<div class="reason" style="color:#f87171;">This invite cannot be claimed (status: ${esc(d.status)}).</div>`;
+        show(resCard);
+      }
+    } catch (e) {
+      err.textContent = e.message;
+      show(err);
+    }
+  };
+
+  $("c-inspect-btn").addEventListener("click", () => inspectInvite());
+  $("c-invite-id").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); inspectInvite(); }
+  });
+
+  $("c-claim-go").addEventListener("click", async () => {
+    const btn = $("c-claim-go"), resCard = $("c-result-card"), err = $("c-err");
+    hide(resCard); hide(err); btn.disabled = true;
+    try {
+      const invite_id = $("c-invite-id").value.trim();
+      const alias = $("c-alias").value.trim();
+      const ln = $("c-ln").value.trim();
+      const onchain = $("c-onchain").value.trim();
+      const ark = $("c-ark-server").value.trim();
+
+      if (!invite_id) throw new Error("Invite ID is required.");
+      if (!alias) throw new Error("Please enter your identifier / alias.");
+      if (!ln && !onchain && !ark) throw new Error("Please provide at least one receive method (Lightning, Onchain, or Ark).");
+
+      const body = {
+        invite_id,
+        alias,
+        lightning_address: ln || undefined,
+        onchain_address: onchain || undefined,
+        ark_server: ark || undefined,
+      };
+
+      const r = await fetch("/v1/claim", {
+        method: "POST",
+        headers: {"content-type": "application/json"},
+        body: JSON.stringify(body)
+      });
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+
+      hide($("c-claim-box"));
+      resCard.innerHTML = `
+        <div style="text-align:center; padding:12px;">
+          <div style="font-size:36px; margin-bottom:12px;">&#10004;</div>
+          <h3 style="font-family:var(--font-mono); color:#34d399; margin-bottom:8px;">Invite Successfully Claimed!</h3>
+          <p class="reason" style="margin-bottom:16px;">
+            Your payment profile for <strong>${esc(d.alias)}</strong> is now published in the transparency log.
+          </p>
+          <div class="payload-box" style="font-size:12px; margin-bottom:16px;">
+            Public Key: ${esc(d.profile_pubkey)}
+          </div>
+          <p class="reason" style="font-size:12px;">
+            The sender has been notified and can now complete the payment handoff directly to your receive methods.
+          </p>
+        </div>
+      `;
+      show(resCard);
+    } catch (e) {
+      err.textContent = e.message;
+      show(err);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // URL Query and deep-linking initialization
+  const urlParams = new URLSearchParams(window.location.search);
+  const paramInvite = urlParams.get("invite_id") || urlParams.get("token");
+  if (paramInvite || window.location.pathname === "/claim") {
+    switchTab("claim");
+    if (paramInvite) {
+      $("c-invite-id").value = paramInvite;
+      inspectInvite(paramInvite);
+    }
+  } else {
+    loadNotifications();
+  }
+</script>
+</body>
+</html>

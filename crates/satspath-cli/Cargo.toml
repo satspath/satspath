@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 satspath-core = { path = "../satspath-core" }
 satspath-router = { path = "../satspath-router" }
+satspath-swaps = { path = "../satspath-swaps" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
@@ -18,3 +19,18 @@ clap = { workspace = true }
 tokio = { workspace = true }
 hex = { workspace = true }
 chrono = { workspace = true }
+qrcode = { version = "0.14", default-features = false }
+reqwest = { workspace = true }
+url = { workspace = true }
+urlencoding = "2"
+secp256k1 = { workspace = true }
+tiny_http = "0.12"
+rpassword = "7.5.4"
+pbkdf2 = "0.13.0"
+aes-gcm.workspace = true
+rand.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+bitcoin = { workspace = true }

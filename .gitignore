@@ -5,3 +5,10 @@ target/
 keys.json
 registry.local.json
 Cargo.lock
+node_modules/
+
+# Intermediate WASM build output (use `make build-wasm-wallet` to regenerate)
+wallet/public/satspath-wasm-pkg/
+
+# Wallet dist
+wallet/dist/

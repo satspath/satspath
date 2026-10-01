@@ -1,0 +1,24 @@
+{
+  "description": "SatsPath v2 Conformance Golden Vectors",
+  "version": "2.0",
+  "vectors": {
+    "idna_canonicalization": [
+      {
+        "input": "User@Domain.Com",
+        "expected": "user@domain.com"
+      },
+      {
+        "input": "BJÖRN@EXÄMPLE.COM",
+        "expected": "bj\u00f6rn@xn--exmple-cua.com"
+      }
+    ],
+    "signatures": [
+      {
+        "message": "test_message",
+        "private_key": "0000000000000000000000000000000000000000000000000000000000000001",
+        "expected_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expected_signature": "30440220... (dummy)"
+      }
+    ]
+  }
+}

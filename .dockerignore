@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .dockerignore — SatsPath
+#
+# Keep the Docker build context lean and safe:
+#   - Never copy secrets, keys, or local wallet state.
+#   - Never copy build artifacts (they are produced inside the container).
+#   - Never copy development tooling or editor files.
+#
+# NOTE: bin/ is intentionally NOT excluded — it is the staging directory for
+# the pre-built release binary used by Dockerfile.local (offline builds).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── Build artifacts ──────────────────────────────────────────────────────────
+target/
+ark-bridge/node_modules/
+ark-bridge/dist/
+
+# ── Local SatsPath state (NEVER ship private state into an image) ────────────
+.satspath/
+*.key
+keys.json
+registry.local.json
+
+# ── Secrets and environment ──────────────────────────────────────────────────
+.env
+.env.*
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+id_rsa
+id_ed25519
+*.secret
+
+# ── Version control ──────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+
+# ── CI / GitHub ──────────────────────────────────────────────────────────────
+.github/
+
+# ── Editor and IDE files ─────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Documentation (not needed in the image) ──────────────────────────────────
+docs/
+README.md
+walkthrough.md
+conflicts.txt
+extract_conflicts.py
+
+# ── Temporary files ──────────────────────────────────────────────────────────
+tmp/
+*.tmp
+*.log
+
+# ── Test fixtures that shouldn't be in production images ─────────────────────
+examples/
+test_builder.rs

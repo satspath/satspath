@@ -1,0 +1,817 @@
+=== ./crates/satspath-cli/src/main.rs ===
+<<<<<<< HEAD
+    /// Show routing decision with live mempool fees + scannable QR
+=======
+    /// Show routing decision with live mempool fees
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+    /// Generate an invite for an unregistered alias (no funds sent, no keys generated)
+=======
+    /// Generate an invite for an unregistered alias
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+            ln_address,
+            onchain,
+        } => commands::cmd_register(&alias, ln_address.as_deref(), onchain.as_deref())?,
+=======
+            lightning_address,
+            onchain_address,
+            ark_server,
+            ark_pubkey,
+        } => commands::cmd_register(
+            &alias,
+            lightning_address.as_deref(),
+            onchain_address.as_deref(),
+            ark_server.as_deref(),
+            ark_pubkey.as_deref(),
+        )?,
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+            experimental_swaps,
+            testnet,
+=======
+            mainnet_preview,
+            experimental_swaps,
+            testnet,
+            debug,
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+                experimental_swaps,
+                testnet,
+=======
+                mainnet_preview,
+                experimental_swaps,
+                testnet,
+                debug,
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-cli/src/commands/mod.rs ===
+<<<<<<< HEAD
+    // Add public HTTP resolver fallback
+    chain = chain.push(HttpResolver::new());
+=======
+    chain = chain.push(Bip353Resolver::new());
+
+    // Add public HTTP resolver fallback
+    chain = chain.push(HttpResolver::new());
+    chain = chain.push(NostrResolver);
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-cli/src/commands/pay.rs ===
+<<<<<<< HEAD
+use satspath_core::{crypto::verify_signed_profile, PaymentMethod};
+use satspath_router::{
+    fetch_invoice, fetch_lnurl_metadata, lightning::lightning_address, select_route, RouteRequest,
+    SwapDirective,
+=======
+use satspath_core::{
+    create_invite_record,
+    crypto::verify_signed_profile,
+    pointer::build_qr_payload,
+    privacy::{mask_address, mask_identifier, mask_invoice, mask_pubkey},
+    resolver::ProfileResolver,
+    validation::{
+        assert_no_private_material, validate_amount_sats, validate_bitcoin_address,
+        validate_compressed_pubkey, validate_lightning_address, LARGE_PREVIEW_AMOUNT_SATS,
+    },
+    BitcoinNetwork, PaymentMethod, PaymentPointer, SatsPathError,
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+    println!("done.");
+
+    if let Some(snap) = &quote.fee_snapshot {
+        println!();
+        println!("  Mempool fees (sat/vB)");
+        println!("  ├─ Next block  (~10 min): {} sat/vB", snap.fastest_sat_vb);
+        println!(
+            "  ├─ 30 minutes           : {} sat/vB",
+            snap.half_hour_sat_vb
+        );
+        println!("  └─ 60 minutes           : {} sat/vB", snap.hour_sat_vb);
+=======
+    println!("  Route selected: {}", quote.selected_method.method_name());
+
+    let network = if mainnet_preview {
+        BitcoinNetwork::Mainnet
+    } else if testnet {
+        BitcoinNetwork::Testnet
+    } else {
+        BitcoinNetwork::Mainnet
+    };
+    let pointer = payment_method_to_pointer(&quote.selected_method)?;
+    validate_pointer_for_preview(&pointer, mainnet_preview, network)?;
+    let qr_payload =
+        build_qr_payload(&pointer, amount_sats).map_err(|e| anyhow::anyhow!("{}", e))?;
+    assert_no_private_material(&qr_payload).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if let Some(snap) = &quote.fee_snapshot {
+        println!();
+        println!("Mempool fees (sat/vB)");
+        println!("  Next block (~10 min): {}", snap.fastest_sat_vb);
+        println!("  30 minutes          : {}", snap.half_hour_sat_vb);
+        println!("  60 minutes          : {}", snap.hour_sat_vb);
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+
+    // ── Execute ───────────────────────────────────────────────────────────────
+    if experimental_swaps && testnet {
+        // Engine v0: experimental testnet swap path.
+        exec_experimental(&quote.swap_directive, amount_sats, alias).await?;
+    } else {
+        // Safe default path: LNURL fetch + QR display.
+        exec_safe(&quote.selected_method, amount_sats, memo).await?;
+    }
+
+    Ok(())
+}
+
+// ─── Safe default path ───────────────────────────────────────────────────────
+
+async fn exec_safe(method: &PaymentMethod, amount_sats: u64, memo: Option<&str>) -> Result<()> {
+    match method {
+        PaymentMethod::Lightning { .. } => {
+            safe_lightning(method, amount_sats, memo).await?;
+        }
+        PaymentMethod::Onchain { address, label, .. } => {
+            safe_onchain(address, label, amount_sats);
+        }
+        PaymentMethod::Ark { server, pubkey, .. } => {
+            println!("══════════════════════════════════════════════════");
+            println!("  Ark — {} sats", amount_sats);
+            println!("══════════════════════════════════════════════════");
+            println!("  Server : {}", server);
+            println!("  Pubkey : {}", pubkey);
+            println!();
+            println!("  ⚠  [EXPERIMENTAL] Ark payment endpoint.");
+            println!("     Use --experimental-swaps --testnet to attempt swap execution.");
+        }
+    }
+    Ok(())
+}
+
+async fn safe_lightning(
+    method: &PaymentMethod,
+    amount_sats: u64,
+    memo: Option<&str>,
+) -> Result<()> {
+    let ln_addr = lightning_address(method)
+        .ok_or_else(|| anyhow::anyhow!("no Lightning Address in method"))?;
+
+    println!("══════════════════════════════════════════════════");
+    println!("  Lightning — {} sats → {}", amount_sats, ln_addr);
+    println!("══════════════════════════════════════════════════");
+
+    print!("  Fetching LNURL metadata... ");
+    let meta = fetch_lnurl_metadata(ln_addr).await?;
+=======
+    println!("Public pointer: {}", display_pointer(&pointer, debug));
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+// ─── Experimental Engine v0 ──────────────────────────────────────────────────
+
+async fn exec_experimental(directive: &SwapDirective, amount_sats: u64, alias: &str) -> Result<()> {
+=======
+async fn exec_experimental(
+    directive: &SwapDirective,
+    amount_sats: u64,
+    alias: &str,
+    debug: bool,
+) -> Result<()> {
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+                    "No verified Lightning Address in profile. \
+                     Cannot create swap without a real payment pointer."
+                )
+            })?;
+            println!("  [Direct LN] Target: {}", addr);
+            println!("  Testnet LN node integration pending.");
+            println!("  Run with a real LN node to execute.");
+=======
+                    "No verified Lightning Address in profile. Cannot create testnet intent."
+                )
+            })?;
+            println!(
+                "  [Direct LN] Target: {}",
+                display_value(addr, mask_identifier, debug)
+            );
+            println!("  Testnet LN execution is not automatic in this preview.");
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+            // Must have a real invoice — no fake fallback.
+            let invoice = target_invoice.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Submarine swap requires a real BOLT11 invoice. \
+                     No verified invoice in profile. Cannot proceed."
+                )
+            })?;
+
+            println!("  [Submarine Swap] Ark/L1 → Lightning");
+            println!("  Invoice : {}...", &invoice[..40.min(invoice.len())]);
+=======
+            let invoice = target_invoice.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Submarine swap requires a real BOLT11 invoice. No verified invoice in profile."
+                )
+            })?;
+            println!("  [Submarine Swap] Ark/L1 -> Lightning");
+            println!(
+                "  Invoice : {}",
+                display_value(invoice, mask_invoice, debug)
+            );
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-cli/src/commands/quote.rs ===
+<<<<<<< HEAD
+use satspath_core::resolver::ProfileResolver;
+=======
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+            println!("  Ark payment via {}", server);
+            println!("  Pubkey: {}...", &pubkey[..16.min(pubkey.len())]);
+            println!(
+                "  ⚠  [EXPERIMENTAL] Use --experimental-swaps --testnet to attempt execution."
+            );
+=======
+            println!("  Ark payment via {}", mask_address(server));
+            println!("  Pubkey: {}", mask_pubkey(pubkey));
+            println!("  Use `satspath pay --mainnet-preview` for public pointer preview.");
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-cli/src/commands/register.rs ===
+<<<<<<< HEAD
+    display_hint, PaymentMethod, PaymentProfile,
+=======
+    privacy::{canonical_identifier, mask_identifier, mask_pubkey},
+    validation::{
+        validate_bitcoin_address, validate_compressed_pubkey, validate_lightning_address,
+    },
+    BitcoinNetwork, PaymentMethod, PaymentProfile,
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+    let secret_hex = hex::encode(kp.secret_key.secret_bytes());
+    let domain = alias.split_once('@').map(|x| x.1).unwrap_or("example.com");
+=======
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+        expires_at: None, // Non-expiring by default; set via profile update.
+=======
+        expires_at: None,
+        method_verifications: Vec::new(),
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-cli/src/commands/show.rs ===
+<<<<<<< HEAD
+=======
+                vtxo_pointer,
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-core/src/crypto.rs ===
+<<<<<<< HEAD
+=======
+            method_verifications: Vec::new(),
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+    // ── SEC-01: expiry tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn non_expiring_profile_passes() {
+        let kp = generate_identity_keypair();
+        let mut profile = demo_profile(&hex::encode(kp.public_key.serialize()));
+        profile.expires_at = None; // explicit non-expiring
+        assert!(check_profile_expiry(&profile).is_ok());
+    }
+
+    #[test]
+    fn future_expires_at_passes() {
+        let kp = generate_identity_keypair();
+        let mut profile = demo_profile(&hex::encode(kp.public_key.serialize()));
+        // Set expiry 1 hour in the future
+        profile.expires_at = Some(chrono::Utc::now().timestamp() + 3_600);
+        assert!(check_profile_expiry(&profile).is_ok());
+    }
+
+    #[test]
+    fn past_expires_at_rejected() {
+        let kp = generate_identity_keypair();
+        let mut profile = demo_profile(&hex::encode(kp.public_key.serialize()));
+        // Set expiry 1 hour in the past
+        profile.expires_at = Some(chrono::Utc::now().timestamp() - 3_600);
+        let result = check_profile_expiry(&profile);
+        assert!(result.is_err(), "expired profile must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("expired"), "error message must mention expiry");
+    }
+
+    #[test]
+    fn exact_expiry_timestamp_rejected() {
+        // expires_at == now must be treated as expired (fail-closed at boundary)
+        let kp = generate_identity_keypair();
+        let mut profile = demo_profile(&hex::encode(kp.public_key.serialize()));
+        profile.expires_at = Some(chrono::Utc::now().timestamp());
+        // Allow a tiny race: the check is >= so this should fail closed
+        let result = check_profile_expiry(&profile);
+        // In rare cases the timestamp might tick forward; either way we accept both
+        // outcomes as long as the code is correct — but if it does fail, it must
+        // be due to expiry.
+        if let Err(e) = result {
+            assert!(e.to_string().contains("expired"));
+        }
+=======
+    #[test]
+    fn message_signature_roundtrip() {
+        let kp = generate_identity_keypair();
+        let pubkey_hex = hex::encode(kp.public_key.serialize());
+        let sig = sign_message("hello ownership", &kp.secret_key);
+        assert!(verify_message_signature("hello ownership", &sig, &pubkey_hex).unwrap());
+    }
+
+    #[test]
+    fn message_signature_rejects_wrong_message() {
+        let kp = generate_identity_keypair();
+        let pubkey_hex = hex::encode(kp.public_key.serialize());
+        let sig = sign_message("original", &kp.secret_key);
+        assert!(!verify_message_signature("tampered", &sig, &pubkey_hex).unwrap());
+    }
+
+    #[test]
+    fn message_signature_rejects_wrong_key() {
+        let kp = generate_identity_keypair();
+        let other = generate_identity_keypair();
+        let other_pubkey = hex::encode(other.public_key.serialize());
+        let sig = sign_message("msg", &kp.secret_key);
+        assert!(!verify_message_signature("msg", &sig, &other_pubkey).unwrap());
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-core/src/profile.rs ===
+<<<<<<< HEAD
+    /// Optional Unix timestamp after which this profile should be considered
+    /// expired and must not be used for routing.
+    /// `None` means the profile does not expire (non-expiring).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+=======
+    /// Unix timestamp after which resolvers should treat this profile as stale.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    /// Ownership-proof attestations, one per (proven) method, bound to the
+    /// method's [`PaymentMethod::ownership_descriptor`].
+    ///
+    /// Omitted from the wire when empty, so profiles authored before ownership
+    /// proofs existed serialize — and verify — byte-for-byte identically. The
+    /// identity signature commits to this list, making attestations
+    /// tamper-evident.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub method_verifications: Vec<crate::ownership::MethodVerification>,
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-core/src/registry.rs ===
+<<<<<<< HEAD
+=======
+            method_verifications: Vec::new(),
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-core/src/resolver.rs ===
+<<<<<<< HEAD
+=======
+                    method_verifications: Vec::new(),
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-core/src/resolvers/http.rs ===
+<<<<<<< HEAD
+use crate::crypto::{check_profile_expiry, verify_signed_profile};
+=======
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-router/src/lib.rs ===
+<<<<<<< HEAD
+pub use lightning::{
+    fetch_invoice, fetch_lnurl_metadata, validate_bolt11_invoice, LnurlPayMetadata,
+    ValidatedInvoice,
+};
+pub use router::{
+    select_route, select_route_with_fees, FeeRateSnapshot, RouteQuote, RouteRequest, SwapDirective,
+};
+=======
+pub use lightning::{fetch_invoice, fetch_lnurl_metadata, LnurlPayMetadata};
+pub use router::{
+    select_route, select_route_with_fees, FeeRateSnapshot, RouteQuote, RouteRequest, SwapDirective,
+};
+pub use scoring::{
+    score_routes, FeeSnapshot, PaymentRail, RouteCandidate, RouteDecision, RoutePreferences,
+};
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-router/src/lightning.rs ===
+<<<<<<< HEAD
+/// Step 2: call the callback to get a real BOLT11 invoice.
+///
+/// # LNURL-02 Validation
+/// This function performs full validation of the returned invoice:
+/// 1. Detects LNURL ERROR responses and returns them as a typed failure.
+/// 2. Checks that `pr` is present and non-empty.
+/// 3. Decodes the BOLT11 invoice using `lightning-invoice`.
+/// 4. Verifies that the invoice amount (in msats) matches the requested amount.
+/// 5. Checks that the invoice has not expired.
+=======
+/// Step 2: call the callback to get a real BOLT11 invoice, then verify the amount.
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+
+    let raw_body = client.get(&url).send().await?.text().await?;
+    let resp: LnurlInvoiceResponse = serde_json::from_str(&raw_body)
+        .map_err(|e| anyhow::anyhow!("failed to parse LNURL callback response: {e}"))?;
+
+    // LNURL-02: typed LNURL ERROR response
+    if resp.status.as_deref() == Some("ERROR") {
+        anyhow::bail!(
+            "LNURL server returned error: {}",
+            resp.reason.as_deref().unwrap_or("unknown reason")
+        );
+    }
+
+    let bolt11 = resp
+        .pr
+        .ok_or_else(|| anyhow::anyhow!("LNURL callback returned no invoice (missing 'pr')"))?;
+
+    if bolt11.is_empty() {
+        anyhow::bail!("LNURL callback returned empty invoice");
+    }
+
+    // LNURL-02: decode and validate the BOLT11 invoice
+    validate_bolt11_invoice(&bolt11, amount_msats)?;
+
+    Ok(bolt11)
+}
+
+/// Decode a BOLT11 invoice and validate its amount and expiry.
+///
+/// Returns an error if:
+/// - The invoice is unparseable.
+/// - The invoice amount does not match `expected_msats`.
+/// - The invoice has expired.
+pub fn validate_bolt11_invoice(
+    bolt11: &str,
+    expected_msats: u64,
+) -> anyhow::Result<ValidatedInvoice> {
+    let invoice = Bolt11Invoice::from_str(bolt11)
+        .map_err(|e| anyhow::anyhow!("failed to parse BOLT11 invoice: {e:?}"))?;
+
+    // LNURL-02: verify amount matches
+    let invoice_msats = invoice
+        .amount_milli_satoshis()
+        .ok_or_else(|| anyhow::anyhow!("invoice has no amount set — ambiguous invoice rejected"))?;
+
+    if invoice_msats != expected_msats {
+        anyhow::bail!(
+            "invoice amount mismatch: requested {} msats but invoice contains {} msats",
+            expected_msats,
+            invoice_msats
+        );
+    }
+
+    // LNURL-02: check expiry
+    let is_fresh = !invoice.is_expired();
+    if !is_fresh {
+        anyhow::bail!("invoice has expired and cannot be paid");
+    }
+
+    Ok(ValidatedInvoice {
+        bolt11: bolt11.to_string(),
+        amount_msats: invoice_msats,
+        is_fresh,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── LNURL error response detection ────────────────────────────────────────
+
+    #[test]
+    fn lnurl_error_response_detected() {
+        let raw = r#"{"status":"ERROR","reason":"Service temporarily unavailable"}"#;
+        let resp: LnurlInvoiceResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(resp.status.as_deref(), Some("ERROR"));
+        assert!(resp.pr.is_none());
+    }
+
+    #[test]
+    fn lnurl_success_response_has_pr() {
+        let raw = r#"{"pr":"lnbc1000n1..."}"#;
+        let resp: LnurlInvoiceResponse = serde_json::from_str(raw).unwrap();
+        assert!(resp.status.is_none());
+        assert!(resp.pr.is_some());
+    }
+
+    // ── BOLT11 amount validation ──────────────────────────────────────────────
+
+    /// Use a real mainnet invoice from the test vectors in BOLT11 spec.
+    /// This invoice is for 2,500,000 msats (2500 sats).
+    const BOLT11_2500_SATS: &str =
+        "lnbc25m1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5vdhkven9v5sxyetpdees9qzpzz8txr49kpzaem7e4lh5e0cqsjxvnmrgrmrr7x9qktv4u49v8yezahqvqk8c38n6vdxn3xqzwx3qp5v7rqpxdv";
+
+    /// A real mainnet invoice for 100,000 msats (100 sats), expires 2016-01-08.
+    /// Source: BOLT11 test vectors — this is already expired, which is what we want.
+    const BOLT11_EXPIRED: &str =
+        "lnbc1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaq8rkx3yf5tcsyz3d73gafnh3cax9rn449d9p5uxz9ezhhypd0elx87sjle52x86fux2ypatgddc6k63n7erqz25le42c4u4ecky03ylcqca784w";
+
+    #[test]
+    fn valid_bolt11_invoice_accepted() {
+        // Parse only (do not validate amount/expiry against a specific value here).
+        let result = Bolt11Invoice::from_str(BOLT11_2500_SATS);
+        // Accept either Ok or parse error (the test vector may not match all parsers)
+        // The key test is that the function does not panic.
+        let _ = result;
+    }
+
+    #[test]
+    fn expired_invoice_rejected_by_validate() {
+        // This invoice is already expired (timestamp from 2016).
+        // validate_bolt11_invoice should reject it.
+        let result = validate_bolt11_invoice(BOLT11_EXPIRED, 0);
+        assert!(result.is_err(), "expired invoice must be rejected");
+    }
+
+    #[test]
+    fn garbage_invoice_rejected() {
+        let result = validate_bolt11_invoice("not_a_real_invoice", 1_000);
+        assert!(result.is_err(), "unparseable invoice must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("failed to parse"),
+            "error must mention parse failure: {err}"
+        );
+    }
+
+    #[test]
+    fn amount_mismatch_rejected() {
+        // Real testnet invoice for 1 sat — if we request 2 sats, it must fail.
+        // We can't easily create a fresh non-expired test invoice without a node,
+        // so we test the mismatch detection at the logic level.
+        // The BOLT11_2500_SATS invoice has 2,500,000 msats.
+        // Ask for 1 msat instead — should fail amount check (or parse check first).
+        let result = validate_bolt11_invoice(BOLT11_2500_SATS, 1);
+        // Either amount mismatch or parse error — both are acceptable rejections.
+        if let Err(e) = result {
+            let s = e.to_string();
+            assert!(
+                s.contains("mismatch") || s.contains("parse") || s.contains("expired"),
+                "unexpected error: {s}"
+            );
+        }
+        // If it somehow parsed and matched, that is also fine for this test vector.
+    }
+
+    #[test]
+    fn estimate_lightning_fee_minimum_one_sat() {
+        assert_eq!(estimate_lightning_fee_sats(0), 1);
+        assert_eq!(estimate_lightning_fee_sats(100), 1);
+        assert_eq!(estimate_lightning_fee_sats(10_000), 1);
+        assert_eq!(estimate_lightning_fee_sats(20_000), 2);
+    }
+=======
+    let resp = client
+        .get(&url)
+        .send()
+        .await?
+        .json::<LnurlInvoiceResponse>()
+        .await?;
+    if resp.pr.is_empty() {
+        anyhow::bail!("received empty invoice from LNURL callback");
+    }
+    verify_invoice_amount(&resp.pr, amount_sats)?;
+    Ok(resp.pr)
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-router/src/router.rs ===
+<<<<<<< HEAD
+=======
+            method_verifications: Vec::new(),
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+            lnurl: None,
+            lightning_address: Some("test@example.com".into()),
+            bolt12: None,
+=======
+            lightning_address: Some("test@example.com".into()),
+            lnurl: None,
+            bolt12: None,
+            receiver_pubkey: None,
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+            lnurl: None,
+            lightning_address: Some("test@example.com".into()),
+            bolt12: None,
+=======
+            lightning_address: Some("test@example.com".into()),
+            lnurl: None,
+            bolt12: None,
+            receiver_pubkey: None,
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+                address: "bc1q...".into(),
+                pubkey_hint: None,
+=======
+                network: BitcoinNetwork::Mainnet,
+                address: "bc1q...".into(),
+                pubkey_hint: None,
+                descriptor_hint: None,
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+=======
+                vtxo_pointer: None,
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-swaps/src/ark_bridge.rs ===
+<<<<<<< HEAD
+        resp.result.ok_or_else(|| {
+            SwapError::Key("ARK bridge returned neither result nor error".to_string())
+        })
+=======
+        resp.result
+            .ok_or_else(|| SwapError::Key(format!("ARK bridge returned neither result nor error")))
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-swaps/src/boltz_client.rs ===
+<<<<<<< HEAD
+                .unwrap_or(body);
+=======
+                .unwrap_or_else(|_| body.clone());
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+        serde_json::from_str(&body).map_err(SwapError::Json)
+=======
+        serde_json::from_str(&body).map_err(|e| SwapError::Json(serde_json::Error::from(e)))
+>>>>>>> origin/main
+----------------------------------------
+=== ./crates/satspath-swaps/src/swap_store.rs ===
+<<<<<<< HEAD
+    /// Open the encrypted swap store with the given AES-256 key.
+    ///
+    /// The key must be derived from a user password (e.g. PBKDF2-SHA256).
+    /// Fails closed: returns an error rather than falling back to plaintext.
+=======
+    /// Open the swap store at the default location (`.satspath/swaps.enc`).
+    pub fn open() -> Result<Self> {
+        let path = satspath_dir()?.join("swaps.enc");
+        Ok(Self {
+            path,
+            encryption_key: None,
+        })
+    }
+
+    /// Open the store with an AES-256 encryption key derived from user password.
+    /// The key should be derived via PBKDF2 (same scheme as ARK SDK's StorageCrypto).
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+    /// Open the encrypted swap store at a custom path with the given AES-256 key.
+    ///
+    /// Useful when the caller controls the storage location (e.g. integration
+    /// tests that want to use a temp directory while still testing encryption).
+    pub fn open_with_key_at(path: PathBuf, key: [u8; 32]) -> Self {
+        Self {
+            path,
+            encryption_key: Some(key),
+        }
+    }
+
+    /// Open a plaintext (unencrypted) store at a custom path.
+    ///
+    /// # ⚠ DEVELOPMENT AND TESTING ONLY
+    ///
+    /// This constructor MUST NOT be used in production. It writes raw JSON to
+    /// disk without any encryption. Use `open_with_key` for all user-facing
+    /// flows.
+=======
+    /// Open a plaintext store at a custom path (for tests / dev).
+    /// Sensitive records (preimage_hex, refund_key_hex, claim_key_hex) are still rejected.
+>>>>>>> origin/main
+----------------------------------------
+<<<<<<< HEAD
+    /// SWAPS-02: verify the encrypted store correctly roundtrips data.
+    /// The plaintext constructor is explicitly for dev use only;
+    /// this test exercises the real encrypted path.
+    #[test]
+    fn encrypted_store_roundtrip() {
+        let dir = tempdir().unwrap();
+        let key = [0xABu8; 32];
+        let path = dir.path().join("swaps.enc");
+
+        let store = SwapStore::open_with_key_at(path.clone(), key);
+        store.upsert(&make_record("enc_swap_001")).unwrap();
+
+        // Re-open with same key — data must be readable.
+        let store2 = SwapStore::open_with_key_at(path.clone(), key);
+        let found = store2.get("enc_swap_001").unwrap().unwrap();
+        assert_eq!(found.id, "enc_swap_001");
+
+        // Open with wrong key — must fail, not return garbage.
+        let bad_key = [0x00u8; 32];
+        let store3 = SwapStore::open_with_key_at(path, bad_key);
+        let result = store3.get("enc_swap_001");
+        assert!(result.is_err(), "wrong key must not silently return data");
+    }
+
+    /// SWAPS-02: a plaintext file must not be readable as an encrypted store.
+    /// This guards against accidentally reading a legacy plaintext swaps.enc.
+    #[test]
+    fn encrypted_store_rejects_plaintext_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("swaps.enc");
+
+        // Write plaintext
+        let plain = SwapStore::open_plaintext(path.clone());
+        plain.upsert(&make_record("plain_001")).unwrap();
+
+        // Try to read as encrypted — must fail (not silently succeed)
+        let key = [0x42u8; 32];
+        let enc = SwapStore::open_with_key_at(path, key);
+        let result = enc.get("plain_001");
+        assert!(
+            result.is_err(),
+            "encrypted store must not accept plaintext files"
+        );
+    }
+=======
+    #[test]
+    fn swapstore_refuses_sensitive_plaintext_records() {
+        let dir = tempdir().unwrap();
+        let store = SwapStore::open_plaintext(dir.path().join("swaps.enc"));
+
+        // Non-sensitive record (no keys or preimage) must succeed.
+        let clean = make_record("swap_clean");
+        assert!(
+            store.upsert(&clean).is_ok(),
+            "clean record should store without key"
+        );
+
+        // Record with preimage_hex must be rejected without encryption key.
+        let mut with_preimage = make_record("swap_preimage");
+        with_preimage.preimage_hex = Some("deadbeef".repeat(8));
+        let err = store.upsert(&with_preimage).unwrap_err();
+        assert!(
+            err.to_string().contains("sensitive material"),
+            "expected sensitive-material error, got: {err}"
+        );
+
+        // Record with refund_key_hex must be rejected without encryption key.
+        let mut with_refund = make_record("swap_refund");
+        with_refund.refund_key_hex = Some("cafebabe".repeat(8));
+        assert!(store.upsert(&with_refund).is_err());
+
+        // Record with claim_key_hex must be rejected without encryption key.
+        let mut with_claim = make_record("swap_claim");
+        with_claim.claim_key_hex = Some("aabbccdd".repeat(8));
+        assert!(store.upsert(&with_claim).is_err());
+
+        // Same record with an encryption key must succeed.
+        let key = [0x77u8; 32];
+        let encrypted_store = SwapStore::open_encrypted_at(dir.path().join("swaps_enc.enc"), key);
+        let mut sensitive = make_record("swap_sens");
+        sensitive.preimage_hex = Some("deadbeef".repeat(8));
+        assert!(
+            encrypted_store.upsert(&sensitive).is_ok(),
+            "encrypted store must accept sensitive records"
+        );
+    }
+
+    #[test]
+    fn contains_sensitive_material_detects_fields() {
+        let clean = make_record("x");
+        assert!(!SwapStore::contains_sensitive_material(&clean));
+
+        let mut with_pre = make_record("x");
+        with_pre.preimage_hex = Some("aaa".into());
+        assert!(SwapStore::contains_sensitive_material(&with_pre));
+
+        let mut with_refund = make_record("x");
+        with_refund.refund_key_hex = Some("bbb".into());
+        assert!(SwapStore::contains_sensitive_material(&with_refund));
+
+        let mut with_claim = make_record("x");
+        with_claim.claim_key_hex = Some("ccc".into());
+        assert!(SwapStore::contains_sensitive_material(&with_claim));
+    }
+>>>>>>> origin/main
+----------------------------------------

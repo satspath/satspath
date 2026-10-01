@@ -1,0 +1,187 @@
+use serde::{Deserialize, Serialize};
+use url::form_urlencoded;
+
+use crate::errors::{Result, SatsPathError};
+use crate::profile::ClaimPolicy;
+use crate::validation::{assert_no_private_material, validate_amount_sats};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BitcoinNetwork {
+    Mainnet,
+    Testnet,
+    Regtest,
+}
+
+/// Public payment pointer data only.
+///
+/// This type must never contain seeds, private keys, macaroons, node certs,
+/// wallet signing keys, or API secrets.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PaymentPointer {
+    LightningAddress {
+        address: String,
+        receiver_pubkey: Option<String>,
+    },
+    LnurlPay {
+        callback_url: String,
+        receiver_pubkey: Option<String>,
+    },
+    Bolt11Invoice {
+        invoice: String,
+        amount_sats: Option<u64>,
+    },
+    OnchainAddress {
+        network: BitcoinNetwork,
+        address: String,
+        claim_policy: Option<ClaimPolicy>,
+    },
+    Bolt12Offer {
+        offer: String,
+    },
+    Ark {
+        server: String,
+        receiver_pubkey: String,
+        vtxo_pointer: Option<String>,
+    },
+}
+
+impl PaymentPointer {
+    pub fn rail_name(&self) -> &'static str {
+        match self {
+            PaymentPointer::LightningAddress { .. } => "Lightning Address",
+            PaymentPointer::LnurlPay { .. } => "LNURL Pay",
+            PaymentPointer::Bolt11Invoice { .. } => "BOLT11 Invoice",
+            PaymentPointer::Bolt12Offer { .. } => "BOLT12 Offer",
+            PaymentPointer::OnchainAddress { .. } => "On-chain Bitcoin",
+            PaymentPointer::Ark { .. } => "Ark",
+        }
+    }
+}
+
+pub fn build_qr_payload(pointer: &PaymentPointer, amount_sats: u64) -> Result<String> {
+    validate_amount_sats(amount_sats)?;
+
+    let payload = match pointer {
+        PaymentPointer::LightningAddress { address, .. } => {
+            format!(
+                "lightning:{}?amount={}",
+                address.to_lowercase(),
+                amount_sats
+            )
+        }
+        PaymentPointer::LnurlPay { callback_url, .. } => {
+            let amount_msats = amount_sats
+                .checked_mul(1_000)
+                .ok_or_else(|| SatsPathError::InvalidPaymentPointer("amount overflow".into()))?;
+            let mut url = url::Url::parse(callback_url)
+                .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
+            url.query_pairs_mut()
+                .append_pair("amount", &amount_msats.to_string());
+            url.to_string()
+        }
+        PaymentPointer::Bolt11Invoice {
+            invoice: _,
+            amount_sats: Some(invoice_amount),
+        } if *invoice_amount != amount_sats => {
+            return Err(SatsPathError::InvalidPaymentPointer(format!(
+                "BOLT11 amount mismatch: invoice={invoice_amount} sats request={amount_sats} sats"
+            )));
+        }
+        PaymentPointer::Bolt11Invoice { invoice, .. } => invoice.clone(),
+        PaymentPointer::Bolt12Offer { offer } => offer.clone(),
+        PaymentPointer::OnchainAddress { address, .. } => {
+            let btc = sats_to_btc(amount_sats);
+            format!("bitcoin:{address}?amount={btc}")
+        }
+        PaymentPointer::Ark {
+            server,
+            receiver_pubkey,
+            vtxo_pointer,
+        } => {
+            let mut encoded = form_urlencoded::Serializer::new(String::new());
+            encoded.append_pair("server", server);
+            encoded.append_pair("pubkey", receiver_pubkey);
+            encoded.append_pair("amount", &amount_sats.to_string());
+            if let Some(vtxo) = vtxo_pointer {
+                encoded.append_pair("vtxo", vtxo);
+            }
+            format!("satspath:ark?{}", encoded.finish())
+        }
+    };
+
+    assert_no_private_material(&payload)?;
+    Ok(payload)
+}
+
+fn sats_to_btc(amount_sats: u64) -> String {
+    let whole = amount_sats / 100_000_000;
+    let frac = amount_sats % 100_000_000;
+    let mut value = format!("{whole}.{frac:08}");
+    while value.ends_with('0') {
+        value.pop();
+    }
+    if value.ends_with('.') {
+        value.push('0');
+    }
+    value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qr_payload_for_bolt11_returns_invoice() {
+        let invoice = "lnbc210n1pexampleinvoice".to_string();
+        let pointer = PaymentPointer::Bolt11Invoice {
+            invoice: invoice.clone(),
+            amount_sats: Some(21_000),
+        };
+        assert_eq!(build_qr_payload(&pointer, 21_000).unwrap(), invoice);
+    }
+
+    #[test]
+    fn qr_payload_for_onchain_returns_bip21_uri() {
+        let pointer = PaymentPointer::OnchainAddress {
+            network: BitcoinNetwork::Mainnet,
+            address: "1BoatSLRHtKNngkdXEeobR76b53LETtpyT".into(),
+            claim_policy: None,
+        };
+        assert_eq!(
+            build_qr_payload(&pointer, 21_000).unwrap(),
+            "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00021"
+        );
+    }
+
+    #[test]
+    fn qr_payload_for_ark_returns_satspath_ark_uri() {
+        let pointer = PaymentPointer::Ark {
+            server: "https://ark.example.com".into(),
+            receiver_pubkey: "02c0ded4d352532ee6d5d3fb69c7f08988c0a2b9f68a10fa79b2e769c123456789"
+                .into(),
+            vtxo_pointer: None,
+        };
+        let payload = build_qr_payload(&pointer, 42).unwrap();
+        assert!(payload.starts_with("satspath:ark?"));
+        assert!(payload.contains("server=https%3A%2F%2Fark.example.com"));
+        assert!(payload.contains("amount=42"));
+    }
+
+    #[test]
+    fn qr_payload_rejects_private_material() {
+        let pointer = PaymentPointer::Bolt11Invoice {
+            invoice: "lnbc1contains_xprv_secret".into(),
+            amount_sats: Some(1),
+        };
+        assert!(build_qr_payload(&pointer, 1).is_err());
+    }
+
+    #[test]
+    fn bolt11_amount_mismatch_fails() {
+        let pointer = PaymentPointer::Bolt11Invoice {
+            invoice: "lnbc210n1pexampleinvoice".into(),
+            amount_sats: Some(21_000),
+        };
+        assert!(build_qr_payload(&pointer, 1_000).is_err());
+    }
+}

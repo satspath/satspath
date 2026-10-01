@@ -4,12 +4,38 @@ version = "0.1.0"
 edition = "2021"
 description = "Payment route selection engine for SatsPath"
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = ["std"]
+std = ["reqwest", "tokio"]
+wasm = ["satspath-core/wasm", "getrandom/js", "web-sys/Request", "web-sys/Response", "web-sys/Headers", "web-sys/Window", "web-sys/RequestInit", "web-sys/RequestMode"]
+
 [dependencies]
 satspath-core = { path = "../satspath-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-reqwest = { workspace = true }
-tokio = { workspace = true }
+reqwest = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 hex = { workspace = true }
+urlencoding = "2"
+lightning-invoice = { workspace = true }
+secp256k1 = { workspace = true, features = ["global-context"] }
+chrono = { workspace = true }
+bitcoin = { workspace = true }
+bech32 = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+
+# WASM-only dependencies
+getrandom = { version = "0.2", features = ["js"], optional = true }
+web-sys = { version = "0.3", features = ["Request", "Response", "Headers", "Window", "RequestInit", "RequestMode"], optional = true }
+
+[dev-dependencies]
+mockito = "1"
+secp256k1 = { workspace = true }
+bitcoin = { workspace = true }
+async-trait = "0.1"

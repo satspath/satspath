@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="referrer" content="no-referrer" />
+<title>SatsPath · Receive</title>
+<style>
+  :root {
+    --ink: #0a0a0a;
+    --paper: #ffffff;
+    --hair: #e6e6e6;
+    --muted: #8a8a8a;
+    --serif: "Hoefler Text", "Iowan Old Style", "Palatino Linotype", Palatino,
+      "Times New Roman", Georgia, serif;
+    --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    -webkit-font-smoothing: antialiased;
+    display: grid;
+    place-items: center;
+    min-height: 100vh;
+  }
+  main {
+    width: 100%;
+    max-width: 420px;
+    padding: 48px 28px;
+    text-align: center;
+  }
+  .brand {
+    font-size: 13px;
+    letter-spacing: 0.42em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 18px;
+  }
+  h1 {
+    font-weight: 500;
+    font-size: 44px;
+    letter-spacing: 0.01em;
+    margin: 0 0 6px;
+  }
+  .tagline {
+    font-style: italic;
+    color: var(--muted);
+    font-size: 16px;
+    margin: 0 0 44px;
+  }
+  button#receive {
+    appearance: none;
+    cursor: pointer;
+    font-family: var(--serif);
+    font-size: 17px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--paper);
+    background: var(--ink);
+    border: 1px solid var(--ink);
+    border-radius: 0;
+    padding: 18px 46px;
+    transition: background 0.18s ease, color 0.18s ease, transform 0.05s ease;
+  }
+  button#receive:hover { background: var(--paper); color: var(--ink); }
+  button#receive:active { transform: translateY(1px); }
+  button#receive:disabled { opacity: 0.4; cursor: progress; }
+
+  .card {
+    margin-top: 40px;
+    border: 1px solid var(--ink);
+    padding: 26px 24px 22px;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+  }
+  .card.show { opacity: 1; transform: none; }
+  .qr {
+    width: 232px;
+    height: 232px;
+    margin: 0 auto 18px;
+  }
+  .qr svg { width: 100%; height: 100%; display: block; }
+  .rail {
+    font-size: 12px;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .alias { font-size: 18px; margin: 6px 0 16px; }
+  .payload {
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.6;
+    color: #333;
+    word-break: break-all;
+    border-top: 1px solid var(--hair);
+    padding-top: 14px;
+    margin: 0 0 10px;
+  }
+  .copy {
+    appearance: none;
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    background: none;
+    border: 1px solid var(--hair);
+    color: var(--muted);
+    padding: 7px 14px;
+  }
+  .copy:hover { border-color: var(--ink); color: var(--ink); }
+  .err { color: var(--ink); font-style: italic; margin-top: 28px; }
+  footer {
+    margin-top: 40px;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">SatsPath</div>
+  <h1>Receive</h1>
+  <p class="tagline">Your route, your QR. Private and local.</p>
+
+  <button id="receive">Receive</button>
+
+  <div class="card" id="card" hidden>
+    <div class="qr" id="qr"></div>
+    <div class="rail" id="rail"></div>
+    <div class="alias" id="alias"></div>
+    <p class="payload" id="payload"></p>
+    <button class="copy" id="copy">Copy</button>
+  </div>
+
+  <div class="err" id="err" hidden></div>
+
+  <footer>No funds moved · No signing · No broadcast · 127.0.0.1</footer>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const btn = $("receive");
+
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    $("err").hidden = true;
+    try {
+      const r = await fetch("/api/receive");
+      const data = await r.json();
+      if (!r.ok || data.error) throw new Error(data.error || "failed to calculate route");
+      $("qr").innerHTML = data.qr_svg;
+      $("rail").textContent = data.rail;
+      $("alias").textContent = data.alias;
+      $("payload").textContent = data.payload;
+      const card = $("card");
+      card.hidden = false;
+      requestAnimationFrame(() => card.classList.add("show"));
+      $("copy").onclick = async () => {
+        await navigator.clipboard.writeText(data.payload);
+        $("copy").textContent = "Copied";
+        setTimeout(() => ($("copy").textContent = "Copy"), 1400);
+      };
+    } catch (e) {
+      const err = $("err");
+      err.textContent = e.message;
+      err.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

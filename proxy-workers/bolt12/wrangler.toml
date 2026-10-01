@@ -1,0 +1,7 @@
+name = "satspath-bolt12-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-02-22"
+
+# [vars]
+# LIGHTNING_NODE_URL = "http://your-node:port"
+# LIGHTNING_NODE_MACAROON = "hex..."

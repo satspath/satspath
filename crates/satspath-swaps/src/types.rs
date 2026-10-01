@@ -1,0 +1,342 @@
+use serde::{Deserialize, Serialize};
+
+// ─── Swap Classification ──────────────────────────────────────────────────────
+
+/// The three canonical swap types supported by Boltz Exchange v2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwapKind {
+    /// On-chain (or Ark VTXO) → Lightning invoice payment.
+    /// The sender locks BTC on-chain; Boltz pays the Lightning invoice.
+    Submarine,
+
+    /// Lightning invoice → On-chain BTC delivery.
+    /// The sender pays a hold invoice; Boltz locks BTC on-chain for claiming.
+    Reverse,
+
+    /// On-chain → On-chain across layers (e.g. Ark VTXO → L1 UTXO).
+    /// Uses cooperative Taproot key-path spend for privacy.
+    Chain,
+}
+
+// ─── Swap Lifecycle State Machine ────────────────────────────────────────────
+
+/// All possible status strings emitted by Boltz WebSocket or REST queries.
+/// The state machine is:
+///
+/// **Submarine:**
+/// `created` → `transaction.mempool` → `transaction.confirmed`
+///   → `invoice.paid` ✅  |  `invoice.failedToPay` → REFUND
+///
+/// **Reverse:**
+/// `created` → `transaction.mempool` → `transaction.confirmed`
+///   → `invoice.settled` ✅  |  `transaction.lockupFailed` → ABORT
+///
+/// **Chain:**
+/// `created` → `transaction.mempool` → `transaction.confirmed`
+///   → `transaction.claimed` ✅  |  `transaction.lockupFailed` → RENEGOTIATE or REFUND
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SwapStatus {
+    /// Swap registered with Boltz, awaiting deposit.
+    Created,
+    /// User's lockup tx seen in mempool (unconfirmed).
+    #[serde(rename = "transaction.mempool")]
+    TransactionMempool,
+    /// Lockup tx confirmed on-chain.
+    #[serde(rename = "transaction.confirmed")]
+    TransactionConfirmed,
+    /// (Submarine) Boltz successfully paid the Lightning invoice. ✅
+    #[serde(rename = "invoice.paid")]
+    InvoicePaid,
+    /// (Reverse) Boltz settled the hold invoice after claim. ✅
+    #[serde(rename = "invoice.settled")]
+    InvoiceSettled,
+    /// (Chain) Client successfully claimed the on-chain output. ✅
+    #[serde(rename = "transaction.claimed")]
+    TransactionClaimed,
+    /// Boltz could not route the Lightning payment. Client must refund.
+    #[serde(rename = "invoice.failedToPay")]
+    InvoiceFailedToPay,
+    /// Amount deposited on-chain did not match expected. Renegotiate or refund.
+    #[serde(rename = "transaction.lockupFailed")]
+    TransactionLockupFailed,
+    /// Client reclaimed funds after failed swap. Terminal state.
+    #[serde(rename = "transaction.refunded")]
+    TransactionRefunded,
+    /// Unknown status from Boltz (future-proofing).
+    #[serde(other)]
+    Unknown,
+}
+
+impl SwapStatus {
+    /// Returns true if the swap reached a successful terminal state.
+    pub fn is_success(&self) -> bool {
+        matches!(
+            self,
+            SwapStatus::InvoicePaid | SwapStatus::InvoiceSettled | SwapStatus::TransactionClaimed
+        )
+    }
+
+    /// Returns true if the swap is in a recoverable/refundable terminal state.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            SwapStatus::InvoicePaid
+                | SwapStatus::InvoiceSettled
+                | SwapStatus::TransactionClaimed
+                | SwapStatus::InvoiceFailedToPay
+                | SwapStatus::TransactionRefunded
+        )
+    }
+
+    /// Returns true if the swap is still in-flight (not yet terminal).
+    pub fn is_pending(&self) -> bool {
+        !self.is_terminal()
+    }
+
+    /// Returns a human-readable label for display.
+    pub fn label(&self) -> &'static str {
+        match self {
+            SwapStatus::Created => "waiting for deposit",
+            SwapStatus::TransactionMempool => "deposit seen in mempool",
+            SwapStatus::TransactionConfirmed => "deposit confirmed",
+            SwapStatus::InvoicePaid => "✅ invoice paid",
+            SwapStatus::InvoiceSettled => "✅ invoice settled",
+            SwapStatus::TransactionClaimed => "✅ claimed on-chain",
+            SwapStatus::InvoiceFailedToPay => "⚠️  invoice routing failed",
+            SwapStatus::TransactionLockupFailed => "⚠️  lockup mismatch",
+            SwapStatus::TransactionRefunded => "↩  refunded",
+            SwapStatus::Unknown => "unknown",
+        }
+    }
+}
+
+// ─── Swap Record ─────────────────────────────────────────────────────────────
+
+/// A persisted record of an in-progress or completed swap.
+/// Stored encrypted in `.satspath/swaps.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwapRecord {
+    /// Boltz-assigned swap ID.
+    pub id: String,
+
+    /// Swap type (submarine | reverse | chain).
+    pub kind: SwapKind,
+
+    /// Current lifecycle status.
+    pub status: SwapStatus,
+
+    /// Amount the user intends to send/receive in satoshis.
+    pub amount_sats: u64,
+
+    /// For Reverse swaps: the 32-byte preimage (hex) generated by the client.
+    /// This is the secret that allows claiming on-chain funds.
+    /// MUST be stored securely — losing it means losing the swap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preimage_hex: Option<String>,
+
+    /// SHA-256 hash of the preimage (hex). Shared with Boltz.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preimage_hash_hex: Option<String>,
+
+    /// Client's ephemeral refund key (hex-encoded WIF/secret scalar).
+    /// Used to reclaim funds if the swap fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refund_key_hex: Option<String>,
+
+    /// Client's ephemeral claim key (hex-encoded secret scalar).
+    /// Used to claim on-chain funds in Reverse/Chain swaps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_key_hex: Option<String>,
+
+    /// The Lightning invoice to pay (Submarine) or that was generated (Reverse).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invoice: Option<String>,
+
+    /// The on-chain lockup address where the sender must deposit (Submarine/Chain).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lockup_address: Option<String>,
+
+    /// The exact amount expected at the lockup address (may differ from amount_sats due to fees).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_amount_sats: Option<u64>,
+
+    /// CLTV block height timeout. After this, refund is possible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_block_height: Option<u32>,
+
+    /// Boltz's claim public key (for constructing the HTLC).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boltz_claim_pubkey: Option<String>,
+
+    /// Redeem script (legacy HTLC) or Taproot internal key (Taproot swaps).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redeem_script: Option<String>,
+
+    /// TXID of the lockup transaction once seen on-chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lockup_txid: Option<String>,
+
+    /// TXID of the claim or refund transaction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settlement_txid: Option<String>,
+
+    /// Destination address (on-chain target for Reverse/Chain swaps).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_address: Option<String>,
+
+    /// Unix timestamp when the swap was created.
+    pub created_at: i64,
+
+    /// Unix timestamp of the last status update.
+    pub updated_at: i64,
+}
+
+impl SwapRecord {
+    /// Returns true if this swap can still be recovered (refunded or claimed).
+    pub fn is_recoverable(&self) -> bool {
+        matches!(
+            self.status,
+            SwapStatus::InvoiceFailedToPay | SwapStatus::TransactionLockupFailed
+        )
+    }
+}
+
+// ─── Economic Parameters ─────────────────────────────────────────────────────
+
+/// Boltz fee structure for a specific asset pair.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairFees {
+    /// Service fee as a percentage of the swap amount (e.g. 0.1 = 0.1%).
+    pub percentage: f64,
+    /// Estimated miner fees in satoshis for claim and refund transactions.
+    pub miner_fees: MinerFees,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MinerFees {
+    /// Estimated fee in sats for the claim transaction.
+    pub claim: u64,
+    /// Estimated fee in sats for the refund transaction.
+    pub refund: u64,
+}
+
+/// Boltz limits (min/max) for a specific asset pair.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairLimits {
+    /// Minimum swap amount in satoshis.
+    pub minimal: u64,
+    /// Maximum swap amount in satoshis.
+    pub maximal: u64,
+}
+
+/// Combined quote: what a swap of `amount_sats` will cost.
+#[derive(Debug, Clone)]
+pub struct SwapQuote {
+    pub amount_sats: u64,
+    pub service_fee_sats: u64,
+    pub miner_fee_sats: u64,
+    pub total_cost_sats: u64,
+    pub net_receive_sats: u64,
+    pub limits: PairLimits,
+}
+
+impl SwapQuote {
+    pub fn calculate(amount_sats: u64, fees: &PairFees, limits: &PairLimits) -> Self {
+        let service_fee = (amount_sats as f64 * fees.percentage / 100.0).ceil() as u64;
+        let miner_fee = fees.miner_fees.claim + fees.miner_fees.refund;
+        let total = service_fee + miner_fee;
+        let net = amount_sats.saturating_sub(total);
+        SwapQuote {
+            amount_sats,
+            service_fee_sats: service_fee,
+            miner_fee_sats: miner_fee,
+            total_cost_sats: total,
+            net_receive_sats: net,
+            limits: limits.clone(),
+        }
+    }
+}
+
+// ─── Swap Result ─────────────────────────────────────────────────────────────
+
+/// The outcome of a completed swap operation.
+#[derive(Debug, Clone)]
+pub struct SwapResult {
+    pub swap_id: String,
+    pub kind: SwapKind,
+    pub status: SwapStatus,
+    /// TXID of the settlement transaction (claim or refund).
+    pub settlement_txid: Option<String>,
+    /// Preimage revealed (for Reverse swaps — proves payment receipt).
+    pub preimage_hex: Option<String>,
+}
+
+impl SwapResult {
+    pub fn is_success(&self) -> bool {
+        self.status.is_success()
+    }
+}
+
+// ─── Dust Threshold ──────────────────────────────────────────────────────────
+
+/// Calculates the economic dust threshold given a fee rate.
+///
+/// An output is "dust" if the fee to spend it exceeds its value.
+/// Formula: fee_rate * (typical_input_weight_vbytes)
+/// Typical P2WPKH input: ~68 vbytes
+/// Typical P2TR input: ~57.5 vbytes (we use 68 as conservative estimate)
+pub fn dust_threshold_sats(fee_rate_sat_per_vb: u64) -> u64 {
+    const TYPICAL_INPUT_VBYTES: u64 = 68;
+    fee_rate_sat_per_vb * TYPICAL_INPUT_VBYTES
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dust_threshold_at_10_sat_vb() {
+        // 10 sat/vB × 68 vbytes = 680 sats
+        assert_eq!(dust_threshold_sats(10), 680);
+    }
+
+    #[test]
+    fn dust_threshold_at_500_sat_vb() {
+        // 500 × 68 = 34_000 sats ≈ $34 @ BTC=$100k
+        assert_eq!(dust_threshold_sats(500), 34_000);
+    }
+
+    #[test]
+    fn swap_status_terminal() {
+        assert!(SwapStatus::InvoicePaid.is_terminal());
+        assert!(SwapStatus::TransactionClaimed.is_terminal());
+        assert!(!SwapStatus::TransactionMempool.is_terminal());
+        assert!(!SwapStatus::Created.is_terminal());
+    }
+
+    #[test]
+    fn swap_quote_calculation() {
+        let fees = PairFees {
+            percentage: 0.1,
+            miner_fees: MinerFees {
+                claim: 500,
+                refund: 500,
+            },
+        };
+        let limits = PairLimits {
+            minimal: 1_000,
+            maximal: 10_000_000,
+        };
+        let quote = SwapQuote::calculate(100_000, &fees, &limits);
+
+        // Service fee: 100_000 * 0.1% = 100 sats
+        assert_eq!(quote.service_fee_sats, 100);
+        // Miner: 500 + 500 = 1000
+        assert_eq!(quote.miner_fee_sats, 1_000);
+        // Net: 100_000 - 1_100 = 98_900
+        assert_eq!(quote.net_receive_sats, 98_900);
+    }
+}

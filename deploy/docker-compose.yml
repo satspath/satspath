@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  satspathd:
+    image: satspath/satspathd:0.1.0
+    container_name: satspath-authority
+    restart: always
+    ports:
+      - "9737:9737" # Public API port
+    volumes:
+      - satspath-data:/data
+    environment:
+      - RUST_LOG=info
+      # Sovereign Authority settings
+      - SATSPATH_NETWORK=${SATSPATH_NETWORK:-mainnet}
+      - SATSPATH_AUTHORITY_DOMAIN=${SATSPATH_AUTHORITY_DOMAIN:?SATSPATH_AUTHORITY_DOMAIN must be set}
+      - SATSPATH_WITNESS_QUORUM=${SATSPATH_WITNESS_QUORUM:-3}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9737/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  satspath-data:
+    name: satspath_data

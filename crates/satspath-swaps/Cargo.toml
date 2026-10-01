@@ -1,0 +1,31 @@
+[package]
+name = "satspath-swaps"
+version = "0.1.0"
+edition = "2021"
+description = "Boltz Exchange swap engine for satspath: Lightning <-> On-chain <-> Ark"
+
+[dependencies]
+satspath-core = { path = "../satspath-core" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+secp256k1 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+aes-gcm = { workspace = true }
+bitcoin = { workspace = true }
+base64 = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"

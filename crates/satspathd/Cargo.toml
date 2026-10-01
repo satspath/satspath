@@ -1,0 +1,31 @@
+[package]
+name = "satspathd"
+version = "0.1.0"
+edition = "2021"
+description = "Local SatsPath receiver-profile daemon"
+
+[[bin]]
+name = "satspathd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = "0.1"
+chrono = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+qrcode = { version = "0.14", default-features = false }
+satspath-core = { path = "../satspath-core" }
+satspath-router = { path = "../satspath-router" }
+secp256k1 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2.workspace = true
+tiny_http = { version = "0.12", features = ["ssl-rustls"] }
+tokio = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+reqwest = { workspace = true }
+rcgen = "0.13"
