@@ -8,6 +8,7 @@ mod auth;
 mod config;
 mod handlers;
 mod http;
+mod p2p;
 mod rate_limit;
 mod router;
 mod server;
@@ -142,6 +143,7 @@ async fn main() -> Result<()> {
     let rate_limiter = Arc::new(rate_limit::RateLimiter::new(rate_limiter_config));
 
     let state = AppState {
+        p2p: p2p::Bridge::new(cli.p2p),
         home,
         bind,
         network,
@@ -159,7 +161,16 @@ async fn main() -> Result<()> {
     };
 
     print_startup_status(&state)?;
-    serve(state, tls_config).await
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let bridge = cli
+        .p2p
+        .then(|| tokio::spawn(p2p::supervise(state.clone(), stop_rx)));
+    let result = serve(state, tls_config).await;
+    let _ = stop_tx.send(());
+    if let Some(task) = bridge {
+        task.await?;
+    }
+    result
 }
 
 #[cfg(test)]
@@ -189,6 +200,7 @@ mod tests {
 
     fn test_state(home: &Path) -> AppState {
         AppState {
+            p2p: crate::p2p::Bridge::new(false),
             home: home.to_owned(),
             bind: "127.0.0.1:0".parse().unwrap(),
             network: "devnet".into(),
@@ -211,6 +223,50 @@ mod tests {
         assert!(!raw.contains("xprv"));
         assert!(!raw.contains("mnemonic"));
         assert!(!raw.contains("secret_key"));
+    }
+
+    #[tokio::test]
+    async fn p2p_lifecycle_and_control_preserve_separate_trust_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        load_or_create_identity(&state.home).unwrap();
+        assert_eq!(state.p2p.status.lock().await.state, "disabled");
+        assert!(crate::p2p::resolve_candidate(&state, "alice@example.com")
+            .await
+            .is_err());
+        state.p2p = crate::p2p::Bridge::new(true);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(crate::p2p::supervise(state.clone(), rx));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(state.p2p.status.lock().await.announcements, 0);
+        let summary = crate::p2p::local_summary(&state).unwrap();
+        assert!(!summary.to_string().contains("signed_profile"));
+        assert!(!summary.to_string().contains("payment_method_states"));
+        assert_eq!(summary["active_aliases"], 0);
+        tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.p2p.status.lock().await.state, "stopped");
+    }
+
+    #[test]
+    fn control_does_not_promote_a_signed_domain_claim_to_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let mut wallet = load_or_create_identity(&state.home).unwrap();
+        wallet.alias = Some("truja@binance.com".into());
+        wallet.lightning_address = Some("alice@example.com".into());
+        sign_and_store(&state.home, &mut wallet, &state.network).unwrap();
+        save_wallet(&state.home, &wallet).unwrap();
+        let summary = crate::p2p::local_summary(&state).unwrap();
+        assert_eq!(summary["verification"]["profile_signature_verified"], true);
+        assert_eq!(summary["verification"]["identifier_verified"], false);
+        assert_eq!(summary["identifier_authority"], "unverified");
+        assert_eq!(summary["verification"]["payment_methods_verified"], false);
+        assert!(!summary.to_string().contains("binance.com"));
+        assert!(!summary.to_string().contains("alice@example.com"));
     }
 
     #[tokio::test]
@@ -396,6 +452,7 @@ mod tests {
         };
         let addr = server.server_addr().to_ip().unwrap();
         let state = Arc::new(AppState {
+            p2p: crate::p2p::Bridge::new(false),
             home,
             bind: addr,
             network: "devnet".into(),

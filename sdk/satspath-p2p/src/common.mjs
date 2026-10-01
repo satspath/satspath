@@ -8,7 +8,8 @@ export const PEER_TIMEOUT_MS = 10_000;
 // Mirrors satspath-core/src/privacy.rs: trim and ASCII lowercase.
 export function canonicalAlias(alias) {
   if (typeof alias !== 'string') throw new Error('Alias must be a string');
-  const trimmed = alias.trim();
+  // Rust str::trim uses Unicode White_Space, unlike JS trim (which strips BOM).
+  const trimmed = alias.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
   if (!trimmed || /[^\x00-\x7f]/.test(trimmed)) throw new Error('Alias must be nonempty ASCII');
   return trimmed.replace(/[A-Z]/g, c => c.toLowerCase());
 }
@@ -79,18 +80,22 @@ export function readBounded(stream, maxBytes, timeoutMs = PEER_TIMEOUT_MS) {
   });
 }
 
-export function serveProfile(stream, bytes) {
+export function serveProfile(stream, bytes, log = console.log, logError = console.error, shouldServe = () => true) {
   let request = Buffer.alloc(0);
+  let served = false;
   const timer = setTimeout(() => stream.destroy(), PEER_TIMEOUT_MS);
-  stream.on('error', () => console.error('Peer stream failed'));
+  stream.on('error', () => logError('Peer stream failed'));
   stream.once('close', () => clearTimeout(timer));
   stream.on('data', chunk => {
+    if (served) { stream.destroy(); return; }
     if (request.length + chunk.length > GET_PROFILE.length) { stream.destroy(); return; }
     request = Buffer.concat([request, chunk]);
     if (!GET_PROFILE.subarray(0, request.length).equals(request)) { stream.destroy(); return; }
     if (request.length === GET_PROFILE.length) {
+      if (!shouldServe()) { stream.destroy(); return; }
+      served = true;
       stream.end(bytes);
-      console.log('Public profile sent');
+      log('Public profile sent');
     }
   });
 }

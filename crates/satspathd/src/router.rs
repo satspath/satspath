@@ -169,6 +169,29 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
             }
         }
         (Method::Get, "/v1/node") => json_result(StatusCode(200), node_response(state)),
+        (Method::Get, "/v1/control") => match crate::p2p::local_summary(state) {
+            Ok(identity) => json_response(
+                StatusCode(200),
+                &serde_json::json!({
+                    "identity": identity, "hyperswarm": state.p2p.status.lock().await.clone(),
+                    "http": "active", "nostr": "on_demand_resolver", "experimental": true
+                }),
+            ),
+            Err(_) => json_error(
+                StatusCode(500),
+                anyhow::anyhow!("control status unavailable"),
+            ),
+        },
+        (Method::Post, "/v1/p2p/resolve") => match read_json::<AliasRequest>(&mut request) {
+            Ok(body) => match crate::p2p::resolve_candidate(state, &body.alias).await {
+                Ok(candidate) => json_response(StatusCode(200), &candidate),
+                Err(_) => json_error(
+                    StatusCode(400),
+                    anyhow::anyhow!("P2P candidate unavailable or rejected"),
+                ),
+            },
+            Err(e) => handle_read_error(e),
+        },
         (Method::Get, "/v1/status") => json_result(StatusCode(200), status_response(state)),
         (Method::Get, "/v1/profile") => json_result(StatusCode(200), profile_response(state)),
         (Method::Get, "/v1/transparency/status") => json_result(

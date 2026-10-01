@@ -25,6 +25,8 @@ test('core normalization trims and lowercases ASCII', () => {
   assert.deepEqual(topicForAlias('  ALICE@Example.COM  '), topicForAlias(alias));
   assert.throws(() => canonicalAlias('alíce@example.com'));
   assert.throws(() => canonicalAlias('  '));
+  assert.equal(canonicalAlias('\u0085ALICE@example.com\u0085'), alias);
+  assert.throws(() => canonicalAlias('\ufeffalice@example.com'));
 });
 test('alias mismatch rejected, including case differences', () => {
   assert.throws(() => parseProfile(encoded(profile), 'bob@example.com'), /alias/);
@@ -86,4 +88,39 @@ test('file loader rejects oversized and malformed public profiles', async () => 
     await writeFile(path, '{');
     await assert.rejects(loadProfile(path, alias));
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('invalid and repeated requests disconnect without crashing the server', async () => {
+  const server = createServer({ allowHalfOpen: true }, stream => serveProfile(stream, encoded(profile), () => {}, () => {}));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    for (let i = 0; i < 24; i++) {
+      const client = connect(server.address().port, '127.0.0.1');
+      client.on('error', () => {});
+      client.resume();
+      const closed = once(client, 'close');
+      await once(client, 'connect');
+      client.end(i % 2 ? 'GET_PROFILE\nGET_PROFILE\n' : 'garbage');
+      await closed;
+    }
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+test('publication eligibility is checked at request time', async () => {
+  let eligible = true;
+  const server = createServer({ allowHalfOpen: true }, stream => {
+    serveProfile(stream, encoded(profile), () => {}, () => {}, () => eligible);
+    eligible = false;
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const client = connect(server.address().port, '127.0.0.1');
+  try {
+    await once(client, 'connect');
+    const response = readBounded(client, MAX_PROFILE_BYTES);
+    client.end('GET_PROFILE\n');
+    assert.equal((await response).length, 0);
+  } finally {
+    client.destroy();
+    await new Promise(resolve => server.close(resolve));
+  }
 });

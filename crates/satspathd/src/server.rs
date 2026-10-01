@@ -97,7 +97,11 @@ pub(crate) async fn serve_server(state: Arc<AppState>, server: Arc<Server>) -> R
     });
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(64));
-    while let Some(request) = rx.recv().await {
+    loop {
+        let request = tokio::select! {
+            request = rx.recv() => match request { Some(request) => request, None => break },
+            signal = tokio::signal::ctrl_c() => { signal?; server.unblock(); break; }
+        };
         let state = Arc::clone(&state);
         let sem = Arc::clone(&semaphore);
         tokio::spawn(async move {
