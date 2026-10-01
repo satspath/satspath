@@ -1,6 +1,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# OpenSSL version pin — bump this ARG to force a cache-bust when new
-# security patches land in Debian bookworm (currently 3.0.22-1~deb12u1).
+# OpenSSL minimum version pin and cache-bust key.
+# Bump this ARG or pass --no-cache / a new --build-arg OPENSSL_VERSION to invalidate
+# the package-install layer when security patches land in Debian bookworm
+# (fixes CVE-2026-63076, CVE-2026-63072). Do not rely on --pull alone since
+# cached layers will otherwise be reused.
 # ─────────────────────────────────────────────────────────────────────────────
 ARG OPENSSL_VERSION="3.0.22"
 
@@ -59,7 +62,7 @@ LABEL org.opencontainers.image.title="satspath-cli" \
       org.opencontainers.image.source="https://github.com/satspath/satspath" \
       org.opencontainers.image.documentation="https://github.com/satspath/satspath/blob/main/README.md"
 
-# Security: install CA certs and pin OpenSSL to the patched version.
+# Security: install CA certs and assert OpenSSL and libssl3 meet or exceed the patched version.
 # Fixes: CVE-2026-63076, CVE-2026-63072, and related OpenSSL advisories.
 ARG OPENSSL_VERSION
 RUN apt-get update -qq \
@@ -68,7 +71,8 @@ RUN apt-get update -qq \
         ca-certificates \
         openssl \
         libssl3 \
-    && dpkg -l openssl | grep -q "${OPENSSL_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' openssl)" ge "${OPENSSL_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libssl3)" ge "${OPENSSL_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # Security: create a dedicated non-root user for running the binary.
@@ -105,7 +109,7 @@ LABEL org.opencontainers.image.title="satspathd" \
       org.opencontainers.image.vendor="SatsPath" \
       org.opencontainers.image.licenses="MIT"
 
-# Security: install CA certs, curl, and pin OpenSSL to the patched version.
+# Security: install CA certs, curl, and assert OpenSSL and libssl3 meet or exceed the patched version.
 # Fixes: CVE-2026-63076, CVE-2026-63072, and related OpenSSL advisories.
 ARG OPENSSL_VERSION
 RUN apt-get update -qq \
@@ -114,7 +118,8 @@ RUN apt-get update -qq \
         ca-certificates curl \
         openssl \
         libssl3 \
-    && dpkg -l openssl | grep -q "${OPENSSL_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' openssl)" ge "${OPENSSL_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libssl3)" ge "${OPENSSL_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # Security: create a dedicated non-root user.
