@@ -266,7 +266,7 @@ pub(crate) async fn resolve_candidate(state: &AppState, alias: &str) -> Result<s
     }
     let received = async {
         let mut child = command("resolve", alias)?.spawn()?;
-        child.stdin.take();
+        // Keep stdin open as a parent-liveness pipe until the operation finishes.
         let mut bytes = Vec::new();
         child
             .stdout

@@ -64,6 +64,9 @@ try {
     await stopped;
   } else {
     swarm = new Hyperswarm({ maxPeers: 16 });
+    // Parent death closes the IPC pipe, so even a resolving child exits promptly.
+    process.stdin.once('end', stop);
+    process.stdin.resume();
     const lookup = new Promise((resolve, reject) => {
       discoveryTimer = setTimeout(() => reject(new Error('Discovery timeout')), 25_000);
       swarm.on('error', () => { clearTimeout(discoveryTimer); reject(new Error('Swarm error')); });

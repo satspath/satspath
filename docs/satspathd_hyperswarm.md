@@ -28,8 +28,10 @@ The daemon supervises one public snapshot for its wallet's **active alias**.
 It checks that the snapshot belongs to the local identity and passes existing
 Rust signature, canonical alias and private-material validation. Revoked and
 expired profiles are withdrawn. Changes are detected every two seconds; the
-old sidecar is shut down before a replacement starts. Thus an update/revocation
-can take up to two seconds to withdraw; expiry is also checked on peer requests.
+old sidecar is shut down before a replacement starts. Normal updates/revocations
+can take two seconds to withdraw; a pending startup can delay polling by its
+20-second timeout. Withdrawal is not instantaneous. Expiry is also checked on
+peer requests, including peers that connected before expiry.
 The sidecar has no daemon home path or auth token. Only typed public profile JSON
 is written to stdin. Unknown/private daemon configuration is never serialized.
 It uses the standalone SDK topic and GET_PROFILE protocol without format changes.
@@ -44,9 +46,10 @@ SatsPath identity keys. Peer input never selects paths, executables or modules.
 Status: disabled, starting, active, degraded, stopped. Active means the supervisor
 is ready; `announcements` distinguishes whether a profile is actually announced.
 No profile means zero announcements. Errors degrade transport without changing
-wallet/registry state. Ctrl+C unblocks the HTTP server, closes sidecar stdin and
+wallet/registry state. Ctrl+C (and SIGTERM on Unix) unblocks the HTTP server, closes sidecar stdin and
 waits up to three seconds, then kills/reaps the process if necessary. Dropped or
-timed-out child operations also use kill-on-drop. No daemon secrets enter logs.
+timed-out child operations also use kill-on-drop. IPC EOF also stops the sidecar
+when its parent exits unexpectedly. No daemon secrets enter logs.
 Network stalls are bounded; failed startup is retried with a two-second interval.
 
 ## Resolution and routing
