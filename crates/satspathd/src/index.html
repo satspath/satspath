@@ -446,7 +446,8 @@
   <div class="brand">SATS<span>PATH</span></div>
   <div class="chrome">
     <nav>
-      <button data-tab="send" class="active">Send</button>
+      <button data-tab="control" class="active">Node Control</button>
+      <button data-tab="send">Send</button>
       <button data-tab="receive">Receive</button>
       <button data-tab="claim" id="nav-claim">Claim</button>
       <button data-tab="profile">My Profile</button>
@@ -454,7 +455,36 @@
     </nav>
 
     <!-- SEND -->
-    <section id="tab-send">
+    <section id="tab-control">
+      <h2>Node / Network Control Center</h2>
+      <p class="tagline">Identity, namespace authority, method ownership and transport availability are separate.</p>
+      <div class="card show"><h3>Identity and trust</h3>
+        <div class="explorer-grid">
+          <div class="metric"><span>Fingerprint</span><strong id="control-fingerprint">Unknown</strong></div>
+          <div class="metric"><span>Active aliases</span><strong id="control-aliases">Unknown</strong></div>
+          <div class="metric"><span>Capabilities</span><strong id="control-capabilities">Unknown</strong></div>
+          <div class="metric"><span>Profile signature</span><strong id="control-signature">Unverified</strong></div>
+          <div class="metric"><span>Identifier authority</span><strong id="control-authority">Unverified</strong></div>
+          <div class="metric"><span>Key continuity</span><strong id="control-continuity">Unverified</strong></div>
+          <div class="metric"><span>Method ownership</span><strong id="control-methods">Unverified</strong></div>
+          <div class="metric"><span>Transparency</span><strong id="control-transparency">Unverified</strong></div>
+        </div>
+      </div>
+      <div class="card show"><h3>Network</h3>
+        <div class="explorer-grid">
+          <div class="metric"><span>HTTP</span><strong id="control-http">Unknown</strong></div>
+          <div class="metric"><span>Nostr</span><strong id="control-nostr">On demand</strong></div>
+          <div class="metric"><span>Hyperswarm · experimental</span><strong id="control-network">Loading…</strong></div>
+          <div class="metric"><span>Announcements</span><strong id="control-announcements">Unknown</strong></div>
+          <div class="metric"><span>Active peers</span><strong id="control-peers">Unknown</strong></div>
+          <div class="metric"><span>Last publication</span><strong id="control-publish">None</strong></div>
+          <div class="metric"><span>Last candidate resolution</span><strong id="control-resolution">None</strong></div>
+        </div>
+        <p class="reason">DHT topics contain hashed aliases. Hashing does not provide anonymity. Identity and spending keys are never sent.</p>
+      </div>
+      <p class="reason">P2P candidates do not grant namespace authority or routing eligibility. No profile directory is shown here.</p>
+    </section>
+    <section id="tab-send" class="hidden">
       <div id="s-notifications" class="card hidden" style="margin-bottom:20px; border-color: rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.08);"></div>
       <h2>Send Payment</h2>
       <p class="tagline">Decentralized, non-custodial path routing.</p>
@@ -687,11 +717,41 @@
   // Tab switching logic
   const switchTab = (tabName) => {
     document.querySelectorAll("nav button").forEach(x => x.classList.toggle("active", x.dataset.tab === tabName));
-    ["send","receive","claim","profile","transparency"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== tabName));
+    ["control","send","receive","claim","profile","transparency"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== tabName));
+    if (tabName === "control") loadControl();
     if (tabName === "transparency") loadTransparency();
     if (tabName === "send") loadNotifications();
   };
   document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+  async function loadControl() {
+    try {
+      const response = await fetch('/v1/control');
+      if (!response.ok) throw new Error('Control status unavailable');
+      const data = await response.json();
+      // textContent prevents attacker-controlled strings from becoming markup.
+      const identity = data.identity;
+      const verification = identity.verification;
+      const put = (id, value) => $(id).textContent = String(value);
+      const verified = value => value ? 'Verified' : 'Unverified';
+      const time = value => value == null ? 'None' : new Date(value * 1000).toLocaleString();
+      put('control-fingerprint', identity.fingerprint ?? 'Unknown');
+      put('control-aliases', identity.active_aliases);
+      put('control-capabilities', identity.capabilities?.join(', ') || 'None');
+      put('control-signature', verified(verification?.profile_signature_verified));
+      put('control-authority', verification?.identifier_verified ? 'Attested' : identity.identifier_scope === 'local_dev' ? 'Local / development' : 'Unverified');
+      put('control-continuity', verified(verification?.key_continuity_verified));
+      put('control-methods', verified(verification?.payment_methods_verified));
+      put('control-transparency', verified(verification?.transparency_inclusion_verified));
+      put('control-http', data.http);
+      put('control-network', data.hyperswarm.state);
+      put('control-announcements', data.hyperswarm.announcements);
+      put('control-peers', data.hyperswarm.active_peers ?? 'Unknown');
+      put('control-publish', time(data.hyperswarm.last_publish));
+      put('control-resolution', time(data.hyperswarm.last_resolution));
+    } catch { $('control-network').textContent = 'Control status unavailable'; }
+  }
+  loadControl();
+  setInterval(() => { if (!$('tab-control').classList.contains('hidden')) loadControl(); }, 5000);
 
   let transparencyLoaded = false, transparencyEvents = [], transparencyCheckpoints = [], latestCheckpoint = null, treeScale = 1, treePan = 0;
   const hexBytes = h => new Uint8Array((h.match(/.{2}/g) || []).map(x => parseInt(x, 16)));

@@ -157,6 +157,12 @@ Implementations MAY configure fallback relays. The Rust implementation reads `SA
 
 ## P2P Resolver
 
+The current experimental SDK is `sdk/satspath-p2p`. `satspathd --p2p` manages an
+optional Hyperswarm sidecar and exposes authenticated candidate resolution. Bare
+profiles lack remote transparency proofs, so candidates are never automatically
+imported or used for daemon routing. See [daemon bridge](satspathd_hyperswarm.md).
+Historical Pear wire notes below are not the current SDK framing specification.
+
 Pear/Holepunch P2P transport is optional. It can announce, request, and return signed profiles between peers.
 
 P2P discovery MUST NOT be treated as weaker or stronger than HTTPS or DNS by default. The returned profile is still untrusted until:
