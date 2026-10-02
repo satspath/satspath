@@ -122,7 +122,7 @@ This table reflects the actual status of the codebase (`crates/`) verified by un
 | Capability | Current Status | Architectural Details & Limitations |
 | :--- | :--- | :--- |
 | **Signed Payment Profiles** | **IMPLEMENTED** | Canonical JSON (RFC 8785), domain-separated `secp256k1` Schnorr signatures (`BIP-340`), monotonic sequence and expiry validation. |
-| **Key Continuity & Rotation** | **IMPLEMENTED** | Dual-signed rotation transitions (`AuthorizationV1` signed by old key, `AcceptanceV1` by new key) bound to canonical history. |
+| **Key Continuity & Rotation** | **IMPLEMENTED** | Dual-signed rotation transitions (`AuthorizationV1` signed by old key, `AcceptanceV1` by new key) bound to canonical history. CLI resolution pins each identifier to the identity key it already trusts (TOFU); a key change is accepted only with a rotation authorized by the pinned key. |
 | **HTTPS S2S Resolver** | **IMPLEMENTED** | Resolves signed profiles over HTTPS (`.well-known/satspath-authority`). URL validation blocks known unsafe schemes, ports, hosts, and literal private/reserved IP addresses. (DNS rebinding protection requires resolution-aware validation and connection pinning and should not be assumed unless explicitly enabled by the networking backend). |
 | **Nostr Resolver** | **IMPLEMENTED** | NIP-05 pubkey lookup and kind `30078` event fetching; verifies SatsPath profile signature independently of Nostr relay signatures. |
 | **BIP-353 DNS Resolver** | **PREVIEW** | BIP-353 support is currently Preview. Record parsing and strict DNSSEC policy enforcement are implemented. The default DoH backend does not independently validate the DNSSEC chain; Strict mode therefore requires authenticated DNSSEC results and fails closed otherwise. |
