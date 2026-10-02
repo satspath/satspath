@@ -8,6 +8,18 @@ use crate::http::cors_origin_header;
 
 pub(crate) const INDEX_HTML: &str = include_str!("index.html");
 
+pub(crate) fn dashboard_auth_script() -> Response<std::io::Cursor<Vec<u8>>> {
+    Response::from_data(include_bytes!("dashboard-auth.mjs").to_vec())
+        .with_header(
+            Header::from_bytes("Content-Type", "text/javascript; charset=utf-8")
+                .expect("static header"),
+        )
+        .with_header(
+            Header::from_bytes("X-Content-Type-Options", "nosniff").expect("static header"),
+        )
+        .with_header(Header::from_bytes("Cache-Control", "no-store").expect("static header"))
+}
+
 pub(crate) fn html_response(body: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
         .expect("static header");

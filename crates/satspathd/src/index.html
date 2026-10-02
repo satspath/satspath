@@ -454,6 +454,16 @@
       <button data-tab="transparency">Transparency</button>
     </nav>
 
+    <form id="dashboard-auth-form" class="card show" autocomplete="off">
+      <h3>Local dashboard access</h3>
+      <p class="reason">Enter the admin token from this daemon's local admin.macaroon file once per tab. It stays in memory only and is cleared when you lock, reload or leave this page. Use HTTPS when connecting from another device.</p>
+      <label for="dashboard-admin-token">Admin token</label>
+      <input id="dashboard-admin-token" type="password" autocomplete="off" spellcheck="false" autocapitalize="none" placeholder="Local admin token" required />
+      <button class="action" id="dashboard-unlock" type="submit">Unlock this tab</button>
+      <button class="action hidden" id="dashboard-lock" type="button">Lock this tab</button>
+      <p id="dashboard-auth-status" class="reason" role="status">Locked. Public views remain available.</p>
+    </form>
+
     <!-- SEND -->
     <section id="tab-control">
       <h2>Node / Network Control Center</h2>
@@ -696,8 +706,34 @@
   </div>
 </main>
 
-<script>
+<script type="module">
+  import { createDashboardClient } from '/dashboard-auth.mjs';
   const $ = (id) => document.getElementById(id);
+  const authInput = $('dashboard-admin-token');
+  const dashboardAuth = createDashboardClient({ origin: location.origin, onLock: () => {
+    authInput.value = '';
+    authInput.hidden = false;
+    $('dashboard-unlock').classList.remove('hidden');
+    $('dashboard-lock').classList.add('hidden');
+    $('dashboard-auth-status').textContent = 'Locked. Public views remain available.';
+  }});
+  const apiFetch = dashboardAuth.request;
+  $('dashboard-auth-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const value = authInput.value;
+    authInput.value = ''; // Clear the password field before any asynchronous operation.
+    $('dashboard-unlock').disabled = true;
+    try {
+      await dashboardAuth.unlock(value);
+      authInput.hidden = true;
+      $('dashboard-unlock').classList.add('hidden');
+      $('dashboard-lock').classList.remove('hidden');
+      $('dashboard-auth-status').textContent = 'Unlocked for this tab only.';
+    } catch (error) { $('dashboard-auth-status').textContent = error.message; }
+    finally { $('dashboard-unlock').disabled = false; }
+  });
+  $('dashboard-lock').addEventListener('click', dashboardAuth.lock);
+  window.addEventListener('pagehide', dashboardAuth.lock);
   const show = (el) => { el.classList.remove("hidden"); requestAnimationFrame(() => el.classList.add("show")); };
   const hide = (el) => { el.classList.add("hidden"); el.classList.remove("show"); };
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -725,7 +761,7 @@
   document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
   async function loadControl() {
     try {
-      const response = await fetch('/v1/control');
+      const response = await apiFetch('/v1/control');
       if (!response.ok) throw new Error('Control status unavailable');
       const data = await response.json();
       // textContent prevents attacker-controlled strings from becoming markup.
@@ -780,7 +816,7 @@
     transparencyLoaded = true;
     try {
       const [statusRes, eventsRes, checkpointsRes] = await Promise.all([
-        fetch("/v1/transparency/status"), fetch("/v1/transparency/events?limit=200"), fetch("/v1/transparency/checkpoints?limit=100")
+        apiFetch("/v1/transparency/status"), apiFetch("/v1/transparency/events?limit=200"), apiFetch("/v1/transparency/checkpoints?limit=100")
       ]);
       const status = await statusRes.json(), eventPage = await eventsRes.json(), checkpointPage = await checkpointsRes.json();
       if (!statusRes.ok || status.error) throw new Error(status.error || "Transparency status unavailable");
@@ -860,7 +896,7 @@
   }
 
   async function selectLeaf(node) {
-    const hash=await eventHash(node.event), response=await fetch(`/v1/transparency/inclusion/${hash}`), proof=await response.json();
+    const hash=await eventHash(node.event), response=await apiFetch(`/v1/transparency/inclusion/${hash}`), proof=await response.json();
     if (!response.ok) throw new Error(proof.error || "Proof unavailable");
     $("t-selected").textContent=`Leaf ${proof.leaf_index} · ${hash}`;
     if (!latestCheckpoint) throw new Error("Signed checkpoint unavailable");
@@ -879,7 +915,7 @@
     const bundle=JSON.parse($("t-proof-json").value), result=await verifyProofLocal(bundle.proof);
     const expectedLeaf=bytesHex(await hashLeaf(bundle.event_hash));
     if (!result.valid || bundle.proof.root_hash!==bundle.checkpoint.log_root || bundle.proof.tree_size!==bundle.checkpoint.log_size || bundle.proof.leaf_hash!==expectedLeaf) throw new Error("PROFILE NOT INCLUDED — proof/checkpoint/event binding mismatch");
-    const response=await fetch("/v1/transparency/verify/inclusion",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(bundle)}), verified=await response.json();
+    const response=await apiFetch("/v1/transparency/verify/inclusion",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(bundle)}), verified=await response.json();
     if (!response.ok || !verified.valid) throw new Error(verified.error || "checkpoint signature invalid");
     $("t-proof-result").textContent="VALID";$("t-proof-result").className="status ok";
     $("v-inclusion").textContent="VALID";$("v-inclusion").className="status ok";$("v-binding").textContent="VALID";$("v-binding").className="status ok";
@@ -897,7 +933,7 @@
       const amount_sats = parseInt($("s-amount").value, 10);
       if (!recipient || !amount_sats) throw new Error("Enter a recipient and an amount.");
       
-      const r = await fetch("/v1/send", {
+      const r = await apiFetch("/v1/send", {
         method: "POST", headers: {"content-type": "application/json"},
         body: JSON.stringify({recipient, amount_sats})
       });
@@ -963,7 +999,7 @@
       if (railVal) payload.rail = railVal;
       if (amtVal) payload.amount_sats = parseInt(amtVal, 10);
       
-      const r = await fetch("/v1/receive", {
+      const r = await apiFetch("/v1/receive", {
         method: "POST", headers: {"content-type": "application/json"},
         body: JSON.stringify(payload)
       });
@@ -995,7 +1031,7 @@
       let alias = $("p-alias").value.trim() || undefined;
       
       if (alias) {
-        const cRes = await fetch("/v1/profile/challenge", {
+        const cRes = await apiFetch("/v1/profile/challenge", {
           method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({ alias })
         });
         const cData = await cRes.json();
@@ -1004,7 +1040,7 @@
         const token = prompt(cData.message + "\n\nEnter verification token for " + alias + ":");
         if (!token) throw new Error("Verification cancelled.");
         
-        const vRes = await fetch("/v1/profile/verify", {
+        const vRes = await apiFetch("/v1/profile/verify", {
           method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({ alias, token: token.trim() })
         });
         const vData = await vRes.json();
@@ -1022,7 +1058,7 @@
       };
       
       if (payload.lightning_address || payload.onchain_address || payload.onchain_pubkey || payload.ark_server || payload.alias) {
-        const r = await fetch("/v1/profile", {
+        const r = await apiFetch("/v1/profile", {
           method: "PUT", headers: {"content-type": "application/json"}, body: JSON.stringify(payload)
         });
         const d = await r.json();
@@ -1040,7 +1076,7 @@
     const btn = $("p-broadcast"), msg = $("p-msg"), err = $("p-err");
     hide(msg); hide(err); btn.disabled = true;
     try {
-      const r = await fetch("/v1/broadcast", {method: "POST"});
+      const r = await apiFetch("/v1/broadcast", {method: "POST"});
       const d = await r.json();
       if (d.error) throw new Error(d.error);
       msg.innerHTML = d.broadcasting
@@ -1055,7 +1091,7 @@
   const loadNotifications = async () => {
     try {
       const box = $("s-notifications");
-      const r = await fetch("/v1/invites/notifications");
+      const r = await apiFetch("/v1/invites/notifications");
       if (!r.ok) return;
       const notes = await r.json();
       const unread = notes.filter(n => !n.read);
@@ -1063,29 +1099,36 @@
         hide(box);
         return;
       }
-      box.innerHTML = unread.map(n => `
+      box.innerHTML = unread.map((n, index) => `
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
           <div>
             <span style="color:#34d399; font-weight:700;">[Claimed Invite]</span>
-            <strong>${esc(n.display_hint)}</strong> has claimed their invite for <strong>${n.amount_sats.toLocaleString()} sats</strong>!
+            <strong>${esc(n.display_hint)}</strong> has claimed their invite for <strong>${esc(n.amount_sats.toLocaleString())} sats</strong>!
           </div>
           <div style="display:flex; gap:8px;">
-            <button class="action" style="width:auto; padding:6px 14px; margin:0; font-size:12px;" onclick="fillSend('${esc(n.display_hint)}', ${n.amount_sats}, '${esc(n.notification_id)}')">
+            <button class="action" style="width:auto; padding:6px 14px; margin:0; font-size:12px;" data-send-note="${index}">
               Send Payment Now
             </button>
-            <button style="background:none; border:1px solid var(--border); color:var(--text-muted); border-radius:6px; padding:4px 8px; cursor:pointer;" onclick="dismissNotification('${esc(n.notification_id)}')">
+            <button style="background:none; border:1px solid var(--border); color:var(--text-muted); border-radius:6px; padding:4px 8px; cursor:pointer;" data-dismiss-note="${index}">
               Dismiss
             </button>
           </div>
         </div>
       `).join("");
+      box.querySelectorAll('[data-send-note]').forEach(button => button.addEventListener('click', () => {
+        const note = unread[Number(button.dataset.sendNote)];
+        fillSend(note.display_hint, note.amount_sats, note.notification_id);
+      }));
+      box.querySelectorAll('[data-dismiss-note]').forEach(button => button.addEventListener('click', () => {
+        dismissNotification(unread[Number(button.dataset.dismissNote)].notification_id);
+      }));
       show(box);
     } catch (_) {}
   };
 
-  window.fillSend = async (recipient, amount, notificationId) => {
+  const fillSend = async (recipient, amount, notificationId) => {
     if (notificationId) {
-      fetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
+      apiFetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
     }
     $("s-recipient").value = recipient;
     $("s-amount").value = amount;
@@ -1093,8 +1136,8 @@
     $("s-go").click();
   };
 
-  window.dismissNotification = async (notificationId) => {
-    await fetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
+  const dismissNotification = async (notificationId) => {
+    await apiFetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
     loadNotifications();
   };
 
@@ -1114,7 +1157,7 @@
     hide(details); hide(claimBox); hide(resCard); hide(err);
 
     try {
-      const r = await fetch("/v1/claim?invite_id=" + encodeURIComponent(inviteId));
+      const r = await apiFetch("/v1/claim?invite_id=" + encodeURIComponent(inviteId));
       const d = await r.json();
       if (d.error) throw new Error(d.error);
 
@@ -1173,7 +1216,7 @@
         ark_server: ark || undefined,
       };
 
-      const r = await fetch("/v1/claim", {
+      const r = await apiFetch("/v1/claim", {
         method: "POST",
         headers: {"content-type": "application/json"},
         body: JSON.stringify(body)

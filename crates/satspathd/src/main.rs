@@ -470,6 +470,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashboard_auth_preserves_private_and_public_boundaries() {
+        let config = rate_limit::RateLimiterConfig {
+            burst_capacity: 100,
+            refill_rate_per_sec: 100.0,
+            max_body_bytes: 65_536,
+            trust_proxy_headers: false,
+            cleanup_interval_secs: 300,
+        };
+        let (base_url, server, handle) = start_test_daemon(config).await;
+        let client = reqwest::Client::new();
+        for path in ["/", "/dashboard-auth.mjs", "/health", "/v1/control"] {
+            let response = client
+                .get(format!("{base_url}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
+            assert!(!response.text().await.unwrap().contains("test_token"));
+        }
+        for (method, path) in [
+            (reqwest::Method::POST, "/v1/dashboard/auth"),
+            (reqwest::Method::POST, "/v1/profile/challenge"),
+            (reqwest::Method::POST, "/v1/profile/verify"),
+            (reqwest::Method::PUT, "/v1/profile"),
+            (reqwest::Method::POST, "/v1/profile/methods"),
+            (reqwest::Method::POST, "/v1/profile/rotate-key"),
+            (reqwest::Method::POST, "/v1/broadcast"),
+            (reqwest::Method::POST, "/v1/p2p/resolve"),
+            (
+                reqwest::Method::POST,
+                "/v1/invites/notifications/example/read",
+            ),
+        ] {
+            for credential in [None, Some("invalid_dashboard_token")] {
+                let mut request = client.request(method.clone(), format!("{base_url}{path}"));
+                if let Some(token) = credential {
+                    request = request.bearer_auth(token);
+                }
+                let response = request.json(&serde_json::json!({})).send().await.unwrap();
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::UNAUTHORIZED,
+                    "{path}"
+                );
+                let body = response.text().await.unwrap();
+                assert!(!body.contains("test_token"));
+                assert!(!body.contains("invalid_dashboard_token"));
+            }
+        }
+        for path in ["/v1/dashboard/auth", "/v1/profile/challenge"] {
+            let response = client
+                .post(format!("{base_url}{path}"))
+                .bearer_auth("test_token")
+                .json(&serde_json::json!({"alias": "alice@example.com"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
+            assert!(response.headers().get("set-cookie").is_none());
+            assert!(!response.text().await.unwrap().contains("test_token"));
+        }
+        server.unblock();
+        handle.abort();
+    }
+
+    #[tokio::test]
     async fn test_http_rate_limit_and_burst_protection() {
         let config = rate_limit::RateLimiterConfig {
             burst_capacity: 3,

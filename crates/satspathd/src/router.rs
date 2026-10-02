@@ -92,6 +92,12 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
     let response = match (method.clone(), path.as_str()) {
         (Method::Options, _) => empty_response(StatusCode(204)),
         (Method::Get, "/") | (Method::Get, "/claim") => html_response(INDEX_HTML),
+        (Method::Get, "/dashboard-auth.mjs") => crate::ui::dashboard_auth_script(),
+        // Reuses the fail-closed mutation guard above. No token or cookie is returned.
+        (Method::Post, "/v1/dashboard/auth") => json_response(
+            StatusCode(200),
+            &serde_json::json!({ "authenticated": true }),
+        ),
         (Method::Get, "/v1/diagnostics/rate_limit") => {
             json_response(StatusCode(200), &state.rate_limiter.stats())
         }
