@@ -20,6 +20,7 @@ pub struct TransactionalTransparencyStore {
     home: PathBuf,
     path: PathBuf,
     log_id: String,
+    read_only: bool,
 }
 
 impl TransactionalTransparencyStore {
@@ -65,6 +66,7 @@ impl TransactionalTransparencyStore {
             home: home.to_owned(),
             path,
             log_id,
+            read_only: false,
         };
         store.load_log()?;
         Ok(store)
@@ -74,7 +76,35 @@ impl TransactionalTransparencyStore {
         &self.log_id
     }
 
+    /// Open existing state without migrations, directory creation or write access.
+    pub fn open_read_only(home: &Path) -> Result<Self> {
+        let path = home.join(DB_FILE);
+        let connection =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(db_error)?;
+        let log_id = connection
+            .query_row("SELECT log_id FROM operator_state LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .map_err(db_error)?;
+        let store = Self {
+            home: home.to_owned(),
+            path,
+            log_id,
+            read_only: true,
+        };
+        store.load_log()?;
+        Ok(store)
+    }
+
     fn connection(&self) -> Result<Connection> {
+        if self.read_only {
+            return Connection::open_with_flags(
+                &self.path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .map_err(db_error);
+        }
         Connection::open(&self.path).map_err(db_error)
     }
 

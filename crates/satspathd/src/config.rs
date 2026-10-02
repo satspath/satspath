@@ -21,6 +21,9 @@ pub(crate) const IDENTITY_SUBDIR: &str = "identity";
     version = "0.1.0"
 )]
 pub(crate) struct Cli {
+    /// Enable experimental public-profile Hyperswarm transport (requires Node >=20 and SDK npm ci).
+    #[arg(long)]
+    pub(crate) p2p: bool,
     /// HTTP bind address. Defaults to SATSPATHD_BIND or 127.0.0.1:9737.
     #[arg(long)]
     pub(crate) bind: Option<String>,
@@ -83,6 +86,7 @@ pub(crate) struct WalletState {
 
 #[derive(Clone)]
 pub(crate) struct AppState {
+    pub(crate) p2p: Arc<crate::p2p::Bridge>,
     pub(crate) home: PathBuf,
     pub(crate) bind: SocketAddr,
     pub(crate) network: String,

@@ -29,6 +29,23 @@ pub(crate) fn resolver_chain(home: &std::path::Path) -> ChainResolver {
 
 pub(crate) fn resolve_profile(state: &AppState, alias: &str) -> Result<ResolvedTransparentProfile> {
     let store = TransactionalTransparencyStore::open(&state.home)?;
+    verify_stored_profile(state, alias, store, true)
+}
+
+pub(crate) fn resolve_profile_read_only(
+    state: &AppState,
+    alias: &str,
+) -> Result<ResolvedTransparentProfile> {
+    let store = TransactionalTransparencyStore::open_read_only(&state.home)?;
+    verify_stored_profile(state, alias, store, false)
+}
+
+fn verify_stored_profile(
+    state: &AppState,
+    alias: &str,
+    store: TransactionalTransparencyStore,
+    persist_pin: bool,
+) -> Result<ResolvedTransparentProfile> {
     let signed = store
         .profile(alias)?
         .ok_or_else(|| SatsPathError::AliasNotFound(alias.into()))?;
@@ -36,7 +53,7 @@ pub(crate) fn resolve_profile(state: &AppState, alias: &str) -> Result<ResolvedT
     if !profile_signature_verified {
         anyhow::bail!("stored profile signature is invalid");
     }
-    let log = transparency_log(state)?;
+    let log = store.load_log()?;
     let identifier_hash = satspath_core::privacy::identifier_hash(alias);
     let history: Vec<_> = log.history(&identifier_hash).into_iter().cloned().collect();
     satspath_core::transparency::verify_identifier_history(&history)?;
@@ -73,7 +90,9 @@ pub(crate) fn resolve_profile(state: &AppState, alias: &str) -> Result<ResolvedT
             consistency_proof.as_ref(),
         )?;
     }
-    CheckpointStore::new(&state.home).pin(&checkpoint)?;
+    if persist_pin {
+        CheckpointStore::new(&state.home).pin(&checkpoint)?;
+    }
     let payment_method_states = satspath_core::verify_payment_method_states(&signed.profile, now());
     let payment_methods_verified = !payment_method_states.is_empty()
         && payment_method_states.iter().all(|state| state.verified);

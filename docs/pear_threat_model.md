@@ -1,5 +1,11 @@
 # Pear / Holepunch P2P Resolver Threat Model
 
+> Historical PearResolver notes below are retained for context. The current
+> experimental Node SDK and optional daemon bridge use
+> `SHA256("satspath:v1:" + canonical_alias)` and treat downloads as candidates,
+> not namespace authority or routing proof. See [current daemon threat model](satspathd_hyperswarm.md).
+> Signature validity alone does not prevent another key from claiming the same alias.
+
 This document outlines the security assumptions, privacy rules, and threat vectors for the SatsPath PearResolver integration.
 
 ## 1. Overview

@@ -1,5 +1,9 @@
 # Experimental SatsPath P2P transport
 
+The daemon can optionally supervise publication with `satspathd --p2p`.
+See [daemon architecture and trust limitations](../../docs/satspathd_hyperswarm.md).
+Bare P2P candidates are never automatically imported or made routable.
+
 Minimal Node.js >= 20 ESM examples using Hyperswarm to exchange existing public
 SignedPaymentProfile JSON. This completes the transport referenced by `wallet publish`.
 No daemon, WASM build, or centralized profile server is required.
