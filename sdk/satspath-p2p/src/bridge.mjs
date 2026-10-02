@@ -1,17 +1,19 @@
 // Private local IPC entry point. stdin/stdout carry public objects only.
 import Hyperswarm from 'hyperswarm';
-import { GET_PROFILE, MAX_PROFILE_BYTES, parseProfile, readBounded, serveProfile, topicForAlias } from './common.mjs';
+import { MAX_PROFILE_BYTES, parseProfile, serveProfile, topicForAlias } from './common.mjs';
+import { candidateValidator, resolveCandidates } from './candidate-resolution.mjs';
 
 const [mode, alias, ...extra] = process.argv.slice(2);
 let swarm;
 let cancelled = false;
 let finish;
 let refill;
-let discoveryTimer;
 let shutdownPromise;
+let resolutionController;
 const stopped = new Promise(resolve => { finish = resolve; });
 const stop = () => {
   cancelled = true;
+  resolutionController?.abort();
   finish();
   shutdownPromise ??= (swarm ? swarm.destroy() : Promise.resolve()).catch(() => { process.exitCode = 1; });
   return shutdownPromise;
@@ -67,31 +69,14 @@ try {
     // Parent death closes the IPC pipe, so even a resolving child exits promptly.
     process.stdin.once('end', stop);
     process.stdin.resume();
-    const lookup = new Promise((resolve, reject) => {
-      discoveryTimer = setTimeout(() => reject(new Error('Discovery timeout')), 25_000);
-      swarm.on('error', () => { clearTimeout(discoveryTimer); reject(new Error('Swarm error')); });
-      swarm.on('connection', async stream => {
-        stream.on('error', () => {});
-        try {
-          const response = readBounded(stream, MAX_PROFILE_BYTES);
-          stream.end(GET_PROFILE);
-          const bytes = await response;
-          parseProfile(bytes, alias);
-          clearTimeout(discoveryTimer);
-          resolve(bytes);
-        } catch { /* Attacker-controlled candidates are discarded. */ }
-        finally { stream.destroy(); }
-      });
-      swarm.join(topic, { server: false, client: true });
-    });
-    const bytes = await Promise.race([lookup, stopped.then(() => { throw new Error('Stopped'); })]);
-    process.stdout.write(bytes);
+    resolutionController = new AbortController();
+    const lookup = resolveCandidates(swarm, topic, alias, candidateValidator(process.stdin, process.stdout), { signal: resolutionController.signal });
+    await Promise.race([lookup, stopped.then(() => { throw new Error('Stopped'); })]);
   }
 } catch {
   process.exitCode = 1;
 } finally {
   clearInterval(refill);
-  clearTimeout(discoveryTimer);
   await stop();
   process.stdin.destroy();
 }

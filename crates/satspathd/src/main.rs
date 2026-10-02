@@ -270,6 +270,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn control_get_is_read_only_with_missing_existing_and_advancing_pins() {
+        struct StopServer(Arc<Server>);
+        impl Drop for StopServer {
+            fn drop(&mut self) {
+                self.0.unblock();
+            }
+        }
+        fn snapshot(home: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+            let mut files = std::collections::BTreeMap::new();
+            for entry in std::fs::read_dir(home).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    files.extend(snapshot(&path));
+                } else {
+                    // SQLite readers may create WAL coordination sidecars; these
+                    // are not profile, checkpoint or trust-state persistence.
+                    let name = path.file_name().unwrap().to_string_lossy();
+                    if name.ends_with(".sqlite3-shm") || name.ends_with(".sqlite3-wal") {
+                        continue;
+                    }
+                    files.insert(path.clone(), std::fs::read(&path).unwrap());
+                }
+            }
+            files
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let _stop = StopServer(server.clone());
+        state.bind = server.server_addr().to_ip().unwrap();
+        let url = format!("http://{}/v1/control", state.bind);
+        let mut wallet = load_or_create_identity(&state.home).unwrap();
+        wallet.alias = Some("alice@example.test".into());
+        wallet.lightning_address = Some("alice@example.test".into());
+        save_wallet(&state.home, &wallet).unwrap();
+        let handle = tokio::spawn(serve_server(Arc::new(state.clone()), server.clone()));
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        for stage in 0..4 {
+            if stage == 1 || stage == 3 {
+                sign_and_store(&state.home, &mut wallet, &state.network).unwrap();
+                save_wallet(&state.home, &wallet).unwrap();
+            }
+            if stage == 2 {
+                crate::handlers::resolve::resolve_profile(&state, wallet.alias.as_deref().unwrap())
+                    .unwrap();
+            }
+            let before = snapshot(&state.home);
+            for _ in 0..2 {
+                let response = client.get(&url).send().await.unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let body: serde_json::Value = response.json().await.unwrap();
+                if stage > 0 {
+                    assert_eq!(
+                        body["identity"]["verification"]["profile_signature_verified"],
+                        true
+                    );
+                }
+            }
+            assert!(
+                snapshot(&state.home) == before,
+                "GET modified persistent state at stage {stage}"
+            );
+        }
+        // A missing database/home must not be initialized by a read-only opener.
+        let missing = state.home.join("missing");
+        assert!(satspath_core::TransactionalTransparencyStore::open_read_only(&missing).is_err());
+        assert!(!missing.exists());
+        let store =
+            satspath_core::TransactionalTransparencyStore::open_read_only(&state.home).unwrap();
+        let checkpoint = store
+            .load_log()
+            .unwrap()
+            .checkpoints()
+            .last()
+            .unwrap()
+            .clone();
+        assert!(store
+            .replace_latest_checkpoint(&checkpoint.checkpoint_hash().unwrap(), &checkpoint)
+            .is_err());
+        server.unblock();
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_listener_survives_requests_and_a_signal_between_iterations() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Registration(Arc<AtomicUsize>);
+        impl Drop for Registration {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_state(dir.path()));
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let url = format!("http://{}/health", server.server_addr().to_ip().unwrap());
+        let (signal, receiver) = tokio::sync::oneshot::channel();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let registration = Registration(drops.clone());
+        let shutdown = async move {
+            let _registration = registration;
+            receiver.await?;
+            Ok(())
+        };
+        let handle = tokio::spawn(crate::server::serve_server_with_shutdown(
+            state,
+            server.clone(),
+            shutdown,
+        ));
+        let client = reqwest::Client::new();
+        for _ in 0..8 {
+            assert_eq!(
+                client.get(&url).send().await.unwrap().status(),
+                reqwest::StatusCode::OK
+            );
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                0,
+                "listener was dropped during traffic"
+            );
+        }
+        // Queue shutdown while the request branch is also ready.
+        let request = client.get(&url).send();
+        signal.send(()).unwrap();
+        let (_, stopped) = tokio::join!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), request),
+            tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        );
+        stopped.unwrap().unwrap().unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn quote_rejects_profile_without_transparency() {
         use satspath_core::registry::Registry;
         let dir = tempfile::tempdir().unwrap();

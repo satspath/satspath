@@ -17,6 +17,37 @@ use crate::{
 };
 
 const MAX_BYTES: usize = 50 * 1024;
+const MAX_CANDIDATES: usize = 16;
+
+async fn receive_candidates<R, W, F, Fut>(
+    output: &mut R,
+    input: &mut W,
+    mut validate: F,
+) -> Result<SignedPaymentProfile>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+    F: FnMut(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<SignedPaymentProfile>>,
+{
+    // Count and per-frame bounds also cap total IPC bytes at 16 * (50 KiB + 4).
+    for _ in 0..MAX_CANDIDATES {
+        let size = output.read_u32().await? as usize;
+        if size == 0 || size > MAX_BYTES {
+            bail!("candidate size limit");
+        }
+        let mut bytes = vec![0; size];
+        output.read_exact(&mut bytes).await?;
+        match validate(bytes).await {
+            Ok(signed) => {
+                input.write_all(&[1]).await?;
+                return Ok(signed);
+            }
+            Err(_) => input.write_all(&[0]).await?,
+        }
+    }
+    bail!("candidate limit exhausted")
+}
 
 #[derive(Clone, Serialize)]
 pub(crate) struct TransportStatus {
@@ -266,35 +297,28 @@ pub(crate) async fn resolve_candidate(state: &AppState, alias: &str) -> Result<s
     }
     let received = async {
         let mut child = command("resolve", alias)?.spawn()?;
-        // Keep stdin open as a parent-liveness pipe until the operation finishes.
-        let mut bytes = Vec::new();
-        child
-            .stdout
-            .take()
-            .context("stdout")?
-            .take((MAX_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)
-            .await?;
-        if bytes.len() > MAX_BYTES {
-            child.kill().await?;
-            bail!("candidate size limit");
-        }
+        let mut output = child.stdout.take().context("stdout")?;
+        let mut input = child.stdin.take().context("stdin")?;
+        let signed = receive_candidates(&mut output, &mut input, |bytes| async move {
+            let _guard = state.mutation_lock.lock().await;
+            let store = satspath_core::TransactionalTransparencyStore::open(&state.home)?;
+            let prior = store.profile(alias)?;
+            let signed = validate_candidate(&bytes, alias, prior.as_ref())?;
+            // Both transactional and legacy identity pins constrain every candidate.
+            let registry = Registry::open(&state.home)?;
+            if registry.is_registered(alias) {
+                validate_candidate(&bytes, alias, Some(registry.resolve_alias(alias)?))?;
+            }
+            Ok(signed)
+        })
+        .await?;
+        // Keep the parent-liveness pipe open until the accepted child exits.
         if !child.wait().await?.success() {
             bail!("P2P unavailable");
         }
-        Ok::<_, anyhow::Error>(bytes)
+        Ok::<_, anyhow::Error>(signed)
     };
-    let bytes = tokio::time::timeout(Duration::from_secs(30), received).await??;
-    let _guard = state.mutation_lock.lock().await;
-    let store = satspath_core::TransactionalTransparencyStore::open(&state.home)?;
-    let prior = store.profile(alias)?;
-    let signed = validate_candidate(&bytes, alias, prior.as_ref())?;
-    // Legacy/local registry pins also constrain this lower-trust source.
-    let registry = Registry::open(&state.home)?;
-    if registry.is_registered(alias) {
-        let legacy_prior = registry.resolve_alias(alias)?;
-        validate_candidate(&bytes, alias, Some(legacy_prior))?;
-    }
+    let signed = tokio::time::timeout(Duration::from_secs(30), received).await??;
     let methods = satspath_core::verify_payment_method_states(&signed.profile, now());
     state.p2p.status.lock().await.last_resolution = Some(now());
     Ok(
@@ -324,7 +348,7 @@ pub(crate) fn local_summary(state: &AppState) -> Result<serde_json::Value> {
     let trust = wallet
         .alias
         .as_deref()
-        .and_then(|alias| crate::handlers::resolve::resolve_profile(state, alias).ok());
+        .and_then(|alias| crate::handlers::resolve::resolve_profile_read_only(state, alias).ok());
     let fingerprint = wallet
         .identity_pubkey
         .as_deref()
@@ -430,5 +454,78 @@ mod tests {
         assert_eq!(std.get_program(), "node");
         assert_eq!(std.get_args().count(), 3);
         assert!(!std.get_envs().any(|(key, _)| key == "SATSPATHD_AUTH_TOKEN"));
+    }
+
+    #[tokio::test]
+    async fn ipc_rejects_raced_signature_and_key_candidates_then_accepts_valid_profile() {
+        let prior = fixture("alice@example.com");
+        let mut forged = prior.clone();
+        forged.profile.updated_at += 1;
+        let replacement = fixture(&prior.profile.alias);
+        let candidates = vec![bytes(&forged), bytes(&replacement), bytes(&prior)];
+        let (mut parent, mut child) = tokio::io::duplex(MAX_BYTES * 2);
+        let peer = tokio::spawn(async move {
+            for (candidate, expected) in candidates.into_iter().zip([0, 0, 1]) {
+                child.write_u32(candidate.len() as u32).await.unwrap();
+                // Exercise fragmented IPC frames, not just one read per profile.
+                for chunk in candidate.chunks(17) {
+                    child.write_all(chunk).await.unwrap();
+                }
+                assert_eq!(child.read_u8().await.unwrap(), expected);
+            }
+        });
+        let (mut reader, mut writer) = tokio::io::split(&mut parent);
+        let accepted = receive_candidates(&mut reader, &mut writer, |candidate| {
+            std::future::ready(validate_candidate(
+                &candidate,
+                &prior.profile.alias,
+                Some(&prior),
+            ))
+        })
+        .await
+        .unwrap();
+        assert_eq!(bytes(&accepted), bytes(&prior));
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ipc_bounds_candidate_count_and_rejects_oversized_or_truncated_frames() {
+        let (mut parent, mut child) = tokio::io::duplex(64);
+        let peer = tokio::spawn(async move {
+            for _ in 0..MAX_CANDIDATES {
+                child.write_u32(1).await.unwrap();
+                child.write_all(b"{").await.unwrap();
+                assert_eq!(child.read_u8().await.unwrap(), 0);
+            }
+        });
+        let (mut reader, mut writer) = tokio::io::split(&mut parent);
+        let error = receive_candidates(&mut reader, &mut writer, |candidate| {
+            std::future::ready(validate_candidate(&candidate, "alice@example.com", None))
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("candidate limit"));
+        peer.await.unwrap();
+
+        for (length, payload) in [
+            (u32::MAX, b"".as_slice()),
+            (4, b"{".as_slice()),
+            (0, b"".as_slice()),
+        ] {
+            let (mut parent, mut child) = tokio::io::duplex(64);
+            child.write_u32(length).await.unwrap();
+            child.write_all(payload).await.unwrap();
+            child.shutdown().await.unwrap();
+            let (mut reader, mut writer) = tokio::io::split(&mut parent);
+            assert!(receive_candidates(
+                &mut reader,
+                &mut writer,
+                |_| -> std::future::Ready<Result<SignedPaymentProfile>> {
+                    panic!("bad frame must not reach validation")
+                }
+            )
+            .await
+            .is_err());
+        }
     }
 }

@@ -86,6 +86,14 @@ pub(crate) async fn serve(state: AppState, tls_config: Option<(PathBuf, PathBuf)
 }
 
 pub(crate) async fn serve_server(state: Arc<AppState>, server: Arc<Server>) -> Result<()> {
+    serve_server_with_shutdown(state, server, shutdown_signal()).await
+}
+
+pub(crate) async fn serve_server_with_shutdown(
+    state: Arc<AppState>,
+    server: Arc<Server>,
+    shutdown: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<tiny_http::Request>(64);
     let srv = Arc::clone(&server);
     tokio::task::spawn_blocking(move || {
@@ -97,10 +105,11 @@ pub(crate) async fn serve_server(state: Arc<AppState>, server: Arc<Server>) -> R
     });
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(64));
+    tokio::pin!(shutdown);
     loop {
         let request = tokio::select! {
             request = rx.recv() => match request { Some(request) => request, None => break },
-            signal = shutdown_signal() => { signal?; server.unblock(); break; }
+            signal = &mut shutdown => { server.unblock(); signal?; break; }
         };
         let state = Arc::clone(&state);
         let sem = Arc::clone(&semaphore);

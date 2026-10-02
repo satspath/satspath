@@ -63,6 +63,16 @@ rollback and conflicting equal sequences are rejected. An identical equal-sequen
 profile can be returned. Candidates are not persisted, so no TOFU pin is created.
 Profiles lacking expiry remain replayable when no prior state exists.
 
+Resolution uses private length-prefixed IPC frames (four-byte big-endian byte
+length followed by unchanged SignedPaymentProfile JSON). Rust replies with one
+byte: reject (0) or accept (1). Only one validation is outstanding at a time.
+A structural JSON match never ends discovery: Rust checks each candidate against
+the existing signature and local identity-pin rules. Rejections continue discovery
+within the original global deadline. At most 16 peer attempts/candidate frames
+are allowed, each bounded to 51,200 bytes; total candidate IPC is bounded to
+16 × (51,200 + 4) bytes. This mitigates a first-invalid-candidate race, but cannot
+guarantee availability against peers exhausting the finite attempt budget.
+
 **Bare SignedPaymentProfile does not contain remote transparency proofs.** The
 response therefore always has `routing_eligible: false`, `identifier_verified:
 false`, `key_continuity_verified: false` and `transparency_verified: false`.
@@ -71,6 +81,10 @@ Even a legitimate key change cannot be accepted through this candidate endpoint:
 use the existing transparent rotation flow. Existing routing/resolver priorities
 remain unchanged; the P2P candidate source cannot override a stronger authority.
 P2P routing integration requires a separate protocol design for remote proofs.
+
+`GET /v1/control` verifies existing local profile/transparency state using a
+read-only SQLite opener. It neither initializes missing state nor writes or
+advances checkpoint pins. Existing routing verification retains its pinning path.
 
 ## Abuse, privacy and control center
 
