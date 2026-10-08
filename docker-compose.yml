@@ -18,6 +18,7 @@ services:
     environment:
       - SATSPATH_NETWORK=${SATSPATH_NETWORK:-mainnet}
       - SATSPATHD_BEHIND_PROXY=1
+      - SATSPATH_AUTHORITY_DOMAIN=${SATSPATH_AUTHORITY_DOMAIN:-localhost}
       # - SATSPATHD_AUTH_TOKEN=your_secure_token_here (optional, auto-generated if missing)
       # - SATSPATHD_CORS_ORIGIN=https://your-domain.com
 

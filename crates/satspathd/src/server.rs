@@ -86,6 +86,14 @@ pub(crate) async fn serve(state: AppState, tls_config: Option<(PathBuf, PathBuf)
 }
 
 pub(crate) async fn serve_server(state: Arc<AppState>, server: Arc<Server>) -> Result<()> {
+    serve_server_with_shutdown(state, server, shutdown_signal()).await
+}
+
+pub(crate) async fn serve_server_with_shutdown(
+    state: Arc<AppState>,
+    server: Arc<Server>,
+    shutdown: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<tiny_http::Request>(64);
     let srv = Arc::clone(&server);
     tokio::task::spawn_blocking(move || {
@@ -97,18 +105,49 @@ pub(crate) async fn serve_server(state: Arc<AppState>, server: Arc<Server>) -> R
     });
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(64));
-    while let Some(request) = rx.recv().await {
+    tokio::pin!(shutdown);
+    loop {
+        let request = tokio::select! {
+            request = rx.recv() => match request { Some(request) => request, None => break },
+            signal = &mut shutdown => { server.unblock(); signal?; break; }
+        };
         let state = Arc::clone(&state);
         let sem = Arc::clone(&semaphore);
         tokio::spawn(async move {
-            let _permit = match sem.acquire_owned().await {
+            let permit = match sem.acquire_owned().await {
                 Ok(p) => p,
                 Err(_) => return,
             };
-            if let Err(e) = handle_request(request, &state).await {
-                eprintln!("request error: {e}");
+            // tiny_http reads bodies and writes responses synchronously. Keep
+            // those sockets off async workers so shutdown signals and bridge
+            // supervision remain responsive even when every HTTP slot stalls.
+            let runtime = tokio::runtime::Handle::current();
+            let handled = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                runtime.block_on(handle_request(request, &state))
+            })
+            .await;
+            match handled {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => eprintln!("request error: {e}"),
+                Err(e) => eprintln!("request task error: {e}"),
             }
         });
     }
+    Ok(())
+}
+
+async fn shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result?,
+            _ = terminate.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await?;
     Ok(())
 }

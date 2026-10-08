@@ -279,7 +279,7 @@ pub(crate) fn send_payload_for(method: &PaymentMethod, amount_sats: u64) -> Resu
     Ok(payload)
 }
 
-/// P2P is now exclusively Nostr. The broadcast endpoint triggers a re-sign.
+/// Save the profile; enabled transports independently manage publication.
 pub(crate) fn broadcast(state: &AppState) -> Result<serde_json::Value> {
     let mut wallet = load_wallet(&state.home)?;
     if wallet.alias.is_none() {
@@ -287,6 +287,6 @@ pub(crate) fn broadcast(state: &AppState) -> Result<serde_json::Value> {
     }
     ensure_signed_profile(&state.home, &mut wallet, &state.network)?;
     Ok(
-        serde_json::json!({ "broadcasting": true, "status": "Nostr is the exclusive P2P layer. Profile saved." }),
+        serde_json::json!({ "broadcasting": false, "status": "Profile saved. Enabled transports manage publication; saving is not proof of network availability." }),
     )
 }

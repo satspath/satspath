@@ -10,6 +10,22 @@ permissions:
   contents: read
 
 jobs:
+  javascript:
+    name: Test P2P SDK and dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: sdk/satspath-p2p/package-lock.json
+      - run: npm ci --prefix sdk/satspath-p2p
+      - run: npm test --prefix sdk/satspath-p2p
+      - run: node --test crates/satspathd/tests/dashboard-auth.test.mjs
+
   test:
     name: Test workspace
     runs-on: ubuntu-latest

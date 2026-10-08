@@ -69,7 +69,11 @@ pub(crate) fn print_startup_status(state: &AppState) -> Result<()> {
     );
     println!(
         "  alias: {}",
-        status.alias.as_deref().unwrap_or("(not configured)")
+        status
+            .alias
+            .as_deref()
+            .map(satspath_core::privacy::mask_identifier)
+            .unwrap_or_else(|| "(not configured)".into())
     );
     println!(
         "  methods: {}",

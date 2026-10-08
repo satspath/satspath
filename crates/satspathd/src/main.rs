@@ -7,7 +7,9 @@
 mod auth;
 mod config;
 mod handlers;
+mod host;
 mod http;
+mod p2p;
 mod rate_limit;
 mod router;
 mod server;
@@ -26,8 +28,18 @@ use handlers::status::print_startup_status;
 use http::write_owner_only_file;
 use server::{audit_binding_security, serve};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run());
+    // tiny_http request bodies use synchronous socket reads. A stalled client
+    // must not keep runtime teardown (and thus SIGTERM/Ctrl+C) waiting forever.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(3));
+    result
+}
+
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     let bind = cli
         .bind
@@ -142,8 +154,13 @@ async fn main() -> Result<()> {
     let rate_limiter = Arc::new(rate_limit::RateLimiter::new(rate_limiter_config));
 
     let state = AppState {
+        p2p: p2p::Bridge::new(cli.p2p),
         home,
         bind,
+        allowed_hosts: host::configured_hosts(
+            std::env::var("SATSPATH_AUTHORITY_DOMAIN").ok().as_deref(),
+            std::env::var("SATSPATH_AUTHORITY_URL").ok().as_deref(),
+        )?,
         network,
         open_ui: !cli.no_open,
         auth_token,
@@ -159,7 +176,16 @@ async fn main() -> Result<()> {
     };
 
     print_startup_status(&state)?;
-    serve(state, tls_config).await
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let bridge = cli
+        .p2p
+        .then(|| tokio::spawn(p2p::supervise(state.clone(), stop_rx)));
+    let result = serve(state, tls_config).await;
+    let _ = stop_tx.send(());
+    if let Some(task) = bridge {
+        task.await?;
+    }
+    result
 }
 
 #[cfg(test)]
@@ -189,8 +215,10 @@ mod tests {
 
     fn test_state(home: &Path) -> AppState {
         AppState {
+            p2p: crate::p2p::Bridge::new(false),
             home: home.to_owned(),
             bind: "127.0.0.1:0".parse().unwrap(),
+            allowed_hosts: Vec::new(),
             network: "devnet".into(),
             open_ui: false,
             auth_token: "test_auth_token".into(),
@@ -211,6 +239,223 @@ mod tests {
         assert!(!raw.contains("xprv"));
         assert!(!raw.contains("mnemonic"));
         assert!(!raw.contains("secret_key"));
+    }
+
+    #[tokio::test]
+    async fn p2p_lifecycle_and_control_preserve_separate_trust_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        load_or_create_identity(&state.home).unwrap();
+        assert_eq!(state.p2p.status.lock().await.state, "disabled");
+        assert!(crate::p2p::resolve_candidate(&state, "alice@example.com")
+            .await
+            .is_err());
+        state.p2p = crate::p2p::Bridge::new(true);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(crate::p2p::supervise(state.clone(), rx));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(state.p2p.status.lock().await.announcements, 0);
+        let summary = crate::p2p::local_summary(&state).unwrap();
+        assert!(!summary.to_string().contains("signed_profile"));
+        assert!(!summary.to_string().contains("payment_method_states"));
+        assert_eq!(summary["active_aliases"], 0);
+        tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.p2p.status.lock().await.state, "stopped");
+    }
+
+    #[test]
+    fn control_does_not_promote_a_signed_domain_claim_to_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let mut wallet = load_or_create_identity(&state.home).unwrap();
+        wallet.alias = Some("truja@binance.com".into());
+        wallet.lightning_address = Some("alice@example.com".into());
+        sign_and_store(&state.home, &mut wallet, &state.network).unwrap();
+        save_wallet(&state.home, &wallet).unwrap();
+        let summary = crate::p2p::local_summary(&state).unwrap();
+        assert_eq!(summary["verification"]["profile_signature_verified"], true);
+        assert_eq!(summary["verification"]["identifier_verified"], false);
+        assert_eq!(summary["identifier_authority"], "unverified");
+        assert_eq!(summary["verification"]["payment_methods_verified"], false);
+        assert!(!summary.to_string().contains("binance.com"));
+        assert!(!summary.to_string().contains("alice@example.com"));
+    }
+
+    #[tokio::test]
+    async fn idle_p2p_supervisor_recovers_from_publication_failure() {
+        async fn wait_for(state: &AppState, expected: &str) {
+            tokio::time::timeout(std::time::Duration::from_secs(4), async {
+                loop {
+                    if state.p2p.status.lock().await.state == expected {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(state.p2p.status.lock().await.announcements, 0);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        state.p2p = crate::p2p::Bridge::new(true);
+        let wallet = load_or_create_identity(dir.path()).unwrap();
+        let path = crate::config::wallet_path(dir.path());
+        std::fs::write(&path, b"{").unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(crate::p2p::supervise(state.clone(), stopped));
+        wait_for(&state, "degraded").await;
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+        assert_eq!(state.p2p.status.lock().await.state, "degraded");
+        save_wallet(dir.path(), &wallet).unwrap();
+        wait_for(&state, "active").await;
+        std::fs::write(&path, b"{").unwrap();
+        wait_for(&state, "degraded").await;
+        save_wallet(dir.path(), &wallet).unwrap();
+        wait_for(&state, "active").await;
+        stop.send(()).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn control_get_is_read_only_with_missing_existing_and_advancing_pins() {
+        struct StopServer(Arc<Server>);
+        impl Drop for StopServer {
+            fn drop(&mut self) {
+                self.0.unblock();
+            }
+        }
+        fn snapshot(home: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+            let mut files = std::collections::BTreeMap::new();
+            for entry in std::fs::read_dir(home).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    files.extend(snapshot(&path));
+                } else {
+                    // SQLite readers may create WAL coordination sidecars; these
+                    // are not profile, checkpoint or trust-state persistence.
+                    let name = path.file_name().unwrap().to_string_lossy();
+                    if name.ends_with(".sqlite3-shm") || name.ends_with(".sqlite3-wal") {
+                        continue;
+                    }
+                    files.insert(path.clone(), std::fs::read(&path).unwrap());
+                }
+            }
+            files
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let _stop = StopServer(server.clone());
+        state.bind = server.server_addr().to_ip().unwrap();
+        let url = format!("http://{}/v1/control", state.bind);
+        let mut wallet = load_or_create_identity(&state.home).unwrap();
+        wallet.alias = Some("alice@example.test".into());
+        wallet.lightning_address = Some("alice@example.test".into());
+        save_wallet(&state.home, &wallet).unwrap();
+        let handle = tokio::spawn(serve_server(Arc::new(state.clone()), server.clone()));
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        for stage in 0..4 {
+            if stage == 1 || stage == 3 {
+                sign_and_store(&state.home, &mut wallet, &state.network).unwrap();
+                save_wallet(&state.home, &wallet).unwrap();
+            }
+            if stage == 2 {
+                crate::handlers::resolve::resolve_profile(&state, wallet.alias.as_deref().unwrap())
+                    .unwrap();
+            }
+            let before = snapshot(&state.home);
+            for _ in 0..2 {
+                let response = client.get(&url).send().await.unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let body: serde_json::Value = response.json().await.unwrap();
+                if stage > 0 {
+                    assert_eq!(
+                        body["identity"]["verification"]["profile_signature_verified"],
+                        true
+                    );
+                }
+            }
+            assert!(
+                snapshot(&state.home) == before,
+                "GET modified persistent state at stage {stage}"
+            );
+        }
+        // A missing database/home must not be initialized by a read-only opener.
+        let missing = state.home.join("missing");
+        assert!(satspath_core::TransactionalTransparencyStore::open_read_only(&missing).is_err());
+        assert!(!missing.exists());
+        let store =
+            satspath_core::TransactionalTransparencyStore::open_read_only(&state.home).unwrap();
+        let checkpoint = store
+            .load_log()
+            .unwrap()
+            .checkpoints()
+            .last()
+            .unwrap()
+            .clone();
+        assert!(store
+            .replace_latest_checkpoint(&checkpoint.checkpoint_hash().unwrap(), &checkpoint)
+            .is_err());
+        server.unblock();
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_listener_survives_requests_and_a_signal_between_iterations() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Registration(Arc<AtomicUsize>);
+        impl Drop for Registration {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_state(dir.path()));
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let url = format!("http://{}/health", server.server_addr().to_ip().unwrap());
+        let (signal, receiver) = tokio::sync::oneshot::channel();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let registration = Registration(drops.clone());
+        let shutdown = async move {
+            let _registration = registration;
+            receiver.await?;
+            Ok(())
+        };
+        let handle = tokio::spawn(crate::server::serve_server_with_shutdown(
+            state,
+            server.clone(),
+            shutdown,
+        ));
+        let client = reqwest::Client::new();
+        for _ in 0..8 {
+            assert_eq!(
+                client.get(&url).send().await.unwrap().status(),
+                reqwest::StatusCode::OK
+            );
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                0,
+                "listener was dropped during traffic"
+            );
+        }
+        // Queue shutdown while the request branch is also ready.
+        let request = client.get(&url).send();
+        signal.send(()).unwrap();
+        let (_, stopped) = tokio::join!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), request),
+            tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        );
+        stopped.unwrap().unwrap().unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -396,8 +641,10 @@ mod tests {
         };
         let addr = server.server_addr().to_ip().unwrap();
         let state = Arc::new(AppState {
+            p2p: crate::p2p::Bridge::new(false),
             home,
             bind: addr,
+            allowed_hosts: Vec::new(),
             network: "devnet".into(),
             open_ui: false,
             auth_token: "test_token".into(),
@@ -410,6 +657,116 @@ mod tests {
             let _ = serve_server(state, srv_clone).await;
         });
         (format!("{scheme}://{addr}"), server, handle)
+    }
+
+    #[tokio::test]
+    async fn dashboard_auth_preserves_private_and_public_boundaries() {
+        let config = rate_limit::RateLimiterConfig {
+            burst_capacity: 100,
+            refill_rate_per_sec: 100.0,
+            max_body_bytes: 65_536,
+            trust_proxy_headers: false,
+            cleanup_interval_secs: 300,
+        };
+        let (base_url, server, handle) = start_test_daemon(config).await;
+        let client = reqwest::Client::new();
+        for path in ["/", "/dashboard-auth.mjs", "/health", "/v1/control"] {
+            let response = client
+                .get(format!("{base_url}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
+            assert!(!response.text().await.unwrap().contains("test_token"));
+        }
+        for (method, path) in [
+            (reqwest::Method::POST, "/v1/dashboard/auth"),
+            (reqwest::Method::POST, "/v1/profile/challenge"),
+            (reqwest::Method::POST, "/v1/profile/verify"),
+            (reqwest::Method::PUT, "/v1/profile"),
+            (reqwest::Method::POST, "/v1/profile/methods"),
+            (reqwest::Method::POST, "/v1/profile/rotate-key"),
+            (reqwest::Method::POST, "/v1/broadcast"),
+            (reqwest::Method::POST, "/v1/p2p/resolve"),
+            (
+                reqwest::Method::POST,
+                "/v1/invites/notifications/example/read",
+            ),
+        ] {
+            for credential in [None, Some("invalid_dashboard_token")] {
+                let mut request = client.request(method.clone(), format!("{base_url}{path}"));
+                if let Some(token) = credential {
+                    request = request.bearer_auth(token);
+                }
+                let response = request.json(&serde_json::json!({})).send().await.unwrap();
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::UNAUTHORIZED,
+                    "{path}"
+                );
+                let body = response.text().await.unwrap();
+                assert!(!body.contains("test_token"));
+                assert!(!body.contains("invalid_dashboard_token"));
+            }
+        }
+        for path in ["/v1/dashboard/auth", "/v1/profile/challenge"] {
+            let response = client
+                .post(format!("{base_url}{path}"))
+                .bearer_auth("test_token")
+                .json(&serde_json::json!({"alias": "alice@example.com"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
+            assert!(response.headers().get("set-cookie").is_none());
+            assert!(!response.text().await.unwrap().contains("test_token"));
+        }
+        server.unblock();
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn http_host_guard_precedes_public_views_and_authenticated_mutations() {
+        for trust_proxy_headers in [false, true] {
+            let config = rate_limit::RateLimiterConfig {
+                trust_proxy_headers,
+                ..Default::default()
+            };
+            let (base_url, server, handle) = start_test_daemon(config).await;
+            let client = reqwest::Client::new();
+            for path in ["/v1/control", "/", "/health"] {
+                let response = client
+                    .get(format!("{base_url}{path}"))
+                    .header("Host", "rebind.example")
+                    .header("X-Forwarded-Host", "localhost")
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+                let body = response.text().await.unwrap();
+                assert!(!body.contains("fingerprint"));
+                assert!(!body.contains("test_token"));
+            }
+            let response = client
+                .post(format!("{base_url}/v1/dashboard/auth"))
+                .header("Host", "rebind.example")
+                .bearer_auth("test_token")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            for host in ["localhost", "127.0.0.1", "[::1]"] {
+                let response = client
+                    .get(format!("{base_url}/v1/control"))
+                    .header("Host", host)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+            }
+            server.unblock();
+            handle.abort();
+        }
     }
 
     #[tokio::test]

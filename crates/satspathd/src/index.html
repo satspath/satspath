@@ -446,15 +446,55 @@
   <div class="brand">SATS<span>PATH</span></div>
   <div class="chrome">
     <nav>
-      <button data-tab="send" class="active">Send</button>
+      <button data-tab="control" class="active">Node Control</button>
+      <button data-tab="send">Send</button>
       <button data-tab="receive">Receive</button>
       <button data-tab="claim" id="nav-claim">Claim</button>
       <button data-tab="profile">My Profile</button>
       <button data-tab="transparency">Transparency</button>
     </nav>
 
+    <form id="dashboard-auth-form" class="card show" autocomplete="off">
+      <h3>Local dashboard access</h3>
+      <p class="reason">Enter the admin token from this daemon's local admin.macaroon file once per tab. It stays in memory only and is cleared when you lock, reload or leave this page. Use HTTPS when connecting from another device.</p>
+      <label for="dashboard-admin-token">Admin token</label>
+      <input id="dashboard-admin-token" type="password" autocomplete="off" spellcheck="false" autocapitalize="none" placeholder="Local admin token" required />
+      <button class="action" id="dashboard-unlock" type="submit">Unlock this tab</button>
+      <button class="action hidden" id="dashboard-lock" type="button">Lock this tab</button>
+      <p id="dashboard-auth-status" class="reason" role="status">Locked. Public views remain available.</p>
+    </form>
+
     <!-- SEND -->
-    <section id="tab-send">
+    <section id="tab-control">
+      <h2>Node / Network Control Center</h2>
+      <p class="tagline">Identity, namespace authority, method ownership and transport availability are separate.</p>
+      <div class="card show"><h3>Identity and trust</h3>
+        <div class="explorer-grid">
+          <div class="metric"><span>Fingerprint</span><strong id="control-fingerprint">Unknown</strong></div>
+          <div class="metric"><span>Active aliases</span><strong id="control-aliases">Unknown</strong></div>
+          <div class="metric"><span>Capabilities</span><strong id="control-capabilities">Unknown</strong></div>
+          <div class="metric"><span>Profile signature</span><strong id="control-signature">Unverified</strong></div>
+          <div class="metric"><span>Identifier authority</span><strong id="control-authority">Unverified</strong></div>
+          <div class="metric"><span>Key continuity</span><strong id="control-continuity">Unverified</strong></div>
+          <div class="metric"><span>Method ownership</span><strong id="control-methods">Unverified</strong></div>
+          <div class="metric"><span>Transparency</span><strong id="control-transparency">Unverified</strong></div>
+        </div>
+      </div>
+      <div class="card show"><h3>Network</h3>
+        <div class="explorer-grid">
+          <div class="metric"><span>HTTP</span><strong id="control-http">Unknown</strong></div>
+          <div class="metric"><span>Nostr</span><strong id="control-nostr">On demand</strong></div>
+          <div class="metric"><span>Hyperswarm · experimental</span><strong id="control-network">Loading…</strong></div>
+          <div class="metric"><span>Announcements</span><strong id="control-announcements">Unknown</strong></div>
+          <div class="metric"><span>Active peers</span><strong id="control-peers">Unknown</strong></div>
+          <div class="metric"><span>Last publication</span><strong id="control-publish">None</strong></div>
+          <div class="metric"><span>Last candidate resolution</span><strong id="control-resolution">None</strong></div>
+        </div>
+        <p class="reason">DHT topics contain hashed aliases. Hashing does not provide anonymity. Identity and spending keys are never sent.</p>
+      </div>
+      <p class="reason">P2P candidates do not grant namespace authority or routing eligibility. No profile directory is shown here.</p>
+    </section>
+    <section id="tab-send" class="hidden">
       <div id="s-notifications" class="card hidden" style="margin-bottom:20px; border-color: rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.08);"></div>
       <h2>Send Payment</h2>
       <p class="tagline">Decentralized, non-custodial path routing.</p>
@@ -666,8 +706,34 @@
   </div>
 </main>
 
-<script>
+<script type="module">
+  import { createDashboardClient } from '/dashboard-auth.mjs';
   const $ = (id) => document.getElementById(id);
+  const authInput = $('dashboard-admin-token');
+  const dashboardAuth = createDashboardClient({ origin: location.origin, onLock: () => {
+    authInput.value = '';
+    authInput.hidden = false;
+    $('dashboard-unlock').classList.remove('hidden');
+    $('dashboard-lock').classList.add('hidden');
+    $('dashboard-auth-status').textContent = 'Locked. Public views remain available.';
+  }});
+  const apiFetch = dashboardAuth.request;
+  $('dashboard-auth-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const value = authInput.value;
+    authInput.value = ''; // Clear the password field before any asynchronous operation.
+    $('dashboard-unlock').disabled = true;
+    try {
+      await dashboardAuth.unlock(value);
+      authInput.hidden = true;
+      $('dashboard-unlock').classList.add('hidden');
+      $('dashboard-lock').classList.remove('hidden');
+      $('dashboard-auth-status').textContent = 'Unlocked for this tab only.';
+    } catch (error) { $('dashboard-auth-status').textContent = error.message; }
+    finally { $('dashboard-unlock').disabled = false; }
+  });
+  $('dashboard-lock').addEventListener('click', dashboardAuth.lock);
+  window.addEventListener('pagehide', dashboardAuth.lock);
   const show = (el) => { el.classList.remove("hidden"); requestAnimationFrame(() => el.classList.add("show")); };
   const hide = (el) => { el.classList.add("hidden"); el.classList.remove("show"); };
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -687,11 +753,41 @@
   // Tab switching logic
   const switchTab = (tabName) => {
     document.querySelectorAll("nav button").forEach(x => x.classList.toggle("active", x.dataset.tab === tabName));
-    ["send","receive","claim","profile","transparency"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== tabName));
+    ["control","send","receive","claim","profile","transparency"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== tabName));
+    if (tabName === "control") loadControl();
     if (tabName === "transparency") loadTransparency();
     if (tabName === "send") loadNotifications();
   };
   document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+  async function loadControl() {
+    try {
+      const response = await apiFetch('/v1/control');
+      if (!response.ok) throw new Error('Control status unavailable');
+      const data = await response.json();
+      // textContent prevents attacker-controlled strings from becoming markup.
+      const identity = data.identity;
+      const verification = identity.verification;
+      const put = (id, value) => $(id).textContent = String(value);
+      const verified = value => value ? 'Verified' : 'Unverified';
+      const time = value => value == null ? 'None' : new Date(value * 1000).toLocaleString();
+      put('control-fingerprint', identity.fingerprint ?? 'Unknown');
+      put('control-aliases', identity.active_aliases);
+      put('control-capabilities', identity.capabilities?.join(', ') || 'None');
+      put('control-signature', verified(verification?.profile_signature_verified));
+      put('control-authority', verification?.identifier_verified ? 'Attested' : identity.identifier_scope === 'local_dev' ? 'Local / development' : 'Unverified');
+      put('control-continuity', verified(verification?.key_continuity_verified));
+      put('control-methods', verified(verification?.payment_methods_verified));
+      put('control-transparency', verified(verification?.transparency_inclusion_verified));
+      put('control-http', data.http);
+      put('control-network', data.hyperswarm.state);
+      put('control-announcements', data.hyperswarm.announcements);
+      put('control-peers', data.hyperswarm.active_peers ?? 'Unknown');
+      put('control-publish', time(data.hyperswarm.last_publish));
+      put('control-resolution', time(data.hyperswarm.last_resolution));
+    } catch { $('control-network').textContent = 'Control status unavailable'; }
+  }
+  loadControl();
+  setInterval(() => { if (!$('tab-control').classList.contains('hidden')) loadControl(); }, 5000);
 
   let transparencyLoaded = false, transparencyEvents = [], transparencyCheckpoints = [], latestCheckpoint = null, treeScale = 1, treePan = 0;
   const hexBytes = h => new Uint8Array((h.match(/.{2}/g) || []).map(x => parseInt(x, 16)));
@@ -720,7 +816,7 @@
     transparencyLoaded = true;
     try {
       const [statusRes, eventsRes, checkpointsRes] = await Promise.all([
-        fetch("/v1/transparency/status"), fetch("/v1/transparency/events?limit=200"), fetch("/v1/transparency/checkpoints?limit=100")
+        apiFetch("/v1/transparency/status"), apiFetch("/v1/transparency/events?limit=200"), apiFetch("/v1/transparency/checkpoints?limit=100")
       ]);
       const status = await statusRes.json(), eventPage = await eventsRes.json(), checkpointPage = await checkpointsRes.json();
       if (!statusRes.ok || status.error) throw new Error(status.error || "Transparency status unavailable");
@@ -800,7 +896,7 @@
   }
 
   async function selectLeaf(node) {
-    const hash=await eventHash(node.event), response=await fetch(`/v1/transparency/inclusion/${hash}`), proof=await response.json();
+    const hash=await eventHash(node.event), response=await apiFetch(`/v1/transparency/inclusion/${hash}`), proof=await response.json();
     if (!response.ok) throw new Error(proof.error || "Proof unavailable");
     $("t-selected").textContent=`Leaf ${proof.leaf_index} · ${hash}`;
     if (!latestCheckpoint) throw new Error("Signed checkpoint unavailable");
@@ -819,7 +915,7 @@
     const bundle=JSON.parse($("t-proof-json").value), result=await verifyProofLocal(bundle.proof);
     const expectedLeaf=bytesHex(await hashLeaf(bundle.event_hash));
     if (!result.valid || bundle.proof.root_hash!==bundle.checkpoint.log_root || bundle.proof.tree_size!==bundle.checkpoint.log_size || bundle.proof.leaf_hash!==expectedLeaf) throw new Error("PROFILE NOT INCLUDED — proof/checkpoint/event binding mismatch");
-    const response=await fetch("/v1/transparency/verify/inclusion",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(bundle)}), verified=await response.json();
+    const response=await apiFetch("/v1/transparency/verify/inclusion",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(bundle)}), verified=await response.json();
     if (!response.ok || !verified.valid) throw new Error(verified.error || "checkpoint signature invalid");
     $("t-proof-result").textContent="VALID";$("t-proof-result").className="status ok";
     $("v-inclusion").textContent="VALID";$("v-inclusion").className="status ok";$("v-binding").textContent="VALID";$("v-binding").className="status ok";
@@ -837,7 +933,7 @@
       const amount_sats = parseInt($("s-amount").value, 10);
       if (!recipient || !amount_sats) throw new Error("Enter a recipient and an amount.");
       
-      const r = await fetch("/v1/send", {
+      const r = await apiFetch("/v1/send", {
         method: "POST", headers: {"content-type": "application/json"},
         body: JSON.stringify({recipient, amount_sats})
       });
@@ -903,7 +999,7 @@
       if (railVal) payload.rail = railVal;
       if (amtVal) payload.amount_sats = parseInt(amtVal, 10);
       
-      const r = await fetch("/v1/receive", {
+      const r = await apiFetch("/v1/receive", {
         method: "POST", headers: {"content-type": "application/json"},
         body: JSON.stringify(payload)
       });
@@ -935,7 +1031,7 @@
       let alias = $("p-alias").value.trim() || undefined;
       
       if (alias) {
-        const cRes = await fetch("/v1/profile/challenge", {
+        const cRes = await apiFetch("/v1/profile/challenge", {
           method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({ alias })
         });
         const cData = await cRes.json();
@@ -944,7 +1040,7 @@
         const token = prompt(cData.message + "\n\nEnter verification token for " + alias + ":");
         if (!token) throw new Error("Verification cancelled.");
         
-        const vRes = await fetch("/v1/profile/verify", {
+        const vRes = await apiFetch("/v1/profile/verify", {
           method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({ alias, token: token.trim() })
         });
         const vData = await vRes.json();
@@ -962,7 +1058,7 @@
       };
       
       if (payload.lightning_address || payload.onchain_address || payload.onchain_pubkey || payload.ark_server || payload.alias) {
-        const r = await fetch("/v1/profile", {
+        const r = await apiFetch("/v1/profile", {
           method: "PUT", headers: {"content-type": "application/json"}, body: JSON.stringify(payload)
         });
         const d = await r.json();
@@ -980,13 +1076,12 @@
     const btn = $("p-broadcast"), msg = $("p-msg"), err = $("p-err");
     hide(msg); hide(err); btn.disabled = true;
     try {
-      const r = await fetch("/v1/broadcast", {method: "POST"});
+      const r = await apiFetch("/v1/broadcast", {method: "POST"});
       const d = await r.json();
-      if (d.error) throw new Error(d.error);
-      msg.innerHTML = d.broadcasting
-        ? `<span style="color: #60a5fa">Broadcast Active</span><br/><span style="font-size: 11px; color: var(--text-muted)">Profile published over P2P network (${esc(d.status)}).</span>`
-        : `<span style="color: #f87171">Broadcast Failed</span><br/><span style="font-size: 11px; color: var(--text-muted)">P2P is inactive: ${esc(d.status)}.</span>`;
+      if (!r.ok || d.error) throw new Error(d.error || 'Profile save failed.');
+      msg.innerHTML = `<span style="color: #34d399">Profile saved</span><br/><span style="font-size: 11px; color: var(--text-muted)">${esc(d.status)} Check Node Control for transport status.</span>`;
       show(msg);
+      loadControl();
     } catch (e) { err.textContent = e.message; show(err); }
     finally { btn.disabled = false; }
   });
@@ -995,7 +1090,7 @@
   const loadNotifications = async () => {
     try {
       const box = $("s-notifications");
-      const r = await fetch("/v1/invites/notifications");
+      const r = await apiFetch("/v1/invites/notifications");
       if (!r.ok) return;
       const notes = await r.json();
       const unread = notes.filter(n => !n.read);
@@ -1003,29 +1098,36 @@
         hide(box);
         return;
       }
-      box.innerHTML = unread.map(n => `
+      box.innerHTML = unread.map((n, index) => `
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
           <div>
             <span style="color:#34d399; font-weight:700;">[Claimed Invite]</span>
-            <strong>${esc(n.display_hint)}</strong> has claimed their invite for <strong>${n.amount_sats.toLocaleString()} sats</strong>!
+            <strong>${esc(n.display_hint)}</strong> has claimed their invite for <strong>${esc(n.amount_sats.toLocaleString())} sats</strong>!
           </div>
           <div style="display:flex; gap:8px;">
-            <button class="action" style="width:auto; padding:6px 14px; margin:0; font-size:12px;" onclick="fillSend('${esc(n.display_hint)}', ${n.amount_sats}, '${esc(n.notification_id)}')">
+            <button class="action" style="width:auto; padding:6px 14px; margin:0; font-size:12px;" data-send-note="${index}">
               Send Payment Now
             </button>
-            <button style="background:none; border:1px solid var(--border); color:var(--text-muted); border-radius:6px; padding:4px 8px; cursor:pointer;" onclick="dismissNotification('${esc(n.notification_id)}')">
+            <button style="background:none; border:1px solid var(--border); color:var(--text-muted); border-radius:6px; padding:4px 8px; cursor:pointer;" data-dismiss-note="${index}">
               Dismiss
             </button>
           </div>
         </div>
       `).join("");
+      box.querySelectorAll('[data-send-note]').forEach(button => button.addEventListener('click', () => {
+        const note = unread[Number(button.dataset.sendNote)];
+        fillSend(note.display_hint, note.amount_sats, note.notification_id);
+      }));
+      box.querySelectorAll('[data-dismiss-note]').forEach(button => button.addEventListener('click', () => {
+        dismissNotification(unread[Number(button.dataset.dismissNote)].notification_id);
+      }));
       show(box);
     } catch (_) {}
   };
 
-  window.fillSend = async (recipient, amount, notificationId) => {
+  const fillSend = async (recipient, amount, notificationId) => {
     if (notificationId) {
-      fetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
+      apiFetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
     }
     $("s-recipient").value = recipient;
     $("s-amount").value = amount;
@@ -1033,8 +1135,8 @@
     $("s-go").click();
   };
 
-  window.dismissNotification = async (notificationId) => {
-    await fetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
+  const dismissNotification = async (notificationId) => {
+    await apiFetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
     loadNotifications();
   };
 
@@ -1054,7 +1156,7 @@
     hide(details); hide(claimBox); hide(resCard); hide(err);
 
     try {
-      const r = await fetch("/v1/claim?invite_id=" + encodeURIComponent(inviteId));
+      const r = await apiFetch("/v1/claim?invite_id=" + encodeURIComponent(inviteId));
       const d = await r.json();
       if (d.error) throw new Error(d.error);
 
@@ -1113,7 +1215,7 @@
         ark_server: ark || undefined,
       };
 
-      const r = await fetch("/v1/claim", {
+      const r = await apiFetch("/v1/claim", {
         method: "POST",
         headers: {"content-type": "application/json"},
         body: JSON.stringify(body)
