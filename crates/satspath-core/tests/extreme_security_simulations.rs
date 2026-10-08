@@ -29,6 +29,7 @@ fn create_pqc_profile() -> PaymentProfile {
     }
 }
 
+/// A 5 MB response is aborted by the 50 KB download limit.
 #[tokio::test]
 async fn test_attack_memory_exhaustion_dos() {
     println!("✅ SETUP: Resolver configured with 50KB DoS protection limit...");
@@ -46,7 +47,7 @@ async fn test_attack_memory_exhaustion_dos() {
         .create_async()
         .await;
 
-    let resolver = HttpResolver::new();
+    let resolver = HttpResolver::for_local_testing();
     let url = format!("{}/profile", server.url());
     let result = resolver.resolve_from_url(&url).await;
 

@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use crate::crypto::{check_profile_expiry, verify_signed_profile};
 use crate::resolver::ProfileResolver;
-use crate::ssrf::validate_url;
+use crate::ssrf::{pinned_client, resolve_and_validate, validate_url};
 use crate::{Result, SatsPathError, SignedPaymentProfile};
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Resolves a profile by making an HTTP GET request to the domain of the alias.
 ///
@@ -13,7 +15,8 @@ use crate::{Result, SatsPathError, SignedPaymentProfile};
 /// `https://satspath.dev/.well-known/satspath/rodrigo`
 ///
 /// After fetching, the resolver:
-/// 1. **SSRF validation** — blocks requests to private/loopback/metadata IPs.
+/// 1. **SSRF validation** — resolves the host, blocks private/loopback/metadata
+///    addresses, and pins the connection to the validated addresses.
 /// 2. Verifies the profile signature (ECDSA secp256k1 over canonical JSON).
 /// 3. Checks the profile expiry (`expires_at` field).
 ///
@@ -21,17 +24,33 @@ use crate::{Result, SatsPathError, SignedPaymentProfile};
 /// rejected with a hard error, never passed through.
 pub struct HttpResolver {
     client: Client,
+    /// Lets tests reach a local mock server. Only [`Self::for_local_testing`]
+    /// sets it, so a resolver built with [`Self::new`] never skips SSRF checks,
+    /// even in a build with the `test-utils` feature enabled.
+    allow_loopback_for_tests: bool,
 }
 
 impl HttpResolver {
+    /// A resolver that applies the full SSRF policy to every request.
     pub fn new() -> Self {
         Self {
             client: Client::builder()
-                .timeout(Duration::from_secs(10))
+                .timeout(REQUEST_TIMEOUT)
                 // Disallow redirects to prevent open redirect → SSRF chains
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_default(),
+            allow_loopback_for_tests: false,
+        }
+    }
+
+    /// A resolver that may also fetch from `localhost`/`127.0.0.1`, for tests
+    /// against a local mock server. Not available in normal builds.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn for_local_testing() -> Self {
+        Self {
+            allow_loopback_for_tests: true,
+            ..Self::new()
         }
     }
 
@@ -76,14 +95,13 @@ impl HttpResolver {
     /// Extracted so tests can pass a mock server URL directly without
     /// needing a real DNS entry for the test domain.
     pub async fn resolve_from_url(&self, url: &str) -> Result<SignedPaymentProfile> {
-        let is_test_build = cfg!(any(test, feature = "test-utils"));
         let parsed =
             url::Url::parse(url).map_err(|e| SatsPathError::InvalidPaymentUri(e.to_string()))?;
         let is_local = parsed.username().is_empty()
             && parsed.password().is_none()
             && matches!(parsed.host_str(), Some("localhost" | "127.0.0.1"));
 
-        if is_test_build && is_local {
+        let client = if self.allow_loopback_for_tests && is_local {
             if let Some(port) = parsed.port() {
                 if matches!(port, 22 | 3306 | 5432 | 6379 | 27017) {
                     return Err(SatsPathError::ValidationError(format!(
@@ -91,11 +109,15 @@ impl HttpResolver {
                     )));
                 }
             }
+            self.client.clone()
         } else {
-            validate_url(url, false)?;
-        }
+            // SSRF-02: resolve the host, reject internal addresses, and pin
+            // the connection to the validated addresses (no DNS rebinding).
+            let target = resolve_and_validate(url, false).await?;
+            pinned_client(&target, REQUEST_TIMEOUT)?
+        };
 
-        let mut resp = self.client.get(url).send().await.map_err(|e| {
+        let mut resp = client.get(url).send().await.map_err(|e| {
             SatsPathError::NetworkError(format!("Failed to connect to {}: {}", url, e))
         })?;
 
@@ -178,6 +200,7 @@ mod tests {
 
     // ── Test 1: Valid profile — success ───────────────────────────────────────
 
+    /// A valid signed profile from the mock server resolves.
     #[tokio::test]
     async fn valid_profile_resolves_ok() {
         let mut server = Server::new_async().await;
@@ -192,7 +215,7 @@ mod tests {
             .create_async()
             .await;
 
-        let resolver = HttpResolver::new();
+        let resolver = HttpResolver::for_local_testing();
         let url = format!("{}/profile", server.url());
         let result = resolver.resolve_from_url(&url).await;
 
@@ -206,6 +229,7 @@ mod tests {
 
     // ── Test 2: Invalid signature — rejected ──────────────────────────────────
 
+    /// A profile with a bad signature is rejected.
     #[tokio::test]
     async fn invalid_signature_rejected() {
         let mut server = Server::new_async().await;
@@ -223,7 +247,7 @@ mod tests {
             .create_async()
             .await;
 
-        let resolver = HttpResolver::new();
+        let resolver = HttpResolver::for_local_testing();
         let url = format!("{}/profile", server.url());
         let result = resolver.resolve_from_url(&url).await;
 
@@ -237,6 +261,7 @@ mod tests {
 
     // ── Test 3: Expired profile — rejected ────────────────────────────────────
 
+    /// An expired profile is rejected.
     #[tokio::test]
     async fn expired_profile_rejected() {
         let mut server = Server::new_async().await;
@@ -253,7 +278,7 @@ mod tests {
             .create_async()
             .await;
 
-        let resolver = HttpResolver::new();
+        let resolver = HttpResolver::for_local_testing();
         let url = format!("{}/profile", server.url());
         let result = resolver.resolve_from_url(&url).await;
 
@@ -264,6 +289,7 @@ mod tests {
 
     // ── Test 4: 404 → AliasNotFound ───────────────────────────────────────────
 
+    /// A 404 maps to AliasNotFound.
     #[tokio::test]
     async fn not_found_404() {
         let mut server = Server::new_async().await;
@@ -274,7 +300,7 @@ mod tests {
             .create_async()
             .await;
 
-        let resolver = HttpResolver::new();
+        let resolver = HttpResolver::for_local_testing();
         let url = format!("{}/profile", server.url());
         let result = resolver.resolve_from_url(&url).await;
 
@@ -287,6 +313,7 @@ mod tests {
 
     // ── Test 5: 5xx server error → NetworkError ───────────────────────────────
 
+    /// A 5xx maps to a network error.
     #[tokio::test]
     async fn server_error_5xx() {
         let mut server = Server::new_async().await;
@@ -297,7 +324,7 @@ mod tests {
             .create_async()
             .await;
 
-        let resolver = HttpResolver::new();
+        let resolver = HttpResolver::for_local_testing();
         let url = format!("{}/profile", server.url());
         let result = resolver.resolve_from_url(&url).await;
 
@@ -310,6 +337,7 @@ mod tests {
 
     // ── Test 6: Malformed JSON → SerializationError ───────────────────────────
 
+    /// Malformed JSON is rejected.
     #[tokio::test]
     async fn malformed_json_rejected() {
         let mut server = Server::new_async().await;
@@ -322,7 +350,7 @@ mod tests {
             .create_async()
             .await;
 
-        let resolver = HttpResolver::new();
+        let resolver = HttpResolver::for_local_testing();
         let url = format!("{}/profile", server.url());
         let result = resolver.resolve_from_url(&url).await;
 
@@ -330,6 +358,19 @@ mod tests {
         assert!(
             matches!(result.unwrap_err(), SatsPathError::SerializationError(_)),
             "malformed JSON must map to SerializationError"
+        );
+    }
+
+    /// The default resolver never takes the loopback test path, even in a
+    /// build with `test-utils` enabled.
+    #[tokio::test]
+    async fn default_resolver_refuses_loopback() {
+        let result = HttpResolver::new()
+            .resolve_from_url("https://127.0.0.1:8443/profile")
+            .await;
+        assert!(
+            matches!(result, Err(SatsPathError::ValidationError(_))),
+            "{result:?}"
         );
     }
 }
