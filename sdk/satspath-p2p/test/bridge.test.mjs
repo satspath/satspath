@@ -28,13 +28,19 @@ test('failed announcement never acknowledges an active publisher', { timeout: 10
     // Keep this subprocess's DHT completely isolated from public bootstrap nodes.
     createRequire(import.meta.url)('hyperdht/lib/constants').BOOTSTRAP_NODES.length = 0;
     const join = Hyperswarm.prototype.join;
+    let announcementCalled = false;
     Hyperswarm.prototype.join = function (...args) {
       this.listen = async () => {};
-      this.dht.announce = () => { throw new Error('Injected announcement failure'); };
+      this.dht.announce = () => {
+        announcementCalled = true;
+        throw new Error('Injected announcement failure');
+      };
       return join.apply(this, args);
     };
     process.argv = [process.execPath, ${JSON.stringify(fileURLToPath(bridge))}, 'publish', 'alice@example.test'];
     await import(${JSON.stringify(bridge.href)});
+    // Any earlier failure must not satisfy the expected exit code of 1.
+    if (!announcementCalled) process.exitCode = 2;
   `;
   const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
     cwd: fileURLToPath(new URL('..', import.meta.url)),
