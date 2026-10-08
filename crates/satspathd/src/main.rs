@@ -375,23 +375,46 @@ mod tests {
         assert!(not_found.is_err());
     }
 
+    /// Start a plain-HTTP loopback test daemon.
     async fn start_test_daemon(
         config: rate_limit::RateLimiterConfig,
     ) -> (String, Arc<Server>, tokio::task::JoinHandle<()>) {
         start_test_daemon_full(config, None).await
     }
 
+    /// Start a loopback test daemon, optionally serving TLS.
     async fn start_test_daemon_full(
+        config: rate_limit::RateLimiterConfig,
+        ssl_config: Option<tiny_http::SslConfig>,
+    ) -> (String, Arc<Server>, tokio::task::JoinHandle<()>) {
+        start_test_daemon_bound("127.0.0.1:0", config, ssl_config).await
+    }
+
+    /// Start a test daemon on `bind`. The returned URL always targets loopback,
+    /// so a wildcard bind such as `0.0.0.0:0` is reachable from the test.
+    async fn start_test_daemon_bound(
+        bind: &str,
         config: rate_limit::RateLimiterConfig,
         ssl_config: Option<tiny_http::SslConfig>,
     ) -> (String, Arc<Server>, tokio::task::JoinHandle<()>) {
         let dir = tempfile::tempdir().unwrap();
         let home = Box::leak(Box::new(dir)).path().to_path_buf();
+        start_test_daemon_at(bind, home, config, ssl_config).await
+    }
+
+    /// Start a test daemon on `bind` serving `home`, so a test can seed state
+    /// there first.
+    async fn start_test_daemon_at(
+        bind: &str,
+        home: std::path::PathBuf,
+        config: rate_limit::RateLimiterConfig,
+        ssl_config: Option<tiny_http::SslConfig>,
+    ) -> (String, Arc<Server>, tokio::task::JoinHandle<()>) {
         let (server, scheme) = if let Some(ssl) = ssl_config {
-            let srv = Server::https("127.0.0.1:0", ssl).unwrap();
+            let srv = Server::https(bind, ssl).unwrap();
             (Arc::new(srv), "https")
         } else {
-            let srv = Server::http("127.0.0.1:0").unwrap();
+            let srv = Server::http(bind).unwrap();
             (Arc::new(srv), "http")
         };
         let addr = server.server_addr().to_ip().unwrap();
@@ -409,9 +432,11 @@ mod tests {
         let handle = tokio::spawn(async move {
             let _ = serve_server(state, srv_clone).await;
         });
-        (format!("{scheme}://{addr}"), server, handle)
+        let url_addr = SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), addr.port());
+        (format!("{scheme}://{url_addr}"), server, handle)
     }
 
+    /// The per-client rate limiter allows the burst, then answers 429.
     #[tokio::test]
     async fn test_http_rate_limit_and_burst_protection() {
         let config = rate_limit::RateLimiterConfig {
@@ -473,6 +498,318 @@ mod tests {
         );
 
         server.unblock();
+    }
+
+    /// Blind cross-site POSTs (non-JSON Content-Type) get 415, and a loopback-bound
+    /// daemon rejects DNS-rebound Host names while accepting loopback ones.
+    #[tokio::test]
+    async fn test_http_rejects_cross_site_content_types_and_rebound_hosts() {
+        let config = rate_limit::RateLimiterConfig {
+            burst_capacity: 50,
+            refill_rate_per_sec: 50.0,
+            max_body_bytes: 65_536,
+            trust_proxy_headers: false,
+            cleanup_interval_secs: 300,
+        };
+        let (base_url, server, _handle) = start_test_daemon(config).await;
+        let client = reqwest::Client::new();
+        let body = r#"{"recipient":"carol@example.com","amount_sats":1000}"#;
+
+        // A text/plain POST is a CORS "simple request" a hostile page can send blind.
+        // /v1/send is owner-only, so authenticate: the Content-Type rule must
+        // hold even for a request that carries the token.
+        let res = client
+            .post(format!("{base_url}/v1/send"))
+            .bearer_auth("test_token")
+            .header("Content-Type", "text/plain")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let res = client
+            .post(format!("{base_url}/v1/send"))
+            .bearer_auth("test_token")
+            .header("Content-Type", "application/json; charset=utf-8")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
+
+        // DNS rebinding: the connection lands on loopback but Host names the attacker.
+        let res = client
+            .get(format!("{base_url}/v1/profile"))
+            .header("Host", "attacker.example:9737")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::FORBIDDEN);
+
+        for host in ["localhost:9737", "127.0.0.1", "[::1]:9737"] {
+            let res = client
+                .get(format!("{base_url}/health"))
+                .header("Host", host)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status(), reqwest::StatusCode::OK, "{host}");
+        }
+
+        server.unblock();
+    }
+
+    /// With --behind-proxy the proxy validates Host, so a public Host is accepted.
+    #[tokio::test]
+    async fn test_http_behind_proxy_accepts_public_host() {
+        let config = rate_limit::RateLimiterConfig {
+            burst_capacity: 50,
+            refill_rate_per_sec: 50.0,
+            max_body_bytes: 65_536,
+            trust_proxy_headers: true,
+            cleanup_interval_secs: 300,
+        };
+        let (base_url, server, _handle) = start_test_daemon(config).await;
+        let res = reqwest::Client::new()
+            .get(format!("{base_url}/health"))
+            .header("Host", "satspath.example.com")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
+        server.unblock();
+    }
+
+    /// Every JSON route reports 415 for a non-JSON Content-Type, including routes
+    /// whose handler errors map to 400 or 404.
+    #[tokio::test]
+    async fn test_http_unsupported_media_type_is_415_on_every_json_route() {
+        let (base_url, server, _handle) = start_test_daemon(permissive_limits()).await;
+        let client = reqwest::Client::new();
+        let mut statuses = Vec::new();
+        for path in [
+            "/v1/transparency/verify/inclusion",
+            "/v1/resolve",
+            "/v1/quote",
+            "/v1/profile",
+        ] {
+            let res = client
+                .post(format!("{base_url}{path}"))
+                .bearer_auth("test_token")
+                .header("Content-Type", "text/plain")
+                .body("{}")
+                .send()
+                .await
+                .unwrap();
+            statuses.push((path, res.status()));
+        }
+        server.unblock();
+        for (path, status) in statuses {
+            assert_eq!(
+                status,
+                reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "{path}"
+            );
+        }
+    }
+
+    /// The Host guard applies only to loopback binds; a wildcard bind (deployed
+    /// behind its own network controls) must keep answering public Host names.
+    #[tokio::test]
+    async fn test_http_non_loopback_bind_accepts_public_host() {
+        let (base_url, server, _handle) =
+            start_test_daemon_bound("0.0.0.0:0", permissive_limits(), None).await;
+        let res = reqwest::Client::new()
+            .get(format!("{base_url}/health"))
+            .header("Host", "satspath.example.com")
+            .send()
+            .await
+            .unwrap();
+        server.unblock();
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
+    }
+
+    /// Rate limits loose enough that tests making several requests never hit them.
+    fn permissive_limits() -> rate_limit::RateLimiterConfig {
+        rate_limit::RateLimiterConfig {
+            burst_capacity: 50,
+            refill_rate_per_sec: 50.0,
+            max_body_bytes: 65_536,
+            trust_proxy_headers: false,
+            cleanup_interval_secs: 300,
+        }
+    }
+
+    /// Claims, invite listings and sends need the admin token over HTTP.
+    #[tokio::test]
+    async fn test_http_claim_and_invite_listing_require_auth() {
+        let config = rate_limit::RateLimiterConfig {
+            burst_capacity: 50,
+            refill_rate_per_sec: 50.0,
+            max_body_bytes: 65_536,
+            trust_proxy_headers: false,
+            cleanup_interval_secs: 300,
+        };
+        let (base_url, server, _handle) = start_test_daemon(config).await;
+        let client = reqwest::Client::new();
+
+        // Unauthenticated claim using the daemon identity must not reach the handler.
+        let res = client
+            .post(format!("{base_url}/v1/claim"))
+            .json(&serde_json::json!({
+                "invite_id": "any",
+                "alias": "victim@example.com",
+                "lightning_address": "attacker@evil.example"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        // With the owner token it reaches the handler (unknown invite -> 404).
+        let res = client
+            .post(format!("{base_url}/v1/claim"))
+            .bearer_auth("test_token")
+            .json(&serde_json::json!({
+                "invite_id": "missing",
+                "alias": "victim@example.com",
+                "lightning_address": "owner@example.com"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
+
+        // /v1/send can create and store an invite, so it is owner-only too.
+        let send_body =
+            serde_json::json!({ "recipient": "carol@example.com", "amount_sats": 1000 });
+        let res = client
+            .post(format!("{base_url}/v1/send"))
+            .json(&send_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let res = client
+            .post(format!("{base_url}/v1/send"))
+            .bearer_auth("test_token")
+            .json(&send_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
+
+        for path in ["/v1/invites", "/v1/invites/notifications"] {
+            let res = client
+                .get(format!("{base_url}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status(), reqwest::StatusCode::UNAUTHORIZED, "{path}");
+
+            let res = client
+                .get(format!("{base_url}{path}"))
+                .bearer_auth("test_token")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status(), reqwest::StatusCode::OK, "{path}");
+        }
+
+        server.unblock();
+    }
+
+    /// A claim carrying a signed profile passes authentication without the token.
+    #[tokio::test]
+    async fn test_http_public_claim_with_signed_profile_skips_admin_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        load_or_create_identity(&home).unwrap();
+
+        // Sender creates an invite for an unregistered alias.
+        let claim_url = match send_response(
+            &test_state(&home),
+            SendRequest {
+                recipient: "carol@example.com".into(),
+                amount_sats: 25_000,
+                routing_ok: Some(true),
+            },
+        )
+        .await
+        {
+            SendResponse::Invite { claim_url, .. } => claim_url,
+            other => panic!("expected SendResponse::Invite, got {other:?}"),
+        };
+        let invite_id = claim_url
+            .split("invite_id=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap()
+            .to_string();
+
+        // Receiver signs their own profile with their own key.
+        let key = generate_identity_keypair();
+        let profile = PaymentProfile {
+            alias: "carol@example.com".into(),
+            identity_pubkey: hex::encode(key.public_key.serialize()),
+            methods: vec![PaymentMethod::Lightning {
+                label: "LN".into(),
+                lightning_address: Some("carol@getalby.com".into()),
+                lnurl: None,
+                bolt12: None,
+                receiver_pubkey: None,
+            }],
+            updated_at: chrono::Utc::now().timestamp(),
+            expires_at: None,
+            sequence: Some(0),
+            preferences: vec![],
+            nonce: None,
+            rotation: None,
+            method_verifications: vec![],
+            hybrid_pubkey: None,
+            pqc_required: false,
+            revoked: false,
+        };
+        let signed = sign_profile(profile, &key.secret_key).unwrap();
+
+        let config = rate_limit::RateLimiterConfig {
+            burst_capacity: 50,
+            refill_rate_per_sec: 50.0,
+            max_body_bytes: 65_536,
+            trust_proxy_headers: false,
+            cleanup_interval_secs: 300,
+        };
+        let (base_url, server, _handle) =
+            start_test_daemon_at("127.0.0.1:0", home, config, None).await;
+
+        // No Authorization header: a receiver-signed claim must pass the auth layer
+        // and reach the claim handler. (The handler cannot yet commit such a claim:
+        // the transparency event needs the receiver's signature over the event
+        // itself, which this API does not collect. That is tracked separately.)
+        let res = reqwest::Client::new()
+            .post(format!("{base_url}/v1/claim"))
+            .json(&serde_json::json!({
+                "invite_id": invite_id,
+                "alias": "carol@example.com",
+                "signed_profile": signed,
+            }))
+            .send()
+            .await
+            .unwrap();
+        let status = res.status();
+        let body: serde_json::Value = res.json().await.unwrap();
+        server.unblock();
+        assert_ne!(status, reqwest::StatusCode::UNAUTHORIZED, "{body}");
+        assert!(
+            !body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Unauthorized"),
+            "{body}"
+        );
     }
 
     #[tokio::test]

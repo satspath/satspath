@@ -672,6 +672,32 @@
   const hide = (el) => { el.classList.add("hidden"); el.classList.remove("show"); };
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
+  // Owner-only endpoints need the daemon's admin token as a Bearer header. It is
+  // held in memory only (never written to web storage, so it is gone on reload)
+  // and only ever sent to this daemon.
+  let adminTokenValue = "";
+  const adminToken = () => adminTokenValue;
+  const setAdminToken = (t) => { adminTokenValue = t; };
+  const adminFetch = (url, opts = {}) => {
+    const token = adminToken();
+    const headers = Object.assign({}, opts.headers || {}, token ? {Authorization: "Bearer " + token} : {});
+    return fetch(url, Object.assign({}, opts, {headers}));
+  };
+  // Render an admin-token form into `box`; `onUnlock` runs after it is entered.
+  const promptAdminToken = (box, message, onUnlock) => {
+    box.innerHTML = `
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <span>${esc(message)}</span>
+        <input class="admin-token-input" type="password" autocomplete="off" placeholder="SATSPATHD_AUTH_TOKEN" style="flex:1; min-width:180px;">
+        <button class="action admin-token-save" style="width:auto; padding:6px 14px; margin:0; font-size:12px;">Unlock</button>
+      </div>`;
+    box.querySelector(".admin-token-save").onclick = () => {
+      setAdminToken(box.querySelector(".admin-token-input").value.trim());
+      onUnlock();
+    };
+    show(box);
+  };
+
   const fireLasers = (colorClass) => {
     const container = $("lasers-container");
     for(let i=0; i<6; i++) {
@@ -837,10 +863,14 @@
       const amount_sats = parseInt($("s-amount").value, 10);
       if (!recipient || !amount_sats) throw new Error("Enter a recipient and an amount.");
       
-      const r = await fetch("/v1/send", {
+      const r = await adminFetch("/v1/send", {
         method: "POST", headers: {"content-type": "application/json"},
         body: JSON.stringify({recipient, amount_sats})
       });
+      if (r.status === 401) {
+        promptAdminToken(err, "Enter the daemon admin token to send.", () => $("s-go").click());
+        return;
+      }
       const d = await r.json();
       if (d.error) throw new Error(d.error);
       
@@ -995,7 +1025,11 @@
   const loadNotifications = async () => {
     try {
       const box = $("s-notifications");
-      const r = await fetch("/v1/invites/notifications");
+      const r = await adminFetch("/v1/invites/notifications");
+      if (r.status === 401) {
+        promptAdminToken(box, "Enter the daemon admin token to see invite notifications.", loadNotifications);
+        return;
+      }
       if (!r.ok) return;
       const notes = await r.json();
       const unread = notes.filter(n => !n.read);
@@ -1025,7 +1059,7 @@
 
   window.fillSend = async (recipient, amount, notificationId) => {
     if (notificationId) {
-      fetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
+      adminFetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
     }
     $("s-recipient").value = recipient;
     $("s-amount").value = amount;
@@ -1034,7 +1068,7 @@
   };
 
   window.dismissNotification = async (notificationId) => {
-    await fetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
+    await adminFetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
     loadNotifications();
   };
 
@@ -1113,11 +1147,16 @@
         ark_server: ark || undefined,
       };
 
-      const r = await fetch("/v1/claim", {
+      // This claim publishes the daemon's own identity, so it is owner-only.
+      const r = await adminFetch("/v1/claim", {
         method: "POST",
         headers: {"content-type": "application/json"},
         body: JSON.stringify(body)
       });
+      if (r.status === 401) {
+        promptAdminToken(err, "Enter the daemon admin token to claim this invite.", () => $("c-claim-go").click());
+        return;
+      }
       const d = await r.json();
       if (d.error) throw new Error(d.error);
 

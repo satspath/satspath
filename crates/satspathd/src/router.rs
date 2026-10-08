@@ -25,7 +25,8 @@ use crate::handlers::{
     },
 };
 use crate::http::{
-    empty_response, handle_read_error, json_error, json_response, json_result, read_json,
+    empty_response, handle_read_error, is_loopback_host, json_error, json_response, json_result,
+    read_json,
 };
 use crate::rate_limit;
 use crate::types::{
@@ -36,10 +37,25 @@ use crate::types::{
 use crate::ui::{html_response, INDEX_HTML};
 use crate::v2_api;
 
+/// Route one HTTP request: rate limit, Host and auth checks, then the handler.
 pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Result<()> {
     let method = request.method().clone();
     let raw_url = request.url().to_string();
     let path = raw_url.split('?').next().unwrap_or("/").to_string();
+
+    // 0. DNS-rebinding guard: a loopback-bound daemon only answers loopback Host names.
+    // Behind a trusted reverse proxy the public Host is forwarded and the proxy's
+    // server_name matching is what validates it.
+    if state.bind.ip().is_loopback()
+        && !state.rate_limiter.trust_proxy_headers()
+        && !is_loopback_host(&request)
+    {
+        let _ = request.respond(json_error(
+            StatusCode(403),
+            anyhow::anyhow!("Forbidden: Host header must name a loopback address"),
+        ));
+        return Ok(());
+    }
 
     // 1. Guard against oversized request bodies (HTTP 413 Payload Too Large)
     let max_body = state.rate_limiter.max_body_bytes();
@@ -75,14 +91,20 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
     }
 
     let is_mutation = !matches!(method, Method::Get | Method::Head | Method::Options);
+    // /v1/send is owner-only: for an unregistered recipient it creates and
+    // stores an invite record (state change). /v1/claim stays public only for
+    // the signed-profile path; the handler enforces auth otherwise.
     let is_public_mutation = path == "/v1/receive"
-        || path == "/v1/send"
         || path == "/v1/claim"
         || path == "/v1/dns/resolve"
         || path == "/v1/transparency/verify/inclusion"
         || path == "/v2/resolve";
 
-    if is_mutation && !is_public_mutation {
+    // Invite records and claim notifications expose invite IDs (the claim capability),
+    // amounts and recipient hints, so they are owner-only even though they are reads.
+    let is_private_read = path == "/v1/invites" || path.starts_with("/v1/invites/");
+
+    if (is_mutation && !is_public_mutation) || is_private_read {
         if let Err(e) = check_auth(&request, &state.auth_token) {
             let _ = request.respond(json_error(StatusCode(401), e));
             return Ok(());
@@ -368,6 +390,20 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
         (Method::Post, "/v1/claim") => {
             let _guard = state.mutation_lock.lock().await;
             match read_json::<ClaimRequest>(&mut request) {
+                // A claim without a receiver-signed profile rewrites the daemon's own
+                // identity and payment methods, so only the authenticated owner may do it.
+                Ok(body)
+                    if body.signed_profile.is_none()
+                        && check_auth(&request, &state.auth_token).is_err() =>
+                {
+                    json_error(
+                        StatusCode(401),
+                        anyhow::anyhow!(
+                            "Unauthorized: claiming with the daemon identity requires the \
+                             admin Bearer token; public claims must include a signed_profile"
+                        ),
+                    )
+                }
                 Ok(body) => match claim_invite_handler(state, body) {
                     Ok(resp) => json_response(StatusCode(200), &resp),
                     Err(e) => {
