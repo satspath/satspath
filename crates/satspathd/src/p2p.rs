@@ -1,5 +1,10 @@
 //! Optional public-profile transport. A downloaded candidate is never a routing authority.
-use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{bail, Context, Result};
 use satspath_core::{privacy::canonical_identifier, registry::Registry, SignedPaymentProfile};
@@ -149,6 +154,21 @@ pub(crate) fn validate_candidate(
     Ok(signed)
 }
 
+fn validate_local_candidate(
+    home: &Path,
+    bytes: &[u8],
+    alias: &str,
+) -> Result<SignedPaymentProfile> {
+    let prior = satspath_core::TransactionalTransparencyStore::profile_read_only(home, alias)?;
+    let signed = validate_candidate(bytes, alias, prior.as_ref())?;
+    // Both transactional and legacy identity pins constrain every candidate.
+    let registry = Registry::open(home)?;
+    if registry.is_registered(alias) {
+        validate_candidate(bytes, alias, Some(registry.resolve_alias(alias)?))?;
+    }
+    Ok(signed)
+}
+
 fn publication(state: &AppState) -> Result<Option<(String, Vec<u8>)>> {
     let response = profile_response(state)?;
     let Some(signed) = response.signed_profile else {
@@ -157,17 +177,18 @@ fn publication(state: &AppState) -> Result<Option<(String, Vec<u8>)>> {
     if response.wallet.identity_pubkey.as_deref() != Some(&signed.profile.identity_pubkey) {
         bail!("not local identity");
     }
-    let alias = signed.profile.alias.clone();
-    let bytes = serde_json::to_vec(&signed)?;
-    validate_candidate(&bytes, &alias, None)?;
     // Withdraw strictly at expiry, without the core's receive clock-skew grace.
-    if signed
-        .profile
-        .expires_at
-        .is_some_and(|expiry| expiry <= now())
+    if signed.profile.revoked
+        || signed
+            .profile
+            .expires_at
+            .is_some_and(|expiry| expiry <= now())
     {
         return Ok(None);
     }
+    let alias = signed.profile.alias.clone();
+    let bytes = serde_json::to_vec(&signed)?;
+    validate_candidate(&bytes, &alias, None)?;
     Ok(Some((alias, bytes)))
 }
 
@@ -199,19 +220,21 @@ pub(crate) async fn supervise(state: AppState, mut shutdown: tokio::sync::onesho
             }
         }
         let snapshot = {
-            let _guard = state.mutation_lock.lock().await;
+            let _guard = tokio::select! {
+                _ = &mut shutdown => break,
+                guard = state.mutation_lock.lock() => guard,
+            };
             publication(&state)
         };
-        let snapshot = match snapshot {
-            Ok(value) => value,
-            Err(_) => {
-                state.p2p.status.lock().await.state = "degraded";
-                None
-            }
+        let (snapshot, idle_state) = match snapshot {
+            Ok(value) => (value, "active"),
+            Err(_) => (None, "degraded"),
         };
         if snapshot == previous {
-            if snapshot.is_none() && state.p2p.status.lock().await.state == "starting" {
-                state.p2p.status.lock().await.state = "active";
+            if snapshot.is_none() {
+                let mut status = state.p2p.status.lock().await;
+                status.state = idle_state;
+                status.announcements = 0;
             }
             continue;
         }
@@ -271,7 +294,7 @@ pub(crate) async fn supervise(state: AppState, mut shutdown: tokio::sync::onesho
                 }
             }
         } else {
-            state.p2p.status.lock().await.state = "active";
+            state.p2p.status.lock().await.state = idle_state;
         }
     }
     if let Some(mut process) = child {
@@ -301,15 +324,7 @@ pub(crate) async fn resolve_candidate(state: &AppState, alias: &str) -> Result<s
         let mut input = child.stdin.take().context("stdin")?;
         let signed = receive_candidates(&mut output, &mut input, |bytes| async move {
             let _guard = state.mutation_lock.lock().await;
-            let store = satspath_core::TransactionalTransparencyStore::open(&state.home)?;
-            let prior = store.profile(alias)?;
-            let signed = validate_candidate(&bytes, alias, prior.as_ref())?;
-            // Both transactional and legacy identity pins constrain every candidate.
-            let registry = Registry::open(&state.home)?;
-            if registry.is_registered(alias) {
-                validate_candidate(&bytes, alias, Some(registry.resolve_alias(alias)?))?;
-            }
-            Ok(signed)
+            validate_local_candidate(&state.home, &bytes, alias)
         })
         .await?;
         // Keep the parent-liveness pipe open until the accepted child exits.
@@ -386,6 +401,78 @@ mod tests {
     }
     fn bytes(profile: &SignedPaymentProfile) -> Vec<u8> {
         serde_json::to_vec(profile).unwrap()
+    }
+
+    fn persistent_files(home: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(home).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(persistent_files(&path));
+            } else {
+                let name = path.file_name().unwrap().to_string_lossy();
+                if !name.ends_with(".sqlite3-shm") && !name.ends_with(".sqlite3-wal") {
+                    files.insert(path.clone(), std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn candidate_validation_never_initializes_missing_state_or_ignores_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("missing");
+        let signed = fixture("alice@example.test");
+        assert!(validate_local_candidate(&home, b"{", &signed.profile.alias).is_err());
+        assert!(validate_local_candidate(&home, &bytes(&signed), &signed.profile.alias).is_ok());
+        assert!(!home.exists());
+
+        assert!(
+            validate_local_candidate(dir.path(), &bytes(&signed), &signed.profile.alias).is_ok()
+        );
+        assert!(validate_local_candidate(dir.path(), b"{", &signed.profile.alias).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        let path = dir.path().join("satspath-transparency-v1.sqlite3");
+        std::fs::write(&path, b"corrupt database").unwrap();
+        let before = persistent_files(dir.path());
+        assert!(
+            validate_local_candidate(dir.path(), &bytes(&signed), &signed.profile.alias).is_err()
+        );
+        assert_eq!(persistent_files(dir.path()), before);
+    }
+
+    #[test]
+    fn read_only_candidate_validation_enforces_both_stores_without_writes() {
+        use crate::handlers::{
+            profile::sign_and_store,
+            wallet::{load_or_create_identity, save_wallet},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut wallet = load_or_create_identity(dir.path()).unwrap();
+        let alias = "alice@example.test";
+        wallet.alias = Some(alias.into());
+        wallet.lightning_address = Some(alias.into());
+        sign_and_store(dir.path(), &mut wallet, "devnet").unwrap();
+        save_wallet(dir.path(), &wallet).unwrap();
+        let signed =
+            satspath_core::TransactionalTransparencyStore::profile_read_only(dir.path(), alias)
+                .unwrap()
+                .unwrap();
+        let before = persistent_files(dir.path());
+        assert!(validate_local_candidate(dir.path(), &bytes(&signed), alias).is_ok());
+        let replacement = fixture(alias);
+        assert!(validate_local_candidate(dir.path(), &bytes(&replacement), alias).is_err());
+        assert_eq!(persistent_files(dir.path()), before);
+
+        Registry::open(dir.path())
+            .unwrap()
+            .register_profile(replacement)
+            .unwrap();
+        let before = persistent_files(dir.path());
+        assert!(validate_local_candidate(dir.path(), &bytes(&signed), alias).is_err());
+        assert_eq!(persistent_files(dir.path()), before);
     }
 
     #[test]

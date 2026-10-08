@@ -46,10 +46,16 @@ SatsPath identity keys. Peer input never selects paths, executables or modules.
 Status: disabled, starting, active, degraded, stopped. Active means the supervisor
 is ready; `announcements` distinguishes whether a profile is actually announced.
 No profile means zero announcements. Errors degrade transport without changing
-wallet/registry state. Ctrl+C (and SIGTERM on Unix) unblocks the HTTP server, closes sidecar stdin and
+wallet/registry state. A successful tick with no eligible profile restores active
+status after an earlier publication error. A failed DHT flush never acknowledges
+an active announcement and follows the supervisor's degraded/retry path.
+Ctrl+C (and SIGTERM on Unix) unblocks the HTTP server, closes sidecar stdin and
 waits up to three seconds, then kills/reaps the process if necessary. Dropped or
 timed-out child operations also use kill-on-drop. IPC EOF also stops the sidecar
 when its parent exits unexpectedly. No daemon secrets enter logs.
+Supervisor lock waits are interruptible on shutdown. After the supervisor stops,
+runtime teardown waits at most another three seconds for in-flight HTTP work,
+including clients that leave synchronous request-body reads blocked.
 Network stalls are bounded; failed startup is retried with a two-second interval.
 
 ## Resolution and routing
@@ -61,6 +67,8 @@ material, canonical alias binding, signature, expiry and revocation. If a local
 transparency profile exists, its identity cannot be replaced and timestamp/sequence
 rollback and conflicting equal sequences are rejected. An identical equal-sequence
 profile can be returned. Candidates are not persisted, so no TOFU pin is created.
+Prior profiles are read without write access; an absent database is not initialized,
+and corrupt or unreadable existing state fails closed even for rejected candidates.
 Profiles lacking expiry remain replayable when no prior state exists.
 
 Resolution uses private length-prefixed IPC frames (four-byte big-endian byte
@@ -105,6 +113,8 @@ unknown (`null`), not a fabricated zero. Nostr is an on-demand resolver, not an
 exclusive P2P layer or a claimed active broadcast service. Existing wallet and
 transparency tools remain accessible. A multi-alias catalog, per-resolver telemetry
 and event stream are deliberately deferred rather than populated with inferred data.
+The profile save/broadcast action reports that the profile was saved; transport
+availability is shown separately in Node Control.
 
 ## Manual Rodrigo / Marcelo test
 

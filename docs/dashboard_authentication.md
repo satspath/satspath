@@ -15,12 +15,27 @@ than introducing a second server session credential and cookie lifecycle.
 `dashboard-auth.mjs` centralizes every dashboard request. Only private mutations
 carry the token. Requests must stay on the same origin, redirects are rejected,
 and ambient browser credentials are omitted. Authentication requires HTTPS,
-except for HTTP on localhost, 127.0.0.1 or [::1] for local development.
+except for HTTP on `localhost`, `127.0.0.1` or `[::1]` for local development.
 No ambient cookie authentication exists, so cross-site form submissions cannot
 authenticate mutations; the backend still requires the explicit Bearer header.
 An unrelated origin cannot read the in-memory credential. This assumes the
 daemon's own page and scripts are trusted; it is not isolation against same-origin
 script compromise or a privileged browser extension.
+
+## HTTP Host and reverse proxies
+
+Every route, including public `/v1/control`, validates exactly one HTTP `Host`
+header before routing. Loopback binds allow `localhost` and loopback IP literals;
+specific interface binds allow their IP, and wildcard binds allow IP literals.
+Other DNS names must be explicitly configured through `SATSPATH_AUTHORITY_DOMAIN`
+or the hostname of `SATSPATH_AUTHORITY_URL`. Missing, duplicate, malformed and
+untrusted hosts receive HTTP 400.
+
+For a proxy preserving the public hostname, set for example
+`SATSPATH_AUTHORITY_DOMAIN=node.example.com` in the daemon's environment. Native
+TLS deployments using DNS names use the same configuration. Neither
+`--behind-proxy` nor `X-Forwarded-Host` bypasses this allowlist. CORS and Bearer
+authentication remain independent checks.
 
 ## Dashboard request audit
 

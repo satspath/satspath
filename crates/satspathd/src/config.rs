@@ -89,6 +89,7 @@ pub(crate) struct AppState {
     pub(crate) p2p: Arc<crate::p2p::Bridge>,
     pub(crate) home: PathBuf,
     pub(crate) bind: SocketAddr,
+    pub(crate) allowed_hosts: Vec<String>,
     pub(crate) network: String,
     pub(crate) open_ui: bool,
     pub(crate) auth_token: String,

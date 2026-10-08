@@ -7,6 +7,7 @@
 mod auth;
 mod config;
 mod handlers;
+mod host;
 mod http;
 mod p2p;
 mod rate_limit;
@@ -27,8 +28,18 @@ use handlers::status::print_startup_status;
 use http::write_owner_only_file;
 use server::{audit_binding_security, serve};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run());
+    // tiny_http request bodies use synchronous socket reads. A stalled client
+    // must not keep runtime teardown (and thus SIGTERM/Ctrl+C) waiting forever.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(3));
+    result
+}
+
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     let bind = cli
         .bind
@@ -146,6 +157,10 @@ async fn main() -> Result<()> {
         p2p: p2p::Bridge::new(cli.p2p),
         home,
         bind,
+        allowed_hosts: host::configured_hosts(
+            std::env::var("SATSPATH_AUTHORITY_DOMAIN").ok().as_deref(),
+            std::env::var("SATSPATH_AUTHORITY_URL").ok().as_deref(),
+        )?,
         network,
         open_ui: !cli.no_open,
         auth_token,
@@ -203,6 +218,7 @@ mod tests {
             p2p: crate::p2p::Bridge::new(false),
             home: home.to_owned(),
             bind: "127.0.0.1:0".parse().unwrap(),
+            allowed_hosts: Vec::new(),
             network: "devnet".into(),
             open_ui: false,
             auth_token: "test_auth_token".into(),
@@ -267,6 +283,43 @@ mod tests {
         assert_eq!(summary["verification"]["payment_methods_verified"], false);
         assert!(!summary.to_string().contains("binance.com"));
         assert!(!summary.to_string().contains("alice@example.com"));
+    }
+
+    #[tokio::test]
+    async fn idle_p2p_supervisor_recovers_from_publication_failure() {
+        async fn wait_for(state: &AppState, expected: &str) {
+            tokio::time::timeout(std::time::Duration::from_secs(4), async {
+                loop {
+                    if state.p2p.status.lock().await.state == expected {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(state.p2p.status.lock().await.announcements, 0);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        state.p2p = crate::p2p::Bridge::new(true);
+        let wallet = load_or_create_identity(dir.path()).unwrap();
+        let path = crate::config::wallet_path(dir.path());
+        std::fs::write(&path, b"{").unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(crate::p2p::supervise(state.clone(), stopped));
+        wait_for(&state, "degraded").await;
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+        assert_eq!(state.p2p.status.lock().await.state, "degraded");
+        save_wallet(dir.path(), &wallet).unwrap();
+        wait_for(&state, "active").await;
+        std::fs::write(&path, b"{").unwrap();
+        wait_for(&state, "degraded").await;
+        save_wallet(dir.path(), &wallet).unwrap();
+        wait_for(&state, "active").await;
+        stop.send(()).unwrap();
+        task.await.unwrap();
     }
 
     #[tokio::test]
@@ -591,6 +644,7 @@ mod tests {
             p2p: crate::p2p::Bridge::new(false),
             home,
             bind: addr,
+            allowed_hosts: Vec::new(),
             network: "devnet".into(),
             open_ui: false,
             auth_token: "test_token".into(),
@@ -669,6 +723,50 @@ mod tests {
         }
         server.unblock();
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn http_host_guard_precedes_public_views_and_authenticated_mutations() {
+        for trust_proxy_headers in [false, true] {
+            let config = rate_limit::RateLimiterConfig {
+                trust_proxy_headers,
+                ..Default::default()
+            };
+            let (base_url, server, handle) = start_test_daemon(config).await;
+            let client = reqwest::Client::new();
+            for path in ["/v1/control", "/", "/health"] {
+                let response = client
+                    .get(format!("{base_url}{path}"))
+                    .header("Host", "rebind.example")
+                    .header("X-Forwarded-Host", "localhost")
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+                let body = response.text().await.unwrap();
+                assert!(!body.contains("fingerprint"));
+                assert!(!body.contains("test_token"));
+            }
+            let response = client
+                .post(format!("{base_url}/v1/dashboard/auth"))
+                .header("Host", "rebind.example")
+                .bearer_auth("test_token")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            for host in ["localhost", "127.0.0.1", "[::1]"] {
+                let response = client
+                    .get(format!("{base_url}/v1/control"))
+                    .header("Host", host)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+            }
+            server.unblock();
+            handle.abort();
+        }
     }
 
     #[tokio::test]

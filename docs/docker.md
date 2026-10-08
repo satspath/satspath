@@ -127,6 +127,12 @@ The provided `docker-compose.yml` configures a Caddy sidecar:
 
 Set `SATSPATHD_BEHIND_PROXY=1` (or pass `--behind-proxy`) so `satspathd` properly trusts and extracts client IPs from `X-Forwarded-For` / `X-Real-IP`.
 
+When preserving the public `Host` header, also set
+`SATSPATH_AUTHORITY_DOMAIN=node.example.com` in the daemon environment, or set
+`SATSPATH_AUTHORITY_URL=https://node.example.com/v2`. The daemon rejects
+unconfigured DNS hosts even behind a proxy to prevent DNS rebinding. Native TLS
+deployments using a DNS hostname need the same explicit hostname configuration.
+
 ### Option 2: Native TLS in satspathd
 
 `satspathd` can also terminate TLS natively using Rustls:

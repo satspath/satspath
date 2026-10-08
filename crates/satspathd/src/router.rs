@@ -41,6 +41,14 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
     let raw_url = request.url().to_string();
     let path = raw_url.split('?').next().unwrap_or("/").to_string();
 
+    if !crate::host::is_allowed_host(request.headers(), state.bind, &state.allowed_hosts) {
+        request.respond(json_error(
+            StatusCode(400),
+            anyhow::anyhow!("untrusted HTTP Host"),
+        ))?;
+        return Ok(());
+    }
+
     // 1. Guard against oversized request bodies (HTTP 413 Payload Too Large)
     let max_body = state.rate_limiter.max_body_bytes();
     if let Some(body_len) = request.body_length() {

@@ -61,7 +61,8 @@ try {
     });
     process.stdin.once('end', stop);
     process.stdin.on('data', stop); // No repeated local commands in this version.
-    await swarm.join(topic, { server: true, client: false }).flushed();
+    const announced = await swarm.join(topic, { server: true, client: false }).flushed();
+    if (!announced) throw new Error('Announcement failed');
     if (!cancelled) process.stdout.write('active\n');
     await stopped;
   } else {

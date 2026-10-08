@@ -1078,11 +1078,10 @@
     try {
       const r = await apiFetch("/v1/broadcast", {method: "POST"});
       const d = await r.json();
-      if (d.error) throw new Error(d.error);
-      msg.innerHTML = d.broadcasting
-        ? `<span style="color: #60a5fa">Broadcast Active</span><br/><span style="font-size: 11px; color: var(--text-muted)">Profile published over P2P network (${esc(d.status)}).</span>`
-        : `<span style="color: #f87171">Broadcast Failed</span><br/><span style="font-size: 11px; color: var(--text-muted)">P2P is inactive: ${esc(d.status)}.</span>`;
+      if (!r.ok || d.error) throw new Error(d.error || 'Profile save failed.');
+      msg.innerHTML = `<span style="color: #34d399">Profile saved</span><br/><span style="font-size: 11px; color: var(--text-muted)">${esc(d.status)} Check Node Control for transport status.</span>`;
       show(msg);
+      loadControl();
     } catch (e) { err.textContent = e.message; show(err); }
     finally { btn.disabled = false; }
   });

@@ -97,6 +97,15 @@ impl TransactionalTransparencyStore {
         Ok(store)
     }
 
+    /// Look up a local pin without initializing missing state. Existing corrupt
+    /// or unreadable state is an error, not an absent profile.
+    pub fn profile_read_only(home: &Path, alias: &str) -> Result<Option<SignedPaymentProfile>> {
+        if !home.join(DB_FILE).try_exists()? {
+            return Ok(None);
+        }
+        Self::open_read_only(home)?.profile(alias)
+    }
+
     fn connection(&self) -> Result<Connection> {
         if self.read_only {
             return Connection::open_with_flags(
