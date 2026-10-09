@@ -9,6 +9,8 @@
 //! - Durable `PinStore` implementation (`FilePinStore`) and fast `MemoryPinStore`
 //! - $K$-of-$N$ quorum policy evaluation with deduplication and authorization checks
 
+pub mod gossip;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,6 +41,8 @@ pub enum WitnessError {
     StaleTimestamp,
     #[error("Storage error: {0}")]
     Storage(String),
+    #[error("Gossip relay error: {0}")]
+    Relay(String),
     #[error("Quorum not met: required {required}, got {actual} valid unique cosignatures")]
     QuorumNotMet { required: usize, actual: usize },
 }
