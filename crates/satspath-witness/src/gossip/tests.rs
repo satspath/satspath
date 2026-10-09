@@ -38,6 +38,16 @@ fn production_relays_cannot_use_local_ws_or_mixed_private_dns_answers() {
     ));
     assert!(!allowed_resolved_addresses(&[private], RelayPolicy::Public));
     assert!(!allowed_resolved_addresses(&[], RelayPolicy::Public));
+    let nat64_private = "[64:ff9b::a00:1]:443".parse().unwrap();
+    let nat64_public = "[64:ff9b::808:808]:443".parse().unwrap();
+    assert!(!allowed_resolved_addresses(
+        &[nat64_private],
+        RelayPolicy::Public
+    ));
+    assert!(allowed_resolved_addresses(
+        &[nat64_public],
+        RelayPolicy::Public
+    ));
 }
 
 /// Generate an operator-signed, deterministic-size checkpoint for test peers.

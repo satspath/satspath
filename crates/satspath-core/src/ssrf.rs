@@ -176,6 +176,17 @@ fn is_private_v6(ip: Ipv6Addr) -> bool {
     if segments[0] == 0x2001 && segments[1] == 0x0db8 {
         return true; // documentation
     }
+    // RFC 6052 well-known NAT64 prefix 64:ff9b::/96 embeds the IPv4
+    // destination in the final 32 bits. Do not block public NAT64 targets.
+    if segments[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+        let embedded = Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        );
+        return is_private_v4(embedded);
+    }
     // IPv4-mapped: ::ffff:0:0/96 — check the embedded v4
     if let Some(v4) = ip.to_ipv4_mapped() {
         return is_private_v4(v4);
@@ -186,6 +197,25 @@ fn is_private_v6(ip: Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NAT64 must inherit the public/private status of the embedded IPv4 host.
+    #[test]
+    fn nat64_rejects_private_embedded_ipv4_but_allows_public() {
+        for ip in [
+            "64:ff9b::a00:1",     // 10.0.0.1
+            "64:ff9b::7f00:1",    // 127.0.0.1
+            "64:ff9b::a9fe:a9fe", // 169.254.169.254 metadata
+            "64:ff9b::c0a8:101",  // 192.168.1.1
+        ] {
+            assert!(is_private_or_reserved_ip(ip.parse().unwrap()), "{ip}");
+        }
+        assert!(!is_private_or_reserved_ip(
+            "64:ff9b::808:808".parse().unwrap()
+        ));
+        assert!(!is_private_or_reserved_ip(
+            "64:ff9b::101:101".parse().unwrap()
+        ));
+    }
 
     #[test]
     fn https_public_allowed() {
