@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use satspath_core::transparency::{
@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio_tungstenite::{
-    connect_async_with_config,
-    tungstenite::{protocol::WebSocketConfig, Message},
+    client_async_tls_with_config,
+    tungstenite::{handshake::client::Response, protocol::WebSocketConfig, Message},
+    MaybeTlsStream, WebSocketStream,
 };
 
 use super::{GossipConfig, GossipMonitor};
@@ -20,10 +21,20 @@ use crate::WitnessError;
 const MAX_FRAME_BYTES: usize = 2 * MAX_GOSSIP_BYTES + 2048;
 const SUBSCRIPTION: &str = "satspath-checkpoint-gossip-v1";
 
+/// Production cannot select the test-only plaintext loopback connector.
+#[derive(Clone, Copy)]
+pub(super) enum RelayPolicy {
+    Public,
+    #[cfg(test)]
+    LocalTest,
+}
+
+/// Normalize malformed relay input to one non-leaking validation error.
 fn invalid() -> WitnessError {
     WitnessError::InvalidSignature
 }
 
+/// Convert a compressed observer key to its NIP-01 x-only author identity.
 fn xonly(pubkey: &str) -> Result<String, WitnessError> {
     let bytes = hex::decode(pubkey).map_err(|_| invalid())?;
     let key = PublicKey::from_slice(&bytes).map_err(|_| invalid())?;
@@ -44,6 +55,7 @@ pub struct NostrGossipEvent {
 }
 
 impl NostrGossipEvent {
+    /// Compute the canonical NIP-01 event ID from its public fields.
     fn id_digest(&self) -> Result<[u8; 32], WitnessError> {
         let payload = json!([
             0,
@@ -57,6 +69,7 @@ impl NostrGossipEvent {
         Ok(Sha256::digest(encoded).into())
     }
 
+    /// Sign a bounded NIP-01 envelope using its inner observation's author key.
     pub fn sign(
         observation: &GossipObservation,
         secret: &SecretKey,
@@ -93,6 +106,7 @@ impl NostrGossipEvent {
         Ok(event)
     }
 
+    /// Verify event ID, Nostr signature, topic, freshness and inner evidence.
     pub fn verify(
         &self,
         config: &GossipConfig,
@@ -134,6 +148,7 @@ impl NostrGossipEvent {
     }
 }
 
+/// Parse only events for the expected subscription and trust configuration.
 pub fn parse_relay_event(
     raw: &str,
     config: &GossipConfig,
@@ -157,29 +172,83 @@ pub fn parse_relay_event(
     event.verify(config, now).map(Some)
 }
 
-/// Only operator-configured WSS relays, or explicitly enabled loopback WS for development.
-pub fn validate_relay_url(relay: &str, allow_local_ws: bool) -> Result<(), WitnessError> {
+/// Production relays require WSS and a host permitted by the core SSRF policy.
+pub fn validate_relay_url(relay: &str) -> Result<(), WitnessError> {
+    validated_relay_url(relay, RelayPolicy::Public).map(|_| ())
+}
+
+/// Reject the entire DNS answer set if even one address is unsafe.
+pub(super) fn allowed_resolved_addresses(addresses: &[SocketAddr], policy: RelayPolicy) -> bool {
+    !addresses.is_empty()
+        && addresses.iter().all(|address| match policy {
+            RelayPolicy::Public => !satspath_core::ssrf::is_private_or_reserved_ip(address.ip()),
+            #[cfg(test)]
+            RelayPolicy::LocalTest => address.ip().is_loopback(),
+        })
+}
+
+/// Reject local relay endpoints in production; unit tests alone can use WS loopback.
+fn validated_relay_url(relay: &str, policy: RelayPolicy) -> Result<url::Url, WitnessError> {
     let url = url::Url::parse(relay).map_err(|_| invalid())?;
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
         return Err(invalid());
     }
-    if url.scheme() == "ws"
-        && allow_local_ws
+    #[cfg(test)]
+    if matches!(policy, RelayPolicy::LocalTest)
+        && url.scheme() == "ws"
         && url.host().is_some_and(|host| match host {
             url::Host::Domain(name) => name == "localhost",
             url::Host::Ipv4(ip) => ip.is_loopback(),
             url::Host::Ipv6(ip) => ip.is_loopback(),
         })
     {
-        return Ok(());
+        return Ok(url);
     }
     if url.scheme() != "wss" {
         return Err(invalid());
     }
-    let https = relay.replacen("wss://", "https://", 1);
-    satspath_core::ssrf::validate_url(&https, false).map_err(|_| invalid())
+    let https = url.as_str().replacen("wss://", "https://", 1);
+    satspath_core::ssrf::validate_url(&https, false).map_err(|_| invalid())?;
+    let _ = policy;
+    Ok(url)
 }
 
+/// Resolve once, reject every non-public address, then connect to that same IP.
+/// The original hostname is retained for TLS SNI and certificate verification.
+async fn connect_pinned(
+    relay: &str,
+    socket_config: WebSocketConfig,
+    policy: RelayPolicy,
+) -> Result<
+    (
+        WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+        Response,
+    ),
+    WitnessError,
+> {
+    let url = validated_relay_url(relay, policy)?;
+    let host = url.host_str().ok_or_else(invalid)?;
+    let port = url.port_or_known_default().ok_or_else(invalid)?;
+    let resolved: Vec<_> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|_| WitnessError::Relay("DNS resolution failed".into()))?
+        .collect();
+    if !allowed_resolved_addresses(&resolved, policy) {
+        return Err(WitnessError::Relay(
+            "relay resolved to an unsafe IP address".into(),
+        ));
+    }
+    for address in resolved {
+        if let Ok(socket) = tokio::net::TcpStream::connect(address).await {
+            return client_async_tls_with_config(relay, socket, Some(socket_config), None)
+                .await
+                .map_err(|_| WitnessError::Relay("TLS or WebSocket handshake failed".into()));
+        }
+    }
+    Err(WitnessError::Relay("relay connection failed".into()))
+}
+
+/// Emit newly persisted public evidence without printing secret observer keys.
 fn report_alerts(alerts: Vec<satspath_core::transparency::SplitViewEvidence>) {
     for alert in alerts {
         if let Ok(json) = serde_json::to_string(&alert) {
@@ -188,6 +257,7 @@ fn report_alerts(alerts: Vec<satspath_core::transparency::SplitViewEvidence>) {
     }
 }
 
+/// Republish the latest locally authenticated checkpoint without blocking Tokio.
 async fn publish_local(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -196,9 +266,12 @@ async fn publish_local(
     key: &SecretKey,
 ) -> Result<Option<String>, WitnessError> {
     let local_pubkey = hex::encode(PublicKey::from_secret_key(&Secp256k1::new(), key).serialize());
-    let observation = monitor
-        .store()
-        .observations(&monitor.config().log_id)?
+    let store = monitor.store().clone();
+    let log_id = monitor.config().log_id.clone();
+    let observations = tokio::task::spawn_blocking(move || store.observations(&log_id))
+        .await
+        .map_err(|e| WitnessError::Storage(e.to_string()))??;
+    let observation = observations
         .into_iter()
         .filter(|item| item.observer_pubkey == local_pubkey)
         .max_by_key(|item| (item.checkpoint.log_size, item.observed_at));
@@ -213,8 +286,13 @@ async fn publish_local(
         )
         .map_err(|_| invalid())?;
     let now = chrono::Utc::now().timestamp();
-    let renewed =
-        GossipObservation::sign(observation.checkpoint, key, now).map_err(|_| invalid())?;
+    let renewed = GossipObservation::sign_with_proof(
+        observation.checkpoint,
+        observation.consistency_proof,
+        key,
+        now,
+    )
+    .map_err(|_| invalid())?;
     report_alerts(monitor.ingest(renewed.clone(), now).await?);
     let event = NostrGossipEvent::sign(&renewed, key, now)?;
     let id = event.id.clone();
@@ -235,9 +313,28 @@ pub async fn run_relay(
     monitor: GossipMonitor,
     relay: String,
     key: SecretKey,
-    allow_local_ws: bool,
 ) -> Result<(), WitnessError> {
-    validate_relay_url(&relay, allow_local_ws)?;
+    run_relay_with_policy(monitor, relay, key, RelayPolicy::Public).await
+}
+
+/// Local plaintext transport exists only in the unit-test build, not the CLI.
+#[cfg(test)]
+pub(super) async fn run_local_test_relay(
+    monitor: GossipMonitor,
+    relay: String,
+    key: SecretKey,
+) -> Result<(), WitnessError> {
+    run_relay_with_policy(monitor, relay, key, RelayPolicy::LocalTest).await
+}
+
+/// Reconnect and gossip with one URL under an explicit network policy.
+async fn run_relay_with_policy(
+    monitor: GossipMonitor,
+    relay: String,
+    key: SecretKey,
+    policy: RelayPolicy,
+) -> Result<(), WitnessError> {
+    validated_relay_url(&relay, policy)?;
     let local_pubkey = hex::encode(PublicKey::from_secret_key(&Secp256k1::new(), &key).serialize());
     if !monitor.config().trusted_observers.contains(&local_pubkey) {
         return Err(invalid());
@@ -262,7 +359,7 @@ pub async fn run_relay(
     loop {
         let connected = tokio::time::timeout(
             Duration::from_secs(8),
-            connect_async_with_config(relay.as_str(), Some(socket_config), false),
+            connect_pinned(relay.as_str(), socket_config, policy),
         )
         .await;
         if let Ok(Ok((mut ws, _))) = connected {
@@ -288,7 +385,13 @@ pub async fn run_relay(
                                 Some(Ok(Message::Text(text))) => {
                                     let now = chrono::Utc::now().timestamp();
                                     if let Ok(Some(observation)) = parse_relay_event(&text, monitor.config(), now) {
-                                        report_alerts(monitor.ingest(observation, now).await?);
+                                        match monitor.ingest(observation, now).await {
+                                            Ok(alerts) => report_alerts(alerts),
+                                            Err(WitnessError::Rollback { .. } | WitnessError::EquivocationDetected { .. } | WitnessError::InvalidConsistencyProof) => {
+                                                eprintln!("gossip observer checkpoint transition rejected");
+                                            }
+                                            Err(error) => return Err(error),
+                                        }
                                     } else if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(&text) {
                                         if items.first().and_then(Value::as_str) == Some("OK")
                                             && items.get(1).and_then(Value::as_str) == last_sent.as_deref()

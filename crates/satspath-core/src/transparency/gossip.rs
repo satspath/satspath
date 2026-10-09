@@ -7,8 +7,12 @@ use sha2::{Digest, Sha256};
 use crate::crypto::{sign_message, verify_message_signature};
 use crate::Result;
 
-use super::{verify_checkpoint, TransparencyCheckpoint, TransparencyError};
+use super::{
+    verify_checkpoint, verify_consistency_proof, MerkleConsistencyProof, TransparencyCheckpoint,
+    TransparencyError,
+};
 
+/// Normalize Schnorr identities so negated compressed keys cannot count twice.
 fn observer_identity(pubkey: &str) -> Result<[u8; 32]> {
     let bytes = hex::decode(pubkey).map_err(|_| TransparencyError::InvalidGossipObservation)?;
     let point =
@@ -30,10 +34,14 @@ pub struct GossipObservation {
     pub checkpoint: TransparencyCheckpoint,
     pub observer_pubkey: String,
     pub observed_at: i64,
+    /// Required when this observer advances beyond its previously advertised pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consistency_proof: Option<MerkleConsistencyProof>,
     pub signature: String,
 }
 
 impl GossipObservation {
+    /// Canonical, domain-separated payload signed by the observer key.
     fn signing_message(&self) -> Result<String> {
         let mut unsigned = self.clone();
         unsigned.signature.clear();
@@ -42,8 +50,19 @@ impl GossipObservation {
         Ok(format!("{GOSSIP_DOMAIN}\n{canonical}"))
     }
 
+    /// Sign an initially observed or unchanged checkpoint without an advance proof.
     pub fn sign(
         checkpoint: TransparencyCheckpoint,
+        secret: &SecretKey,
+        observed_at: i64,
+    ) -> Result<Self> {
+        Self::sign_with_proof(checkpoint, None, secret, observed_at)
+    }
+
+    /// Bind a checkpoint-bound RFC 6962 proof to a signed advancement.
+    pub fn sign_with_proof(
+        checkpoint: TransparencyCheckpoint,
+        consistency_proof: Option<MerkleConsistencyProof>,
         secret: &SecretKey,
         observed_at: i64,
     ) -> Result<Self> {
@@ -54,6 +73,7 @@ impl GossipObservation {
             checkpoint,
             observer_pubkey,
             observed_at,
+            consistency_proof,
             signature: String::new(),
         };
         observation.signature = sign_message(&observation.signing_message()?, secret);
@@ -80,6 +100,11 @@ impl GossipObservation {
                 &self.observer_pubkey,
             )
             .unwrap_or(false)
+            || self.consistency_proof.as_ref().is_some_and(|proof| {
+                proof.new_tree_size != self.checkpoint.log_size
+                    || proof.new_root != self.checkpoint.log_root
+                    || !verify_consistency_proof(proof).unwrap_or(false)
+            })
         {
             return Err(TransparencyError::InvalidGossipObservation.into());
         }
@@ -104,6 +129,7 @@ impl GossipObservation {
     }
 }
 
+/// Archivable pair of independent, operator-signed incompatible checkpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SplitViewEvidence {
     pub first: GossipObservation,
@@ -111,6 +137,7 @@ pub struct SplitViewEvidence {
     pub detected_at: i64,
 }
 
+/// Only a conflicting root at the same size proves a split view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GossipComparison {
     SameView,
@@ -129,6 +156,23 @@ pub fn compare_gossip_observations(
 ) -> Result<GossipComparison> {
     first.verify_evidence(log_id, operator_pubkey, observers)?;
     second.verify_evidence(log_id, operator_pubkey, observers)?;
+    compare_verified_gossip_observations(first, second, now)
+}
+
+/// Compare observations whose two operator and observer signatures were already
+/// verified under the same trust policy. This avoids re-verifying cached evidence.
+/// Callers MUST validate each input before invoking it.
+#[doc(hidden)]
+pub fn compare_verified_gossip_observations(
+    first: &GossipObservation,
+    second: &GossipObservation,
+    now: i64,
+) -> Result<GossipComparison> {
+    if first.checkpoint.log_id != second.checkpoint.log_id
+        || first.checkpoint.operator_pubkey != second.checkpoint.operator_pubkey
+    {
+        return Err(TransparencyError::InvalidGossipObservation.into());
+    }
     if observer_identity(&first.observer_pubkey)? == observer_identity(&second.observer_pubkey)? {
         return Err(TransparencyError::InvalidGossipObservation.into());
     }
@@ -148,6 +192,7 @@ pub fn compare_gossip_observations(
 }
 
 impl SplitViewEvidence {
+    /// Re-verify historical evidence under an explicit operator and observer policy.
     pub fn verify(
         &self,
         log_id: &str,
@@ -188,6 +233,7 @@ mod tests {
     use super::*;
     use crate::crypto::generate_identity_keypair;
 
+    /// Build a signed checkpoint with independently chosen test roots.
     fn checkpoint(key: &SecretKey, root: &str, size: u64) -> TransparencyCheckpoint {
         let mut cp = TransparencyCheckpoint {
             version: 1,
@@ -209,6 +255,7 @@ mod tests {
         cp
     }
 
+    /// Only two distinct trusted Schnorr observers can report a valid fork.
     #[test]
     fn only_signed_operator_evidence_from_independent_trusted_observers_alerts() {
         let operator = generate_identity_keypair();
@@ -280,6 +327,7 @@ mod tests {
             .is_err());
     }
 
+    /// An ahead peer is not proof of operator equivocation.
     #[test]
     fn same_root_and_different_sizes_are_not_proof_of_a_fork() {
         let operator = generate_identity_keypair();
@@ -330,6 +378,7 @@ mod tests {
         assert_ne!(gossip_topic("example-log"), gossip_topic("other-log"));
     }
 
+    /// A state-map split is material even if log-root hashes match.
     #[test]
     fn same_merkle_root_with_conflicting_signed_state_map_is_a_split_view() {
         let operator = generate_identity_keypair();
@@ -357,6 +406,7 @@ mod tests {
         ));
     }
 
+    /// Opposite-parity compressed keys refer to the same Schnorr author.
     #[test]
     fn negating_an_observer_key_cannot_create_a_second_independent_observer() {
         let operator = generate_identity_keypair();

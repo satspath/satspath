@@ -44,6 +44,7 @@ struct Trust {
 }
 
 impl Trust {
+    /// Create a monitor with a fixed, out-of-band operator trust anchor.
     fn monitor(&self) -> Result<GossipMonitor> {
         let config = GossipConfig {
             log_id: self.log_id.clone(),
@@ -84,9 +85,6 @@ enum Command {
         key_file: PathBuf,
         #[arg(long = "relay", required = true)]
         relays: Vec<String>,
-        /// Allow ws://localhost or ws://127.0.0.1 for local testing only.
-        #[arg(long)]
-        allow_local_ws: bool,
     },
     /// Re-verify and print persistent cryptographic split-view evidence as JSON.
     Alerts {
@@ -95,6 +93,7 @@ enum Command {
     },
 }
 
+/// Bound local checkpoint and proof files before allocating decoded JSON.
 fn read_bounded<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     if fs::metadata(path)?.len() > MAX_GOSSIP_BYTES as u64 {
         bail!("checkpoint/proof exceeds the byte limit");
@@ -102,16 +101,19 @@ fn read_bounded<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     Ok(serde_json::from_slice(&fs::read(path)?)?)
 }
 
+/// Decode the dedicated observer key without logging the secret or its bytes.
 fn read_key(path: &Path) -> Result<SecretKey> {
     let raw = fs::read_to_string(path).context("reading observer key file")?;
     let bytes = hex::decode(raw.trim()).context("observer key must be hex")?;
     SecretKey::from_slice(&bytes).context("invalid observer key")
 }
 
+/// Derive the canonical compressed identity for the observer allowlist.
 fn pubkey(key: &SecretKey) -> String {
     hex::encode(PublicKey::from_secret_key(&Secp256k1::new(), key).serialize())
 }
 
+/// Generate a fresh signing key in a new owner-only file on Unix.
 fn keygen(path: &Path) -> Result<()> {
     let pair = generate_identity_keypair();
     if let Some(parent) = path.parent() {
@@ -131,6 +133,7 @@ fn keygen(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Dispatch offline observation, Nostr monitoring, and alert inspection.
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
@@ -167,7 +170,7 @@ async fn main() -> Result<()> {
             .process_checkpoint(&checkpoint, proof.as_ref())
             .await?;
             let now = chrono::Utc::now().timestamp();
-            let observation = GossipObservation::sign(checkpoint, &key, now)?;
+            let observation = GossipObservation::sign_with_proof(checkpoint, proof, &key, now)?;
             let alerts = monitor.ingest(observation, now).await?;
             for alert in alerts {
                 eprintln!("GOSSIP_SPLIT_VIEW {}", serde_json::to_string(&alert)?);
@@ -179,19 +182,18 @@ async fn main() -> Result<()> {
             trust,
             key_file,
             relays,
-            allow_local_ws,
         } => {
             if relays.len() > 8 {
                 bail!("at most eight relays may be configured");
             }
             for relay in &relays {
-                validate_relay_url(relay, allow_local_ws)?;
+                validate_relay_url(relay)?;
             }
             let key = read_key(&key_file)?;
             let monitor = trust.monitor()?;
             let mut tasks = tokio::task::JoinSet::new();
             for relay in relays {
-                tasks.spawn(run_relay(monitor.clone(), relay, key, allow_local_ws));
+                tasks.spawn(run_relay(monitor.clone(), relay, key));
             }
             tokio::select! {
                 signal = tokio::signal::ctrl_c() => signal?,
@@ -204,7 +206,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Alerts { trust } => {
-            let alerts = trust.monitor()?.alerts(chrono::Utc::now().timestamp())?;
+            let alerts = trust
+                .monitor()?
+                .alerts(chrono::Utc::now().timestamp())
+                .await?;
             println!("{}", serde_json::to_string_pretty(&alerts)?);
             Ok(())
         }

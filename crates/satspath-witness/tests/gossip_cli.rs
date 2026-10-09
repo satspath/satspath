@@ -11,6 +11,7 @@ use satspath_core::{
     },
 };
 
+/// Invoke the actual CLI without shell interpolation.
 fn binary(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_satspath-gossip"))
         .args(args)
@@ -18,6 +19,7 @@ fn binary(args: &[&str]) -> Output {
         .unwrap()
 }
 
+/// Build an operator-signed CLI fixture for monotonic-size testing.
 fn checkpoint(operator: &IdentityKeypair, size: u64, root: &str) -> TransparencyCheckpoint {
     let mut cp = TransparencyCheckpoint {
         version: 1,
@@ -37,10 +39,12 @@ fn checkpoint(operator: &IdentityKeypair, size: u64, root: &str) -> Transparency
     cp
 }
 
+/// Write public test evidence into a temporary directory.
 fn save(path: &Path, item: &impl serde::Serialize) {
     fs::write(path, serde_json::to_vec(item).unwrap()).unwrap();
 }
 
+/// CLI requires a proof to advance and preserves owner-only observer key storage.
 #[test]
 fn cli_observes_with_consistency_and_reads_persisted_alerts() {
     let temp = tempfile::tempdir().unwrap();

@@ -37,8 +37,14 @@ its RFC 6962 consistency proof logic before being announced. The monitor stores
 observations and deduplicated alerts under the state directory and prints newly
 detected alerts with the `GOSSIP_SPLIT_VIEW` prefix to stderr. `alerts` re-verifies
 the evidence from disk and prints it as JSON. Storage is bounded to 512 records
-and 512 alerts per log (an exhausted store fails rather than silently forgetting
-old evidence). Run one monitor per state directory.
+and 512 alerts per log. At most 16 recent checkpoints per observer are retained;
+older observations are pruned after newer ones are saved, while alerts embed both
+full signed checkpoints permanently. A larger checkpoint from the same observer
+must carry a signed, checkpoint-bound RFC 6962 consistency proof. A rollback or
+same-size conflict from that observer is rejected immediately. Old observations
+outside the current trust policy are not used for comparison; historical alerts
+remain on disk and can be checked using the prior policy. Run one monitor per
+state directory.
 
 ## Running two independent observers
 
@@ -83,8 +89,11 @@ satspath-gossip alerts --state-dir /path/to/state --log-id LOG_ID \
 
 `run` republishes the latest locally verified checkpoint every 15 seconds,
 subscribes to up to eight explicit relays and reconnects after disconnection.
-Only `wss://` public relay URLs are accepted, except loopback `ws://` with
-`--allow-local-ws` for local development. No wallet, spending key or local
+Only `wss://` public relay URLs are accepted. DNS is resolved once for each
+connection, every resolved IP is screened for private/reserved ranges, and the
+same verified IP is used for the TLS socket while the hostname is retained for
+certificate checks. Loopback `ws://` is available only in unit tests, not the
+CLI. No wallet, spending key or local
 profile is transmitted. The observer key must be kept private; `keygen` creates
 it with owner-only permissions on Unix. A live network test should use two
 different source views and observers before assuming a deployment can detect

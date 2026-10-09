@@ -10,20 +10,46 @@ use sha2::{Digest, Sha256};
 use crate::WitnessError;
 
 const MAX_RECORDS: usize = 512;
+const MAX_RECORDS_PER_OBSERVER: usize = 16;
 
+pub(super) type ObservationKey = (String, String);
+
+/// Indicates whether an authenticated observation replaced or evicted state.
+pub(super) enum SaveResult {
+    Stored(Option<ObservationKey>),
+    Ignored,
+}
+
+/// Stable cache key for one observer's particular operator commitment.
+pub(super) fn observation_key(
+    observation: &GossipObservation,
+) -> Result<ObservationKey, WitnessError> {
+    Ok((
+        observation.observer_pubkey.clone(),
+        observation
+            .checkpoint
+            .checkpoint_hash()
+            .map_err(storage_error)?,
+    ))
+}
+
+/// On-disk observations and immutable, deduplicated fork alerts.
 #[derive(Clone)]
 pub struct GossipStore {
     root: PathBuf,
 }
 
+/// Wrap filesystem failures without exposing peer-provided content in logs.
 fn storage_error(error: impl std::fmt::Display) -> WitnessError {
     WitnessError::Storage(error.to_string())
 }
 
+/// Name persistent records by content hashes rather than unchecked log IDs.
 fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// Read one bounded regular file; never follow a local symlink.
 fn read_json<T: serde::de::DeserializeOwned>(
     path: &Path,
     max_bytes: u64,
@@ -35,14 +61,17 @@ fn read_json<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&fs::read(path).map_err(storage_error)?).map_err(storage_error)
 }
 
+/// Load a bounded directory, isolating bad observations but not corrupt alerts.
 fn records<T: serde::de::DeserializeOwned>(
     dir: &Path,
     max_bytes: u64,
+    tolerate_invalid: bool,
 ) -> Result<Vec<T>, WitnessError> {
     if !dir.try_exists().map_err(storage_error)? {
         return Ok(Vec::new());
     }
     let mut results = Vec::new();
+    let mut file_count = 0;
     for entry in fs::read_dir(dir).map_err(storage_error)? {
         let entry = entry.map_err(storage_error)?;
         if entry
@@ -50,15 +79,25 @@ fn records<T: serde::de::DeserializeOwned>(
             .extension()
             .is_some_and(|extension| extension == "json")
         {
-            if results.len() >= MAX_RECORDS {
+            file_count += 1;
+            if file_count > MAX_RECORDS {
                 return Err(storage_error("gossip evidence record limit exceeded"));
             }
-            results.push(read_json(&entry.path(), max_bytes)?);
+            match read_json(&entry.path(), max_bytes) {
+                Ok(record) => results.push(record),
+                Err(error) if tolerate_invalid => {
+                    eprintln!("skipping unreadable stored gossip observation: {error}");
+                    fs::rename(entry.path(), entry.path().with_extension("invalid"))
+                        .map_err(storage_error)?;
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
     Ok(results)
 }
 
+/// Sync a fresh temporary file before replacing a public evidence record.
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WitnessError> {
     let parent = path
         .parent()
@@ -84,6 +123,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WitnessError> {
 }
 
 impl GossipStore {
+    /// Create bounded public-observation and persistent-alert directories.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, WitnessError> {
         let root = root.as_ref();
         fs::create_dir_all(root.join("observations")).map_err(storage_error)?;
@@ -93,48 +133,77 @@ impl GossipStore {
         })
     }
 
+    /// Isolate each log in an opaque hash-named subdirectory.
     fn log_dir(&self, kind: &str, log_id: &str) -> PathBuf {
         self.root.join(kind).join(digest(log_id.as_bytes()))
     }
 
+    /// Read retained observations, quarantining unreadable old records.
     pub fn observations(&self, log_id: &str) -> Result<Vec<GossipObservation>, WitnessError> {
         records(
             &self.log_dir("observations", log_id),
             MAX_GOSSIP_BYTES as u64,
+            true,
         )
     }
 
-    pub fn save_observation(&self, observation: &GossipObservation) -> Result<(), WitnessError> {
+    /// Keep at most 16 checkpoints per observer and 512 per log in total.
+    pub(super) fn save_observation(
+        &self,
+        observation: &GossipObservation,
+    ) -> Result<SaveResult, WitnessError> {
         let log_id = &observation.checkpoint.log_id;
         let dir = self.log_dir("observations", log_id);
-        let key = format!(
-            "{}:{}",
-            observation.observer_pubkey,
-            observation
-                .checkpoint
-                .checkpoint_hash()
-                .map_err(storage_error)?
-        );
+        let new_key = observation_key(observation)?;
+        let key = format!("{}:{}", new_key.0, new_key.1);
         let path = dir.join(format!("{}.json", digest(key.as_bytes())));
+        let mut evict = None;
         if path.try_exists().map_err(storage_error)? {
-            let previous: GossipObservation = read_json(&path, MAX_GOSSIP_BYTES as u64)?;
-            if previous.observed_at >= observation.observed_at {
-                return Ok(());
+            match read_json::<GossipObservation>(&path, MAX_GOSSIP_BYTES as u64) {
+                Ok(previous) if previous.observed_at >= observation.observed_at => {
+                    return Ok(SaveResult::Ignored);
+                }
+                Err(_) => eprintln!("replacing unreadable stored gossip observation"),
+                Ok(_) => {}
             }
-        } else if self.observations(log_id)?.len() >= MAX_RECORDS {
-            return Err(storage_error("gossip evidence record limit exceeded"));
+        } else {
+            let existing = self.observations(log_id)?;
+            let mine: Vec<_> = existing
+                .iter()
+                .filter(|old| old.observer_pubkey == observation.observer_pubkey)
+                .collect();
+            evict = if mine.len() >= MAX_RECORDS_PER_OBSERVER {
+                mine.into_iter()
+                    .min_by_key(|old| (old.checkpoint.log_size, old.observed_at))
+            } else if existing.len() >= MAX_RECORDS {
+                existing
+                    .iter()
+                    .min_by_key(|old| (old.checkpoint.log_size, old.observed_at))
+            } else {
+                None
+            }
+            .map(observation_key)
+            .transpose()?;
         }
         let bytes = serde_json::to_vec(observation).map_err(storage_error)?;
         if bytes.len() > MAX_GOSSIP_BYTES {
             return Err(storage_error("gossip observation exceeds byte limit"));
         }
-        atomic_write(&path, &bytes)
+        if let Some(old_key) = &evict {
+            let old_name = format!("{}:{}", old_key.0, old_key.1);
+            fs::remove_file(dir.join(format!("{}.json", digest(old_name.as_bytes()))))
+                .map_err(storage_error)?;
+        }
+        atomic_write(&path, &bytes)?;
+        Ok(SaveResult::Stored(evict))
     }
 
+    /// Load archival alerts without hiding damaged evidence files.
     pub fn alerts(&self, log_id: &str) -> Result<Vec<SplitViewEvidence>, WitnessError> {
         records(
             &self.log_dir("alerts", log_id),
             (2 * MAX_GOSSIP_BYTES + 2048) as u64,
+            false,
         )
     }
 
