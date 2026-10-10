@@ -20,6 +20,14 @@ use crate::WitnessError;
 
 const MAX_FRAME_BYTES: usize = 2 * MAX_GOSSIP_BYTES + 2048;
 const SUBSCRIPTION: &str = "satspath-checkpoint-gossip-v1";
+/// How often to look for a changed local checkpoint (no event is sent unless it changed).
+const LOCAL_POLL: Duration = Duration::from_secs(15);
+/// Re-announce an unchanged checkpoint this often so peers still see a fresh event.
+const LIVENESS_REPUBLISH_SECS: u64 = 3600;
+const _: () = assert!((LIVENESS_REPUBLISH_SECS as i64) < GOSSIP_MAX_AGE_SECS);
+
+/// Checkpoint hash and time of the last event this relay task sent.
+type LastPublished = Option<(String, tokio::time::Instant)>;
 
 /// Production cannot select the test-only plaintext loopback connector.
 #[derive(Clone, Copy)]
@@ -248,13 +256,15 @@ async fn connect_pinned(
     Err(WitnessError::Relay("relay connection failed".into()))
 }
 
-/// Republish the latest locally authenticated checkpoint without blocking Tokio.
+/// Publish the latest locally authenticated checkpoint without blocking Tokio,
+/// but only when it changed or the liveness interval has elapsed.
 async fn publish_local(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
     monitor: &GossipMonitor,
     key: &SecretKey,
+    last_published: &mut LastPublished,
 ) -> Result<Option<String>, WitnessError> {
     let local_pubkey = hex::encode(PublicKey::from_secret_key(&Secp256k1::new(), key).serialize());
     let store = monitor.store().clone();
@@ -304,6 +314,15 @@ async fn publish_local(
     let Some(observation) = observation else {
         return Ok(None);
     };
+    let checkpoint_hash = observation
+        .checkpoint
+        .checkpoint_hash()
+        .map_err(|_| invalid())?;
+    if last_published.as_ref().is_some_and(|(hash, sent_at)| {
+        *hash == checkpoint_hash && sent_at.elapsed() < Duration::from_secs(LIVENESS_REPUBLISH_SECS)
+    }) {
+        return Ok(None);
+    }
     let renewed = GossipObservation::sign_with_proof(
         observation.checkpoint,
         observation.consistency_proof,
@@ -333,6 +352,7 @@ async fn publish_local(
     .await
     .map_err(|_| WitnessError::Relay("send timed out".into()))?
     .map_err(|_| WitnessError::Relay("send failed".into()))?;
+    *last_published = Some((checkpoint_hash, tokio::time::Instant::now()));
     Ok(Some(id))
 }
 
@@ -385,6 +405,8 @@ async fn run_relay_with_policy(
         .read_buffer_size(8192)
         .max_message_size(Some(MAX_FRAME_BYTES))
         .max_frame_size(Some(MAX_FRAME_BYTES));
+    // Kept across reconnects so a flapping relay does not trigger duplicate events.
+    let mut last_published: LastPublished = None;
     loop {
         let connected = tokio::time::timeout(
             Duration::from_secs(8),
@@ -398,13 +420,14 @@ async fn run_relay_with_policy(
             )
             .await;
             if matches!(sent, Ok(Ok(()))) {
-                let mut tick = tokio::time::interval(Duration::from_secs(15));
+                let mut tick = tokio::time::interval(LOCAL_POLL);
                 let mut last_sent = None;
                 loop {
                     tokio::select! {
                         _ = tick.tick() => {
-                            match publish_local(&mut ws, &monitor, &key).await {
-                                Ok(id) => last_sent = id,
+                            match publish_local(&mut ws, &monitor, &key, &mut last_published).await {
+                                Ok(Some(id)) => last_sent = Some(id),
+                                Ok(None) => {}
                                 Err(WitnessError::Relay(_)) => break,
                                 Err(e) => return Err(e),
                             }
