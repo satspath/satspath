@@ -63,7 +63,7 @@ pub fn validate_url(url: &str, allow_http: bool) -> Result<()> {
     // If the host is an IP literal, check the range
     let ip_str = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = ip_str.parse::<IpAddr>() {
-        if is_private_or_reserved(ip) {
+        if is_private_or_reserved_ip(ip) {
             return Err(SatsPathError::ValidationError(format!(
                 "Blocked IP: {ip} (private/reserved range)"
             )));
@@ -88,15 +88,22 @@ pub fn validate_url(url: &str, allow_http: bool) -> Result<()> {
 
 /// Returns `true` if the IP address is in a private, loopback, link-local,
 /// or otherwise reserved range that should never be contacted by a resolver.
-fn is_private_or_reserved(ip: IpAddr) -> bool {
+/// Reject literal or DNS-resolved addresses that must never be contacted by
+/// untrusted network clients. Call this on the IP used by the actual socket.
+pub fn is_private_or_reserved_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_private_v4(v4),
         IpAddr::V6(v6) => is_private_v6(v6),
     }
 }
 
+/// Exclude internal, documentation, multicast and reserved IPv4 ranges.
 fn is_private_v4(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
+    // This host, multicast and reserved-use space cannot be relay endpoints.
+    if octets[0] == 0 || octets[0] >= 224 {
+        return true;
+    }
     // Loopback: 127.0.0.0/8
     if octets[0] == 127 {
         return true;
@@ -131,6 +138,12 @@ fn is_private_v4(ip: Ipv4Addr) -> bool {
     if octets[0] == 203 && octets[1] == 0 && octets[2] == 113 {
         return true;
     }
+    // Benchmark networks 198.18.0.0/15 and IETF protocol assignments.
+    if (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+    {
+        return true;
+    }
     // Carrier-grade NAT: 100.64.0.0/10
     if octets[0] == 100 && (64..=127).contains(&octets[1]) {
         return true;
@@ -138,6 +151,7 @@ fn is_private_v4(ip: Ipv4Addr) -> bool {
     false
 }
 
+/// Exclude loopback, internal, multicast and reserved IPv6 ranges.
 fn is_private_v6(ip: Ipv6Addr) -> bool {
     // Loopback: ::1
     if ip.is_loopback() {
@@ -148,6 +162,9 @@ fn is_private_v6(ip: Ipv6Addr) -> bool {
         return true;
     }
     let segments = ip.segments();
+    if segments[0] & 0xff00 == 0xff00 {
+        return true; // multicast
+    }
     // Link-local: fe80::/10
     if segments[0] & 0xffc0 == 0xfe80 {
         return true;
@@ -155,6 +172,28 @@ fn is_private_v6(ip: Ipv6Addr) -> bool {
     // Unique local: fc00::/7 (RFC 4193)
     if segments[0] & 0xfe00 == 0xfc00 {
         return true;
+    }
+    if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+        return true; // documentation
+    }
+    // Discard-only (RFC 6666), benchmarking (RFC 5180), and deprecated
+    // site-local addresses cannot be publicly reachable relay endpoints.
+    if (segments[0] == 0x0100 && segments[1..4] == [0, 0, 0])
+        || (segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0)
+        || (segments[0] & 0xffc0 == 0xfec0)
+    {
+        return true;
+    }
+    // RFC 6052 well-known NAT64 prefix 64:ff9b::/96 embeds the IPv4
+    // destination in the final 32 bits. Do not block public NAT64 targets.
+    if segments[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+        let embedded = Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        );
+        return is_private_v4(embedded);
     }
     // IPv4-mapped: ::ffff:0:0/96 — check the embedded v4
     if let Some(v4) = ip.to_ipv4_mapped() {
@@ -166,6 +205,43 @@ fn is_private_v6(ip: Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NAT64 must inherit the public/private status of the embedded IPv4 host.
+    #[test]
+    fn nat64_rejects_private_embedded_ipv4_but_allows_public() {
+        for ip in [
+            "64:ff9b::a00:1",     // 10.0.0.1
+            "64:ff9b::7f00:1",    // 127.0.0.1
+            "64:ff9b::a9fe:a9fe", // 169.254.169.254 metadata
+            "64:ff9b::c0a8:101",  // 192.168.1.1
+        ] {
+            assert!(is_private_or_reserved_ip(ip.parse().unwrap()), "{ip}");
+        }
+        assert!(!is_private_or_reserved_ip(
+            "64:ff9b::808:808".parse().unwrap()
+        ));
+        assert!(!is_private_or_reserved_ip(
+            "64:ff9b::101:101".parse().unwrap()
+        ));
+    }
+
+    /// DNS answer validation rejects special-use IPv6 outside NAT64 and ULA.
+    #[test]
+    fn nonpublic_ipv6_discard_benchmark_and_site_local_ranges_are_blocked() {
+        for ip in [
+            "100::1",
+            "100::ffff:1",
+            "2001:2::1",
+            "2001:2:0:ffff::1",
+            "fec0::1",
+            "feff::1",
+        ] {
+            assert!(is_private_or_reserved_ip(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["64:ff9b::808:808", "2606:4700:4700::1111"] {
+            assert!(!is_private_or_reserved_ip(ip.parse().unwrap()), "{ip}");
+        }
+    }
 
     #[test]
     fn https_public_allowed() {

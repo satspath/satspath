@@ -9,6 +9,8 @@
 //! - Durable `PinStore` implementation (`FilePinStore`) and fast `MemoryPinStore`
 //! - $K$-of-$N$ quorum policy evaluation with deduplication and authorization checks
 
+pub mod gossip;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,12 +35,16 @@ pub enum WitnessError {
     Rollback { pinned: u64, proposed: u64 },
     #[error("Equivocation detected for log {log_id} at tree size {tree_size}")]
     EquivocationDetected { log_id: String, tree_size: u64 },
+    #[error("Split view detected for log {log_id} at tree size {tree_size}; inspect persisted gossip alerts")]
+    SplitViewDetected { log_id: String, tree_size: u64 },
     #[error("Consistency proof verification failed")]
     InvalidConsistencyProof,
     #[error("Timestamp outside acceptable freshness window")]
     StaleTimestamp,
     #[error("Storage error: {0}")]
     Storage(String),
+    #[error("Gossip relay error: {0}")]
+    Relay(String),
     #[error("Quorum not met: required {required}, got {actual} valid unique cosignatures")]
     QuorumNotMet { required: usize, actual: usize },
 }

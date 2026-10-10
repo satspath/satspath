@@ -5,6 +5,7 @@ mod checkpoint;
 #[cfg(feature = "std")]
 mod database;
 mod event;
+mod gossip;
 mod log;
 mod migration;
 mod proof;
@@ -38,6 +39,10 @@ pub use checkpoint::{
 #[cfg(feature = "std")]
 pub use database::TransactionalTransparencyStore;
 pub use event::{payment_method_descriptor_hash, profile_hash, NameAction, NameEvent};
+pub use gossip::{
+    compare_gossip_observations, gossip_topic, GossipComparison, GossipObservation,
+    SplitViewEvidence, GOSSIP_FUTURE_SKEW_SECS, GOSSIP_KIND, GOSSIP_MAX_AGE_SECS, MAX_GOSSIP_BYTES,
+};
 pub use log::{ConsistencyStatus, TransparencyLog, TransparencyStatus};
 pub use migration::{verify_migration_statement, MigrationExport, MigrationStatement};
 pub use proof::{MerkleConsistencyProof, MerkleInclusionProof};
@@ -109,4 +114,6 @@ pub enum TransparencyError {
     CorruptStore(String),
     #[error("invalid identifier attestation: {0}")]
     InvalidAttestation(String),
+    #[error("invalid checkpoint gossip observation or evidence")]
+    InvalidGossipObservation,
 }
