@@ -159,11 +159,8 @@ pub fn compare_gossip_observations(
     compare_verified_gossip_observations(first, second, now)
 }
 
-/// Compare observations whose two operator and observer signatures were already
-/// verified under the same trust policy. This avoids re-verifying cached evidence.
-/// Callers MUST validate each input before invoking it.
-#[doc(hidden)]
-pub fn compare_verified_gossip_observations(
+/// Compare already verified observations inside the core's authenticated API.
+fn compare_verified_gossip_observations(
     first: &GossipObservation,
     second: &GossipObservation,
     now: i64,

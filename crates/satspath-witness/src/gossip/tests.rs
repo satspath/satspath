@@ -407,6 +407,18 @@ async fn per_observer_rollbacks_forks_and_unproven_advances_are_rejected() {
         monitor.ingest(fork, now + 1).await,
         Err(WitnessError::EquivocationDetected { .. })
     ));
+    let mut invalid_sequence = first.clone();
+    invalid_sequence.operator_sequence += 1;
+    invalid_sequence.sign(&operator.secret_key).unwrap();
+    assert!(matches!(
+        monitor
+            .ingest(
+                GossipObservation::sign(invalid_sequence, &alice.secret_key, now + 1).unwrap(),
+                now + 1
+            )
+            .await,
+        Err(WitnessError::InvalidConsistencyProof)
+    ));
     let mut older = checkpoint(&operator, &hex::encode(merkle_root(&leaves[..1])));
     older.log_size = 1;
     older.sign(&operator.secret_key).unwrap();

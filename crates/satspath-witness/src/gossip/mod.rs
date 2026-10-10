@@ -12,8 +12,8 @@ pub use transport::{run_relay, validate_relay_url, NostrGossipEvent};
 use std::{collections::HashMap, sync::Arc};
 
 use satspath_core::transparency::{
-    compare_verified_gossip_observations, verify_checkpoint_transition, GossipComparison,
-    GossipObservation, PinnedCheckpoint, SplitViewEvidence, MAX_GOSSIP_BYTES,
+    verify_checkpoint_transition, GossipComparison, GossipObservation, PinnedCheckpoint,
+    SplitViewEvidence, MAX_GOSSIP_BYTES,
 };
 use tokio::sync::Mutex;
 
@@ -41,15 +41,6 @@ fn check_observer_transition(
             proposed: new.log_size,
         });
     }
-    if new.log_size == old.log_size {
-        if new.log_root != old.log_root || new.map_root != old.map_root {
-            return Err(WitnessError::EquivocationDetected {
-                log_id: new.log_id.clone(),
-                tree_size: new.log_size,
-            });
-        }
-        return Ok(());
-    }
     let pin = PinnedCheckpoint {
         log_id: old.log_id.clone(),
         operator_pubkey: old.operator_pubkey.clone(),
@@ -62,8 +53,47 @@ fn check_observer_transition(
         first_seen_at: previous.observed_at,
         last_seen_at: previous.observed_at,
     };
+    if new.log_size == old.log_size {
+        if new.log_root != old.log_root || new.map_root != old.map_root {
+            return Err(WitnessError::EquivocationDetected {
+                log_id: new.log_id.clone(),
+                tree_size: new.log_size,
+            });
+        }
+        verify_checkpoint_transition(&pin, new, None)
+            .map_err(|_| WitnessError::InvalidConsistencyProof)?;
+        return Ok(());
+    }
     verify_checkpoint_transition(&pin, new, proposed.consistency_proof.as_ref())
         .map_err(|_| WitnessError::InvalidConsistencyProof)
+}
+
+/// Only compare observations authenticated into this monitor's private cache.
+/// The public core comparison always verifies signatures and trust itself.
+fn compare_cached_observations(
+    older: &GossipObservation,
+    new: &GossipObservation,
+    now: i64,
+) -> Result<GossipComparison, WitnessError> {
+    let old = &older.checkpoint;
+    let current = &new.checkpoint;
+    if old.log_id != current.log_id
+        || old.operator_pubkey != current.operator_pubkey
+        || older.observer_pubkey == new.observer_pubkey
+    {
+        return Err(WitnessError::InvalidSignature);
+    }
+    if old.log_size != current.log_size {
+        return Ok(GossipComparison::DifferentSizes);
+    }
+    if old.log_root == current.log_root && old.map_root == current.map_root {
+        return Ok(GossipComparison::SameView);
+    }
+    Ok(GossipComparison::SplitView(Box::new(SplitViewEvidence {
+        first: older.clone(),
+        conflicting: new.clone(),
+        detected_at: now,
+    })))
 }
 
 /// Accept only canonical compressed keys; string comparisons elsewhere are exact.
@@ -235,8 +265,7 @@ impl GossipMonitor {
                 continue;
             }
             if let GossipComparison::SplitView(evidence) =
-                compare_verified_gossip_observations(older, &observation, now)
-                    .map_err(|_| WitnessError::InvalidSignature)?
+                compare_cached_observations(older, &observation, now)?
             {
                 let store = self.store.clone();
                 let recorded = evidence.clone();
