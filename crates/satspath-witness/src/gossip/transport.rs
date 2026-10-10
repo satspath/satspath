@@ -37,6 +37,32 @@ pub(super) enum RelayPolicy {
     LocalTest,
 }
 
+impl RelayPolicy {
+    fn poll_interval(self) -> Duration {
+        match self {
+            RelayPolicy::Public => LOCAL_POLL,
+            #[cfg(test)]
+            RelayPolicy::LocalTest => Duration::from_millis(50),
+        }
+    }
+
+    fn confirmation_timeout(self) -> Duration {
+        match self {
+            RelayPolicy::Public => Duration::from_secs(30),
+            #[cfg(test)]
+            RelayPolicy::LocalTest => Duration::from_millis(150),
+        }
+    }
+
+    fn retry_interval(self) -> Duration {
+        match self {
+            RelayPolicy::Public => Duration::from_secs(3),
+            #[cfg(test)]
+            RelayPolicy::LocalTest => Duration::from_millis(50),
+        }
+    }
+}
+
 /// Normalize malformed relay input to one non-leaking validation error.
 fn invalid() -> WitnessError {
     WitnessError::InvalidSignature
@@ -426,16 +452,24 @@ async fn run_relay_with_policy(
             )
             .await;
             if matches!(sent, Ok(Ok(()))) {
-                let mut tick = tokio::time::interval(LOCAL_POLL);
-                // Sent but unconfirmed (event ID, checkpoint hash). Scoped to this
+                let mut tick = tokio::time::interval(policy.poll_interval());
+                // Sent but unconfirmed (event ID, checkpoint hash, sent instant). Scoped to this
                 // connection: a disconnect before `OK` drops it so we retry later.
-                let mut pending: Option<(String, String)> = None;
+                let mut pending: Option<(String, String, tokio::time::Instant)> = None;
                 loop {
                     tokio::select! {
                         _ = tick.tick() => {
-                            let pending_hash = pending.as_ref().map(|(_, hash)| hash.as_str());
+                            if pending
+                                .as_ref()
+                                .is_some_and(|(_, _, sent_at)| sent_at.elapsed() >= policy.confirmation_timeout())
+                            {
+                                pending = None;
+                            }
+                            let pending_hash = pending.as_ref().map(|(_, hash, _)| hash.as_str());
                             match publish_local(&mut ws, &monitor, &key, &last_published, pending_hash).await {
-                                Ok(Some(sent)) => pending = Some(sent),
+                                Ok(Some((id, hash))) => {
+                                    pending = Some((id, hash, tokio::time::Instant::now()));
+                                }
                                 Ok(None) => {}
                                 Err(WitnessError::Relay(_)) => break,
                                 Err(e) => return Err(e),
@@ -455,13 +489,13 @@ async fn run_relay_with_policy(
                                         }
                                     } else if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(&text) {
                                         if items.first().and_then(Value::as_str) == Some("OK")
-                                            && pending.as_ref().is_some_and(|(id, _)| {
+                                            && pending.as_ref().is_some_and(|(id, _, _)| {
                                                 items.get(1).and_then(Value::as_str) == Some(id.as_str())
                                             })
                                         {
                                             match items.get(2).and_then(Value::as_bool) {
                                                 Some(true) => {
-                                                    if let Some((_, hash)) = pending.take() {
+                                                    if let Some((_, hash, _)) = pending.take() {
                                                         last_published = Some((hash, tokio::time::Instant::now()));
                                                     }
                                                 }
@@ -489,6 +523,6 @@ async fn run_relay_with_policy(
                 }
             }
         }
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(policy.retry_interval()).await;
     }
 }

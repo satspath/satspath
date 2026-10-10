@@ -772,14 +772,11 @@ async fn unconfirmed_or_rejected_checkpoint_is_retried_on_reconnect() {
     )
     .unwrap();
     let now = chrono::Utc::now().timestamp();
+    let cp = checkpoint(&operator, &"ab".repeat(32));
+    let expected_hash = cp.checkpoint_hash().unwrap();
     monitor
         .ingest(
-            GossipObservation::sign(
-                checkpoint(&operator, &"ab".repeat(32)),
-                &alice.secret_key,
-                now,
-            )
-            .unwrap(),
+            GossipObservation::sign(cp, &alice.secret_key, now).unwrap(),
             now,
         )
         .await
@@ -795,8 +792,10 @@ async fn unconfirmed_or_rejected_checkpoint_is_retried_on_reconnect() {
             let _ = socket.next().await;
             if let Some(Ok(Message::Text(text))) = socket.next().await {
                 let val: Value = serde_json::from_str(&text).unwrap();
+                let observation: GossipObservation =
+                    serde_json::from_str(val[1]["content"].as_str().unwrap()).unwrap();
                 let _ = published_tx
-                    .send(val[1]["id"].as_str().unwrap().to_string())
+                    .send(observation.checkpoint.checkpoint_hash().unwrap())
                     .await;
             }
         }
@@ -806,8 +805,12 @@ async fn unconfirmed_or_rejected_checkpoint_is_retried_on_reconnect() {
             let _ = socket.next().await;
             if let Some(Ok(Message::Text(text))) = socket.next().await {
                 let val: Value = serde_json::from_str(&text).unwrap();
+                let observation: GossipObservation =
+                    serde_json::from_str(val[1]["content"].as_str().unwrap()).unwrap();
                 let id = val[1]["id"].as_str().unwrap().to_string();
-                let _ = published_tx.send(id.clone()).await;
+                let _ = published_tx
+                    .send(observation.checkpoint.checkpoint_hash().unwrap())
+                    .await;
                 let _ = socket
                     .send(Message::Text(
                         json!(["OK", id, false, "blocked"]).to_string().into(),
@@ -821,8 +824,12 @@ async fn unconfirmed_or_rejected_checkpoint_is_retried_on_reconnect() {
             let _ = socket.next().await;
             if let Some(Ok(Message::Text(text))) = socket.next().await {
                 let val: Value = serde_json::from_str(&text).unwrap();
+                let observation: GossipObservation =
+                    serde_json::from_str(val[1]["content"].as_str().unwrap()).unwrap();
                 let id = val[1]["id"].as_str().unwrap().to_string();
-                let _ = published_tx.send(id.clone()).await;
+                let _ = published_tx
+                    .send(observation.checkpoint.checkpoint_hash().unwrap())
+                    .await;
                 let _ = socket
                     .send(Message::Text(
                         json!(["OK", id, true, ""]).to_string().into(),
@@ -834,21 +841,107 @@ async fn unconfirmed_or_rejected_checkpoint_is_retried_on_reconnect() {
     });
 
     let task = tokio::spawn(run_local_test_relay(monitor, relay, alice.secret_key));
-    let first = tokio::time::timeout(Duration::from_secs(5), published_rx.recv())
+    let first_hash = tokio::time::timeout(Duration::from_secs(5), published_rx.recv())
         .await
         .unwrap()
         .unwrap();
-    let second = tokio::time::timeout(Duration::from_secs(8), published_rx.recv())
+    let second_hash = tokio::time::timeout(Duration::from_secs(5), published_rx.recv())
         .await
         .unwrap()
         .unwrap();
-    let third = tokio::time::timeout(Duration::from_secs(8), published_rx.recv())
+    let third_hash = tokio::time::timeout(Duration::from_secs(5), published_rx.recv())
         .await
         .unwrap()
         .unwrap();
-    assert!(!first.is_empty());
-    assert!(!second.is_empty());
-    assert!(!third.is_empty());
+    assert_eq!(first_hash, expected_hash);
+    assert_eq!(second_hash, expected_hash);
+    assert_eq!(third_hash, expected_hash);
+
+    task.abort();
+    server.abort();
+}
+
+/// An unconfirmed publication on a live connection retries when the confirmation deadline expires.
+#[tokio::test]
+async fn unconfirmed_publication_retries_on_live_connection_without_ok() {
+    let operator = generate_identity_keypair();
+    let alice = generate_identity_keypair();
+    let bob = generate_identity_keypair();
+    let trusted = vec![
+        hex::encode(alice.public_key.serialize()),
+        hex::encode(bob.public_key.serialize()),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let store = GossipStore::open(dir.path()).unwrap();
+    let monitor = GossipMonitor::new(
+        GossipConfig {
+            log_id: LOG_ID.into(),
+            operator_pubkey: hex::encode(operator.public_key.serialize()),
+            trusted_observers: trusted,
+        },
+        store,
+    )
+    .unwrap();
+    let cp = checkpoint(&operator, &"ef".repeat(32));
+    let expected_hash = cp.checkpoint_hash().unwrap();
+    let now = chrono::Utc::now().timestamp();
+    monitor
+        .ingest(
+            GossipObservation::sign(cp, &alice.secret_key, now).unwrap(),
+            now,
+        )
+        .await
+        .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay = format!("ws://{}", listener.local_addr().unwrap());
+    let (published_tx, mut published_rx) = tokio::sync::mpsc::channel(8);
+    let server = tokio::spawn(async move {
+        // Keep single connection open without ever sending OK for the first event
+        if let Ok((stream, _)) = listener.accept().await {
+            let mut socket = accept_async(stream).await.unwrap();
+            let _ = socket.next().await; // REQ
+                                         // First EVENT received
+            if let Some(Ok(Message::Text(text))) = socket.next().await {
+                let val: Value = serde_json::from_str(&text).unwrap();
+                let observation: GossipObservation =
+                    serde_json::from_str(val[1]["content"].as_str().unwrap()).unwrap();
+                let _ = published_tx
+                    .send(observation.checkpoint.checkpoint_hash().unwrap())
+                    .await;
+            }
+            // Do NOT send OK and do NOT close the connection.
+            // Client should expire unconfirmed pending_hash and retry on the same socket!
+            if let Some(Ok(Message::Text(text))) = socket.next().await {
+                let val: Value = serde_json::from_str(&text).unwrap();
+                let observation: GossipObservation =
+                    serde_json::from_str(val[1]["content"].as_str().unwrap()).unwrap();
+                let _ = published_tx
+                    .send(observation.checkpoint.checkpoint_hash().unwrap())
+                    .await;
+                // Acknowledge second event so client knows it succeeded
+                let id = val[1]["id"].as_str().unwrap();
+                let _ = socket
+                    .send(Message::Text(
+                        json!(["OK", id, true, ""]).to_string().into(),
+                    ))
+                    .await;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
+
+    let task = tokio::spawn(run_local_test_relay(monitor, relay, alice.secret_key));
+    let first_hash = tokio::time::timeout(Duration::from_secs(3), published_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second_hash = tokio::time::timeout(Duration::from_secs(3), published_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_hash, expected_hash);
+    assert_eq!(second_hash, expected_hash);
 
     task.abort();
     server.abort();
