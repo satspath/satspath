@@ -111,8 +111,9 @@ fn records<T: serde::de::DeserializeOwned>(
             }
             match read_json_if_present(&entry.path(), max_bytes) {
                 Ok(Some(record)) => results.push(record),
-                // Removed concurrently (e.g. evicted); treat as already gone.
-                Ok(None) => {}
+                // Removed concurrently (e.g. evicted); treat as already gone for observations.
+                Ok(None) if tolerate_invalid => {}
+                Ok(None) => return Err(storage_error("missing gossip evidence file")),
                 Err(error) if tolerate_invalid => {
                     eprintln!("skipping unreadable stored gossip observation: {error}");
                     ignore_not_found(fs::rename(
