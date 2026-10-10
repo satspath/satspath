@@ -257,15 +257,17 @@ async fn connect_pinned(
 }
 
 /// Publish the latest locally authenticated checkpoint without blocking Tokio,
-/// but only when it changed or the liveness interval has elapsed.
+/// but only when it changed or the liveness interval has elapsed. Returns the
+/// sent event ID and checkpoint hash; the caller confirms them on relay `OK`.
 async fn publish_local(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
     monitor: &GossipMonitor,
     key: &SecretKey,
-    last_published: &mut LastPublished,
-) -> Result<Option<String>, WitnessError> {
+    last_published: &LastPublished,
+    pending_hash: Option<&str>,
+) -> Result<Option<(String, String)>, WitnessError> {
     let local_pubkey = hex::encode(PublicKey::from_secret_key(&Secp256k1::new(), key).serialize());
     let store = monitor.store().clone();
     let log_id = monitor.config().log_id.clone();
@@ -318,6 +320,10 @@ async fn publish_local(
         .checkpoint
         .checkpoint_hash()
         .map_err(|_| invalid())?;
+    // Awaiting the relay's verdict on this checkpoint on the current connection.
+    if pending_hash == Some(checkpoint_hash.as_str()) {
+        return Ok(None);
+    }
     if last_published.as_ref().is_some_and(|(hash, sent_at)| {
         *hash == checkpoint_hash && sent_at.elapsed() < Duration::from_secs(LIVENESS_REPUBLISH_SECS)
     }) {
@@ -352,8 +358,7 @@ async fn publish_local(
     .await
     .map_err(|_| WitnessError::Relay("send timed out".into()))?
     .map_err(|_| WitnessError::Relay("send failed".into()))?;
-    *last_published = Some((checkpoint_hash, tokio::time::Instant::now()));
-    Ok(Some(id))
+    Ok(Some((id, checkpoint_hash)))
 }
 
 /// Continuously subscribe and republish the latest locally verified checkpoint.
@@ -405,7 +410,8 @@ async fn run_relay_with_policy(
         .read_buffer_size(8192)
         .max_message_size(Some(MAX_FRAME_BYTES))
         .max_frame_size(Some(MAX_FRAME_BYTES));
-    // Kept across reconnects so a flapping relay does not trigger duplicate events.
+    // Relay-confirmed publications, kept across reconnects so a flapping relay
+    // does not trigger duplicate events.
     let mut last_published: LastPublished = None;
     loop {
         let connected = tokio::time::timeout(
@@ -421,12 +427,15 @@ async fn run_relay_with_policy(
             .await;
             if matches!(sent, Ok(Ok(()))) {
                 let mut tick = tokio::time::interval(LOCAL_POLL);
-                let mut last_sent = None;
+                // Sent but unconfirmed (event ID, checkpoint hash). Scoped to this
+                // connection: a disconnect before `OK` drops it so we retry later.
+                let mut pending: Option<(String, String)> = None;
                 loop {
                     tokio::select! {
                         _ = tick.tick() => {
-                            match publish_local(&mut ws, &monitor, &key, &mut last_published).await {
-                                Ok(Some(id)) => last_sent = Some(id),
+                            let pending_hash = pending.as_ref().map(|(_, hash)| hash.as_str());
+                            match publish_local(&mut ws, &monitor, &key, &last_published, pending_hash).await {
+                                Ok(Some(sent)) => pending = Some(sent),
                                 Ok(None) => {}
                                 Err(WitnessError::Relay(_)) => break,
                                 Err(e) => return Err(e),
@@ -446,10 +455,23 @@ async fn run_relay_with_policy(
                                         }
                                     } else if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(&text) {
                                         if items.first().and_then(Value::as_str) == Some("OK")
-                                            && items.get(1).and_then(Value::as_str) == last_sent.as_deref()
-                                            && items.get(2).and_then(Value::as_bool) == Some(false)
+                                            && pending.as_ref().is_some_and(|(id, _)| {
+                                                items.get(1).and_then(Value::as_str) == Some(id.as_str())
+                                            })
                                         {
-                                            eprintln!("gossip relay rejected checkpoint event");
+                                            match items.get(2).and_then(Value::as_bool) {
+                                                Some(true) => {
+                                                    if let Some((_, hash)) = pending.take() {
+                                                        last_published = Some((hash, tokio::time::Instant::now()));
+                                                    }
+                                                }
+                                                Some(false) => {
+                                                    pending = None;
+                                                    last_published = None;
+                                                    eprintln!("gossip relay rejected checkpoint event");
+                                                }
+                                                None => {}
+                                            }
                                         }
                                     }
                                 }
@@ -461,6 +483,9 @@ async fn run_relay_with_policy(
                             }
                         }
                     }
+                }
+                if pending.is_some() {
+                    last_published = None;
                 }
             }
         }

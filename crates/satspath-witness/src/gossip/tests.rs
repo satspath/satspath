@@ -749,3 +749,107 @@ async fn former_operator_record_does_not_kill_the_relay_subscription() {
     );
     task.abort();
 }
+
+/// Checkpoint publication is retried after disconnect or rejection until positively acknowledged.
+#[tokio::test]
+async fn unconfirmed_or_rejected_checkpoint_is_retried_on_reconnect() {
+    let operator = generate_identity_keypair();
+    let alice = generate_identity_keypair();
+    let bob = generate_identity_keypair();
+    let trusted = vec![
+        hex::encode(alice.public_key.serialize()),
+        hex::encode(bob.public_key.serialize()),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let store = GossipStore::open(dir.path()).unwrap();
+    let monitor = GossipMonitor::new(
+        GossipConfig {
+            log_id: LOG_ID.into(),
+            operator_pubkey: hex::encode(operator.public_key.serialize()),
+            trusted_observers: trusted,
+        },
+        store,
+    )
+    .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    monitor
+        .ingest(
+            GossipObservation::sign(
+                checkpoint(&operator, &"ab".repeat(32)),
+                &alice.secret_key,
+                now,
+            )
+            .unwrap(),
+            now,
+        )
+        .await
+        .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay = format!("ws://{}", listener.local_addr().unwrap());
+    let (published_tx, mut published_rx) = tokio::sync::mpsc::channel(8);
+    let server = tokio::spawn(async move {
+        // First connection: drop socket before confirmation
+        if let Ok((stream, _)) = listener.accept().await {
+            let mut socket = accept_async(stream).await.unwrap();
+            let _ = socket.next().await;
+            if let Some(Ok(Message::Text(text))) = socket.next().await {
+                let val: Value = serde_json::from_str(&text).unwrap();
+                let _ = published_tx
+                    .send(val[1]["id"].as_str().unwrap().to_string())
+                    .await;
+            }
+        }
+        // Second connection: send OK false (rejection)
+        if let Ok((stream, _)) = listener.accept().await {
+            let mut socket = accept_async(stream).await.unwrap();
+            let _ = socket.next().await;
+            if let Some(Ok(Message::Text(text))) = socket.next().await {
+                let val: Value = serde_json::from_str(&text).unwrap();
+                let id = val[1]["id"].as_str().unwrap().to_string();
+                let _ = published_tx.send(id.clone()).await;
+                let _ = socket
+                    .send(Message::Text(
+                        json!(["OK", id, false, "blocked"]).to_string().into(),
+                    ))
+                    .await;
+            }
+        }
+        // Third connection: send OK true (acceptance)
+        if let Ok((stream, _)) = listener.accept().await {
+            let mut socket = accept_async(stream).await.unwrap();
+            let _ = socket.next().await;
+            if let Some(Ok(Message::Text(text))) = socket.next().await {
+                let val: Value = serde_json::from_str(&text).unwrap();
+                let id = val[1]["id"].as_str().unwrap().to_string();
+                let _ = published_tx.send(id.clone()).await;
+                let _ = socket
+                    .send(Message::Text(
+                        json!(["OK", id, true, ""]).to_string().into(),
+                    ))
+                    .await;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
+
+    let task = tokio::spawn(run_local_test_relay(monitor, relay, alice.secret_key));
+    let first = tokio::time::timeout(Duration::from_secs(5), published_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(8), published_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let third = tokio::time::timeout(Duration::from_secs(8), published_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!first.is_empty());
+    assert!(!second.is_empty());
+    assert!(!third.is_empty());
+
+    task.abort();
+    server.abort();
+}
