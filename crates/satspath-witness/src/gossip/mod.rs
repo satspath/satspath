@@ -28,11 +28,19 @@ struct VerifiedCache {
     split_view_size: Option<u64>,
 }
 
+/// An unlinked view remains eligible for signed same-size comparison, not for
+/// claiming append-only continuity with this receiver's previous checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransitionStatus {
+    Linked,
+    Unlinked,
+}
+
 /// Enforce each observer's pinned history before their new view is shared.
 fn check_observer_transition(
     previous: &GossipObservation,
     proposed: &GossipObservation,
-) -> Result<(), WitnessError> {
+) -> Result<TransitionStatus, WitnessError> {
     let old = &previous.checkpoint;
     let new = &proposed.checkpoint;
     if new.log_size < old.log_size {
@@ -62,10 +70,20 @@ fn check_observer_transition(
         }
         verify_checkpoint_transition(&pin, new, None)
             .map_err(|_| WitnessError::InvalidConsistencyProof)?;
-        return Ok(());
+        return Ok(TransitionStatus::Linked);
     }
-    verify_checkpoint_transition(&pin, new, proposed.consistency_proof.as_ref())
-        .map_err(|_| WitnessError::InvalidConsistencyProof)
+    let proof = proposed
+        .consistency_proof
+        .as_ref()
+        .ok_or(WitnessError::InvalidConsistencyProof)?;
+    if proof.old_tree_size != old.log_size || proof.old_root != old.log_root {
+        // verify_evidence already checked this proof's operator-signed new root.
+        // It does not establish a prefix from the receiver's cached root.
+        return Ok(TransitionStatus::Unlinked);
+    }
+    verify_checkpoint_transition(&pin, new, Some(proof))
+        .map_err(|_| WitnessError::InvalidConsistencyProof)?;
+    Ok(TransitionStatus::Linked)
 }
 
 /// Only compare observations authenticated into this monitor's private cache.
@@ -162,6 +180,21 @@ impl GossipMonitor {
         &self.store
     }
 
+    /// Select the newest authenticated local view, never an unchecked disk record.
+    pub(crate) async fn local_observation(
+        &self,
+        pubkey: &str,
+    ) -> Result<Option<GossipObservation>, WitnessError> {
+        let mut cache = self.cache.lock().await;
+        self.load_cache(&mut cache).await?;
+        Ok(cache
+            .observations
+            .values()
+            .filter(|item| item.observer_pubkey == pubkey)
+            .max_by_key(|item| (item.checkpoint.log_size, item.observed_at))
+            .cloned())
+    }
+
     /// Lazily load and authenticate persisted observations once per trust policy.
     async fn load_cache(&self, cache: &mut VerifiedCache) -> Result<(), WitnessError> {
         if cache.loaded {
@@ -194,9 +227,17 @@ impl GossipMonitor {
                     .filter(|previous| previous.observer_pubkey == older.observer_pubkey)
                     .max_by_key(|previous| (previous.checkpoint.log_size, previous.observed_at))
                 {
-                    if check_observer_transition(latest, &older).is_err() {
-                        eprintln!("skipping stored checkpoint with unverified observer transition");
-                        continue;
+                    match check_observer_transition(latest, &older) {
+                        Ok(TransitionStatus::Unlinked) => {
+                            eprintln!("stored observer advance lacks a proof from the retained pin")
+                        }
+                        Ok(TransitionStatus::Linked) => {}
+                        Err(_) => {
+                            eprintln!(
+                                "skipping stored checkpoint with invalid observer transition"
+                            );
+                            continue;
+                        }
                     }
                 }
                 cache.observations.insert(observation_key(&older)?, older);
@@ -257,7 +298,9 @@ impl GossipMonitor {
             .filter(|old| old.observer_pubkey == observation.observer_pubkey)
             .max_by_key(|old| (old.checkpoint.log_size, old.observed_at))
         {
-            check_observer_transition(latest, &observation)?;
+            if check_observer_transition(latest, &observation)? == TransitionStatus::Unlinked {
+                eprintln!("gossip observer advance is signed but unlinked from the retained pin");
+            }
         }
         let mut split_view = false;
         for older in cache.observations.values() {

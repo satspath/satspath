@@ -49,6 +49,13 @@ outside the current trust policy are not used for comparison; historical alerts
 remain on disk and can be checked using the prior policy. Run one monitor per
 state directory.
 
+If a relay omits an intermediate observation, a newer operator-signed checkpoint
+with a valid proof from an **unknown** intermediate size is retained as an
+*unlinked view*. It can still expose a same-size split view, but **does not**
+establish append-only continuity back to the receiver's earlier pin. The
+receiver must obtain the missing checkpoint or a proof from its retained root
+to claim continuity; neither gossip nor reconnecting resets the pin.
+
 ## Running two independent observers
 
 Build with `cargo build -p satspath-witness --bin satspath-gossip`. For **each**

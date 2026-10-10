@@ -262,21 +262,48 @@ async fn publish_local(
     let observations = tokio::task::spawn_blocking(move || store.observations(&log_id))
         .await
         .map_err(|e| WitnessError::Storage(e.to_string()))??;
-    let observation = observations
+    let cached = monitor.local_observation(&local_pubkey).await?;
+    let mut updates: Vec<_> = observations
         .into_iter()
         .filter(|item| item.observer_pubkey == local_pubkey)
-        .max_by_key(|item| (item.checkpoint.log_size, item.observed_at));
+        .filter(|item| {
+            item.verify_evidence(
+                &monitor.config().log_id,
+                &monitor.config().operator_pubkey,
+                &monitor.config().trusted_observers,
+            )
+            .is_ok()
+        })
+        .filter(|item| {
+            cached.as_ref().is_none_or(|prior| {
+                item.checkpoint.log_size > prior.checkpoint.log_size
+                    || (item.checkpoint.log_size == prior.checkpoint.log_size
+                        && item.observed_at > prior.observed_at)
+            })
+        })
+        .collect();
+    updates.sort_by_key(|item| (item.checkpoint.log_size, item.observed_at));
+    let now = chrono::Utc::now().timestamp();
+    for item in updates {
+        let refreshed =
+            GossipObservation::sign_with_proof(item.checkpoint, item.consistency_proof, key, now)
+                .map_err(|_| invalid())?;
+        match monitor.ingest(refreshed, now).await {
+            Ok(()) => {}
+            Err(
+                WitnessError::Rollback { .. }
+                | WitnessError::EquivocationDetected { .. }
+                | WitnessError::InvalidConsistencyProof,
+            ) => {
+                eprintln!("skipping invalid local gossip checkpoint transition");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let observation = monitor.local_observation(&local_pubkey).await?;
     let Some(observation) = observation else {
         return Ok(None);
     };
-    observation
-        .verify_evidence(
-            &monitor.config().log_id,
-            &monitor.config().operator_pubkey,
-            &monitor.config().trusted_observers,
-        )
-        .map_err(|_| invalid())?;
-    let now = chrono::Utc::now().timestamp();
     let renewed = GossipObservation::sign_with_proof(
         observation.checkpoint,
         observation.consistency_proof,
@@ -284,7 +311,18 @@ async fn publish_local(
         now,
     )
     .map_err(|_| invalid())?;
-    monitor.ingest(renewed.clone(), now).await?;
+    match monitor.ingest(renewed.clone(), now).await {
+        Ok(()) => {}
+        Err(
+            WitnessError::Rollback { .. }
+            | WitnessError::EquivocationDetected { .. }
+            | WitnessError::InvalidConsistencyProof,
+        ) => {
+            eprintln!("skipping invalid local gossip checkpoint transition");
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    }
     let event = NostrGossipEvent::sign(&renewed, key, now)?;
     let id = event.id.clone();
     let payload = json!(["EVENT", event]).to_string();

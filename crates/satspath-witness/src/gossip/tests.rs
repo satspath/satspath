@@ -465,6 +465,70 @@ async fn per_observer_rollbacks_forks_and_unproven_advances_are_rejected() {
     assert_eq!(monitor.store().observations(LOG_ID).unwrap().len(), 2);
 }
 
+/// Missing an intermediate relay event must not disable later signed fork detection.
+#[tokio::test]
+async fn missed_intermediate_observation_remains_unlinked_but_detects_a_later_fork() {
+    let operator = generate_identity_keypair();
+    let alice = generate_identity_keypair();
+    let bob = generate_identity_keypair();
+    let config = GossipConfig {
+        log_id: LOG_ID.into(),
+        operator_pubkey: hex::encode(operator.public_key.serialize()),
+        trusted_observers: vec![
+            hex::encode(alice.public_key.serialize()),
+            hex::encode(bob.public_key.serialize()),
+        ],
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let monitor = GossipMonitor::new(config, GossipStore::open(dir.path()).unwrap()).unwrap();
+    let leaves = [leaf_hash(b"one"), leaf_hash(b"two"), leaf_hash(b"three")];
+    let now = chrono::Utc::now().timestamp();
+    let mut first = checkpoint(&operator, &hex::encode(merkle_root(&leaves[..1])));
+    first.log_size = 1;
+    first.sign(&operator.secret_key).unwrap();
+    monitor
+        .ingest(
+            GossipObservation::sign(first, &bob.secret_key, now).unwrap(),
+            now,
+        )
+        .await
+        .unwrap();
+
+    let mut fork = checkpoint(&operator, &"ef".repeat(32));
+    fork.log_size = 3;
+    fork.sign(&operator.secret_key).unwrap();
+    monitor
+        .ingest(
+            GossipObservation::sign(fork, &alice.secret_key, now).unwrap(),
+            now,
+        )
+        .await
+        .unwrap();
+
+    let mut third = checkpoint(&operator, &hex::encode(merkle_root(&leaves)));
+    third.log_size = 3;
+    third.sign(&operator.secret_key).unwrap();
+    let proof = MerkleConsistencyProof {
+        version: 2,
+        old_tree_size: 2,
+        new_tree_size: 3,
+        old_root: hex::encode(merkle_root(&leaves[..2])),
+        new_root: third.log_root.clone(),
+        audit_path: consistency_proof(&leaves, 2)
+            .unwrap()
+            .into_iter()
+            .map(hex::encode)
+            .collect(),
+    };
+    let observation =
+        GossipObservation::sign_with_proof(third, Some(proof), &bob.secret_key, now + 1).unwrap();
+    assert!(matches!(
+        monitor.ingest(observation, now + 1).await,
+        Err(WitnessError::SplitViewDetected { tree_size: 3, .. })
+    ));
+    assert_eq!(monitor.alerts(now + 1).await.unwrap().len(), 1);
+}
+
 /// Ordinary checkpoint churn prunes old observations without losing alerts.
 #[tokio::test]
 async fn retaining_recent_observations_does_not_stop_after_normal_log_updates() {
@@ -585,4 +649,71 @@ async fn former_trust_records_do_not_block_a_new_trusted_operator() {
         .await
         .unwrap();
     assert_eq!(current.store().observations(LOG_ID).unwrap().len(), 2);
+}
+
+/// Publishing skips a stored checkpoint signed for a former operator policy.
+#[tokio::test]
+async fn former_operator_record_does_not_kill_the_relay_subscription() {
+    let former_operator = generate_identity_keypair();
+    let current_operator = generate_identity_keypair();
+    let alice = generate_identity_keypair();
+    let bob = generate_identity_keypair();
+    let trusted = vec![
+        hex::encode(alice.public_key.serialize()),
+        hex::encode(bob.public_key.serialize()),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let store = GossipStore::open(dir.path()).unwrap();
+    let former = GossipMonitor::new(
+        GossipConfig {
+            log_id: LOG_ID.into(),
+            operator_pubkey: hex::encode(former_operator.public_key.serialize()),
+            trusted_observers: trusted.clone(),
+        },
+        store.clone(),
+    )
+    .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    former
+        .ingest(
+            GossipObservation::sign(
+                checkpoint(&former_operator, &"ab".repeat(32)),
+                &alice.secret_key,
+                now,
+            )
+            .unwrap(),
+            now,
+        )
+        .await
+        .unwrap();
+    let current = GossipMonitor::new(
+        GossipConfig {
+            log_id: LOG_ID.into(),
+            operator_pubkey: hex::encode(current_operator.public_key.serialize()),
+            trusted_observers: trusted,
+        },
+        store,
+    )
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let request = socket.next().await.unwrap().unwrap();
+        assert!(matches!(request, Message::Text(_)));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), socket.next())
+                .await
+                .is_err()
+        );
+    });
+    let task = tokio::spawn(run_local_test_relay(current, relay, alice.secret_key));
+    server.await.unwrap();
+    assert!(
+        !task.is_finished(),
+        "a former-policy checkpoint must not stop relay monitoring"
+    );
+    task.abort();
 }
