@@ -435,6 +435,38 @@ async fn per_observer_rollbacks_forks_and_unproven_advances_are_rejected() {
         })
     ));
 
+    let forked_leaves = [
+        leaf_hash(b"fork-one"),
+        leaf_hash(b"fork-two"),
+        leaf_hash(b"fork-three"),
+    ];
+    let mut forked_tip = checkpoint(&operator, &hex::encode(merkle_root(&forked_leaves)));
+    forked_tip.log_size = 3;
+    forked_tip.sign(&operator.secret_key).unwrap();
+    let forked_proof = MerkleConsistencyProof {
+        version: 2,
+        old_tree_size: 2,
+        new_tree_size: 3,
+        old_root: hex::encode(merkle_root(&forked_leaves[..2])),
+        new_root: forked_tip.log_root.clone(),
+        audit_path: consistency_proof(&forked_leaves, 2)
+            .unwrap()
+            .into_iter()
+            .map(hex::encode)
+            .collect(),
+    };
+    let forked_advance = GossipObservation::sign_with_proof(
+        forked_tip,
+        Some(forked_proof),
+        &alice.secret_key,
+        now + 2,
+    )
+    .unwrap();
+    assert!(matches!(
+        monitor.ingest(forked_advance, now + 2).await,
+        Err(WitnessError::EquivocationDetected { tree_size: 2, .. })
+    ));
+
     let mut next = checkpoint(&operator, &hex::encode(merkle_root(&leaves)));
     next.log_size = 3;
     next.sign(&operator.secret_key).unwrap();

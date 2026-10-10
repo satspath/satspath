@@ -76,7 +76,15 @@ fn check_observer_transition(
         .consistency_proof
         .as_ref()
         .ok_or(WitnessError::InvalidConsistencyProof)?;
-    if proof.old_tree_size != old.log_size || proof.old_root != old.log_root {
+    if proof.old_tree_size == old.log_size && proof.old_root != old.log_root {
+        // Both roots at this size are committed by the same operator: a fork,
+        // not a missing intermediate observation.
+        return Err(WitnessError::EquivocationDetected {
+            log_id: new.log_id.clone(),
+            tree_size: old.log_size,
+        });
+    }
+    if proof.old_tree_size != old.log_size {
         // verify_evidence already checked this proof's operator-signed new root.
         // It does not establish a prefix from the receiver's cached root.
         return Ok(TransitionStatus::Unlinked);
