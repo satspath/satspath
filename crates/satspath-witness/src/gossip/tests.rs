@@ -48,6 +48,12 @@ fn production_relays_cannot_use_local_ws_or_mixed_private_dns_answers() {
         &[nat64_public],
         RelayPolicy::Public
     ));
+    for reserved in ["[100::1]:443", "[2001:2::1]:443", "[fec0::1]:443"] {
+        assert!(!allowed_resolved_addresses(
+            &[reserved.parse().unwrap()],
+            RelayPolicy::Public
+        ));
+    }
 }
 
 /// Generate an operator-signed, deterministic-size checkpoint for test peers.
@@ -228,6 +234,63 @@ async fn two_independent_observers_detect_and_persist_signed_split_view_over_nos
         .await
         .unwrap()
         .is_empty());
+}
+
+/// A verified fork fails immediately, but its signed evidence survives a restart.
+#[tokio::test]
+async fn split_view_returns_error_after_persisting_reverifiable_evidence() {
+    let operator = generate_identity_keypair();
+    let alice = generate_identity_keypair();
+    let bob = generate_identity_keypair();
+    let config = GossipConfig {
+        log_id: LOG_ID.into(),
+        operator_pubkey: hex::encode(operator.public_key.serialize()),
+        trusted_observers: vec![
+            hex::encode(alice.public_key.serialize()),
+            hex::encode(bob.public_key.serialize()),
+        ],
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let monitor =
+        GossipMonitor::new(config.clone(), GossipStore::open(dir.path()).unwrap()).unwrap();
+    let now = chrono::Utc::now().timestamp();
+    let a = GossipObservation::sign(
+        checkpoint(&operator, &"ab".repeat(32)),
+        &alice.secret_key,
+        now,
+    )
+    .unwrap();
+    let b = GossipObservation::sign(
+        checkpoint(&operator, &"cd".repeat(32)),
+        &bob.secret_key,
+        now,
+    )
+    .unwrap();
+    monitor.ingest(a.clone(), now).await.unwrap();
+    assert!(matches!(
+        monitor.ingest(b, now).await,
+        Err(WitnessError::SplitViewDetected { tree_size: 10, .. })
+    ));
+    let alerts = monitor.alerts(now).await.unwrap();
+    assert_eq!(alerts.len(), 1);
+    assert!(matches!(
+        monitor.ingest(a.clone(), now).await,
+        Err(WitnessError::SplitViewDetected { .. })
+    ));
+    alerts[0]
+        .verify(
+            LOG_ID,
+            &config.operator_pubkey,
+            &config.trusted_observers,
+            now,
+        )
+        .unwrap();
+    let restarted = GossipMonitor::new(config, GossipStore::open(dir.path()).unwrap()).unwrap();
+    assert_eq!(restarted.alerts(now).await.unwrap().len(), 1);
+    assert!(matches!(
+        restarted.ingest(a, now + 1).await,
+        Err(WitnessError::SplitViewDetected { .. })
+    ));
 }
 
 /// Untrusted Nostr authors, payload mutations, and stale events are rejected.

@@ -171,10 +171,7 @@ async fn main() -> Result<()> {
             .await?;
             let now = chrono::Utc::now().timestamp();
             let observation = GossipObservation::sign_with_proof(checkpoint, proof, &key, now)?;
-            let alerts = monitor.ingest(observation, now).await?;
-            for alert in alerts {
-                eprintln!("GOSSIP_SPLIT_VIEW {}", serde_json::to_string(&alert)?);
-            }
+            monitor.ingest(observation, now).await?;
             println!("checkpoint verified and ready for gossip");
             Ok(())
         }

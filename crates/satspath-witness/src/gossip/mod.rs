@@ -25,6 +25,7 @@ use store::{observation_key, ObservationKey, SaveResult};
 struct VerifiedCache {
     loaded: bool,
     observations: HashMap<ObservationKey, GossipObservation>,
+    split_view_size: Option<u64>,
 }
 
 /// Enforce each observer's pinned history before their new view is shared.
@@ -173,16 +174,22 @@ impl GossipMonitor {
                 eprintln!("skipping stored checkpoint outside the current gossip trust policy");
             }
         }
+        if let Some(existing) = self.alerts(chrono::Utc::now().timestamp()).await?.first() {
+            return Err(WitnessError::SplitViewDetected {
+                log_id: self.config.log_id.clone(),
+                tree_size: existing.first.checkpoint.log_size,
+            });
+        }
         cache.loaded = true;
         Ok(())
     }
 
-    /// Saves only validated observations and returns newly recorded alerts.
+    /// Persist a valid observation; return an immediate failure on a split view.
     pub async fn ingest(
         &self,
         observation: GossipObservation,
         now: i64,
-    ) -> Result<Vec<SplitViewEvidence>, WitnessError> {
+    ) -> Result<(), WitnessError> {
         let size = serde_json::to_vec(&observation)
             .map_err(|e| WitnessError::Storage(e.to_string()))?
             .len();
@@ -197,15 +204,22 @@ impl GossipMonitor {
                 now,
             )
             .map_err(|_| WitnessError::InvalidSignature)?;
+        let tree_size = observation.checkpoint.log_size;
         let mut cache = self.cache.lock().await;
         self.load_cache(&mut cache).await?;
+        if let Some(tree_size) = cache.split_view_size {
+            return Err(WitnessError::SplitViewDetected {
+                log_id: self.config.log_id.clone(),
+                tree_size,
+            });
+        }
         let new_key = observation_key(&observation)?;
         if cache
             .observations
             .get(&new_key)
             .is_some_and(|old| old.observed_at >= observation.observed_at)
         {
-            return Ok(Vec::new());
+            return Ok(());
         }
         if let Some(latest) = cache
             .observations
@@ -215,7 +229,7 @@ impl GossipMonitor {
         {
             check_observer_transition(latest, &observation)?;
         }
-        let mut alerts = Vec::new();
+        let mut split_view = false;
         for older in cache.observations.values() {
             if older.observer_pubkey == observation.observer_pubkey {
                 continue;
@@ -226,12 +240,10 @@ impl GossipMonitor {
             {
                 let store = self.store.clone();
                 let recorded = evidence.clone();
-                if tokio::task::spawn_blocking(move || store.save_alert(&recorded))
+                tokio::task::spawn_blocking(move || store.save_alert(&recorded))
                     .await
-                    .map_err(|e| WitnessError::Storage(e.to_string()))??
-                {
-                    alerts.push(*evidence);
-                }
+                    .map_err(|e| WitnessError::Storage(e.to_string()))??;
+                split_view = true;
             }
         }
         let store = self.store.clone();
@@ -245,7 +257,21 @@ impl GossipMonitor {
             }
             cache.observations.insert(new_key, observation);
         }
-        Ok(alerts)
+        if split_view {
+            cache.split_view_size = Some(tree_size);
+            eprintln!(
+                "GOSSIP_SPLIT_VIEW {}",
+                serde_json::json!({
+                    "log_id": &self.config.log_id,
+                    "tree_size": tree_size,
+                })
+            );
+            return Err(WitnessError::SplitViewDetected {
+                log_id: self.config.log_id.clone(),
+                tree_size,
+            });
+        }
+        Ok(())
     }
 
     /// Return alerts valid under the current policy; retain former-policy files

@@ -176,6 +176,14 @@ fn is_private_v6(ip: Ipv6Addr) -> bool {
     if segments[0] == 0x2001 && segments[1] == 0x0db8 {
         return true; // documentation
     }
+    // Discard-only (RFC 6666), benchmarking (RFC 5180), and deprecated
+    // site-local addresses cannot be publicly reachable relay endpoints.
+    if (segments[0] == 0x0100 && segments[1..4] == [0, 0, 0])
+        || (segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0)
+        || (segments[0] & 0xffc0 == 0xfec0)
+    {
+        return true;
+    }
     // RFC 6052 well-known NAT64 prefix 64:ff9b::/96 embeds the IPv4
     // destination in the final 32 bits. Do not block public NAT64 targets.
     if segments[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
@@ -215,6 +223,24 @@ mod tests {
         assert!(!is_private_or_reserved_ip(
             "64:ff9b::101:101".parse().unwrap()
         ));
+    }
+
+    /// DNS answer validation rejects special-use IPv6 outside NAT64 and ULA.
+    #[test]
+    fn nonpublic_ipv6_discard_benchmark_and_site_local_ranges_are_blocked() {
+        for ip in [
+            "100::1",
+            "100::ffff:1",
+            "2001:2::1",
+            "2001:2:0:ffff::1",
+            "fec0::1",
+            "feff::1",
+        ] {
+            assert!(is_private_or_reserved_ip(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["64:ff9b::808:808", "2606:4700:4700::1111"] {
+            assert!(!is_private_or_reserved_ip(ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[test]

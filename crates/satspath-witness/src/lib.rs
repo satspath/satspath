@@ -35,6 +35,8 @@ pub enum WitnessError {
     Rollback { pinned: u64, proposed: u64 },
     #[error("Equivocation detected for log {log_id} at tree size {tree_size}")]
     EquivocationDetected { log_id: String, tree_size: u64 },
+    #[error("Split view detected for log {log_id} at tree size {tree_size}; inspect persisted gossip alerts")]
+    SplitViewDetected { log_id: String, tree_size: u64 },
     #[error("Consistency proof verification failed")]
     InvalidConsistencyProof,
     #[error("Timestamp outside acceptable freshness window")]

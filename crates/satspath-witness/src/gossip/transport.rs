@@ -248,15 +248,6 @@ async fn connect_pinned(
     Err(WitnessError::Relay("relay connection failed".into()))
 }
 
-/// Emit newly persisted public evidence without printing secret observer keys.
-fn report_alerts(alerts: Vec<satspath_core::transparency::SplitViewEvidence>) {
-    for alert in alerts {
-        if let Ok(json) = serde_json::to_string(&alert) {
-            eprintln!("GOSSIP_SPLIT_VIEW {json}");
-        }
-    }
-}
-
 /// Republish the latest locally authenticated checkpoint without blocking Tokio.
 async fn publish_local(
     ws: &mut tokio_tungstenite::WebSocketStream<
@@ -293,7 +284,7 @@ async fn publish_local(
         now,
     )
     .map_err(|_| invalid())?;
-    report_alerts(monitor.ingest(renewed.clone(), now).await?);
+    monitor.ingest(renewed.clone(), now).await?;
     let event = NostrGossipEvent::sign(&renewed, key, now)?;
     let id = event.id.clone();
     let payload = json!(["EVENT", event]).to_string();
@@ -386,7 +377,7 @@ async fn run_relay_with_policy(
                                     let now = chrono::Utc::now().timestamp();
                                     if let Ok(Some(observation)) = parse_relay_event(&text, monitor.config(), now) {
                                         match monitor.ingest(observation, now).await {
-                                            Ok(alerts) => report_alerts(alerts),
+                                            Ok(()) => {}
                                             Err(WitnessError::Rollback { .. } | WitnessError::EquivocationDetected { .. } | WitnessError::InvalidConsistencyProof) => {
                                                 eprintln!("gossip observer checkpoint transition rejected");
                                             }

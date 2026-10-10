@@ -34,9 +34,12 @@ signed checkpoints. An identical root is consistent even if an optional Bitcoin
 receipt changed its checkpoint signature. The first verified local checkpoint
 and later observed advancements are checked by the existing `WitnessService` and
 its RFC 6962 consistency proof logic before being announced. The monitor stores
-observations and deduplicated alerts under the state directory and prints newly
-detected alerts with the `GOSSIP_SPLIT_VIEW` prefix to stderr. `alerts` re-verifies
-the evidence from disk and prints it as JSON. Storage is bounded to 512 records
+observations and deduplicated alerts under the state directory. Once a split view
+is verified, it persists the evidence, prints `GOSSIP_SPLIT_VIEW` to stderr, and
+returns `SplitViewDetected` rather than treating the local observation or relay
+session as successful. Restarting a monitor with an existing valid alert also
+fails closed; `alerts` remains available to inspect the re-verified evidence as
+JSON. Storage is bounded to 512 records
 and 512 alerts per log. At most 16 recent checkpoints per observer are retained;
 older observations are pruned after newer ones are saved, while alerts embed both
 full signed checkpoints permanently. A larger checkpoint from the same observer
