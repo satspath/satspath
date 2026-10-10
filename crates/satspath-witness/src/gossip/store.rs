@@ -49,16 +49,42 @@ fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// Map a concurrent removal to `None` while propagating other I/O failures.
+fn ignore_not_found<T>(result: std::io::Result<T>) -> Result<Option<T>, WitnessError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(storage_error(error)),
+    }
+}
+
 /// Read one bounded regular file; never follow a local symlink.
+/// Returns `None` if the file was removed concurrently.
+fn read_json_if_present<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Option<T>, WitnessError> {
+    let Some(metadata) = ignore_not_found(fs::symlink_metadata(path))? else {
+        return Ok(None);
+    };
+    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
+        return Err(storage_error("invalid gossip evidence file"));
+    }
+    let Some(bytes) = ignore_not_found(fs::read(path))? else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(storage_error)
+}
+
+/// Read one bounded regular file that is expected to exist.
 fn read_json<T: serde::de::DeserializeOwned>(
     path: &Path,
     max_bytes: u64,
 ) -> Result<T, WitnessError> {
-    let metadata = fs::symlink_metadata(path).map_err(storage_error)?;
-    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
-        return Err(storage_error("invalid gossip evidence file"));
-    }
-    serde_json::from_slice(&fs::read(path).map_err(storage_error)?).map_err(storage_error)
+    read_json_if_present(path, max_bytes)?
+        .ok_or_else(|| storage_error("missing gossip evidence file"))
 }
 
 /// Load a bounded directory, isolating bad observations but not corrupt alerts.
@@ -83,12 +109,16 @@ fn records<T: serde::de::DeserializeOwned>(
             if file_count > MAX_RECORDS {
                 return Err(storage_error("gossip evidence record limit exceeded"));
             }
-            match read_json(&entry.path(), max_bytes) {
-                Ok(record) => results.push(record),
+            match read_json_if_present(&entry.path(), max_bytes) {
+                Ok(Some(record)) => results.push(record),
+                // Removed concurrently (e.g. evicted); treat as already gone.
+                Ok(None) => {}
                 Err(error) if tolerate_invalid => {
                     eprintln!("skipping unreadable stored gossip observation: {error}");
-                    fs::rename(entry.path(), entry.path().with_extension("invalid"))
-                        .map_err(storage_error)?;
+                    ignore_not_found(fs::rename(
+                        entry.path(),
+                        entry.path().with_extension("invalid"),
+                    ))?;
                 }
                 Err(error) => return Err(error),
             }
@@ -191,8 +221,9 @@ impl GossipStore {
         }
         if let Some(old_key) = &evict {
             let old_name = format!("{}:{}", old_key.0, old_key.1);
-            fs::remove_file(dir.join(format!("{}.json", digest(old_name.as_bytes()))))
-                .map_err(storage_error)?;
+            ignore_not_found(fs::remove_file(
+                dir.join(format!("{}.json", digest(old_name.as_bytes()))),
+            ))?;
         }
         atomic_write(&path, &bytes)?;
         Ok(SaveResult::Stored(evict))
