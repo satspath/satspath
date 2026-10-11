@@ -31,6 +31,8 @@ fn signed_profile(
             hybrid_pubkey: None,
             pqc_required: false,
             revoked: false,
+            recovery_policy: None,
+            recovery: None,
         },
         &key.secret_key,
     )
@@ -69,6 +71,8 @@ fn event(
         identifier_attestation_hash: None,
         removed_method_hashes: Vec::new(),
         rotation: profile.profile.rotation.clone(),
+        recovery_policy: profile.profile.recovery_policy.clone(),
+        recovery: profile.profile.recovery.clone(),
         owner_signature: String::new(),
     };
     event.sign(signer).unwrap();

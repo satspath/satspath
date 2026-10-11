@@ -20,7 +20,9 @@ use satspath_core::crypto::{
     fingerprint_pubkey, generate_identity_keypair, generate_nonce, sign_profile,
     verify_signed_profile,
 };
-use satspath_core::privacy::{mask_address, mask_identifier, mask_pubkey};
+use satspath_core::privacy::{
+    canonical_identifier, mask_address, mask_identifier, mask_pubkey, validate_ascii_identifier,
+};
 use satspath_core::registry::Registry;
 use satspath_core::validation::{
     assert_no_private_material, validate_bitcoin_address, validate_compressed_pubkey,
@@ -258,10 +260,14 @@ fn sign_and_store(state: &WalletState) -> Result<String> {
     }
 
     let mut registry = open_registry()?;
-    let current_sequence = registry
-        .resolve_alias(alias)
+    let existing_profile = registry.resolve_alias(alias);
+    let current_sequence = existing_profile
+        .as_ref()
         .map(|signed| signed.profile.sequence.unwrap_or(0))
         .unwrap_or(0);
+    let existing_policy = existing_profile
+        .ok()
+        .and_then(|signed| signed.profile.recovery_policy.clone());
 
     let secret = keystore::load_identity_key(&satspath_dir(), pubkey)?;
     let t = now();
@@ -279,6 +285,8 @@ fn sign_and_store(state: &WalletState) -> Result<String> {
         hybrid_pubkey: None,
         pqc_required: false,
         revoked: false,
+        recovery_policy: existing_policy,
+        recovery: None,
     };
     let signed = sign_profile(profile, &secret)?;
     let fp = fingerprint_pubkey(pubkey)?;
@@ -353,10 +361,14 @@ pub fn cmd_wallet_rotate() -> Result<()> {
     }
 
     let mut registry = open_registry()?;
-    let current_sequence = registry
-        .resolve_alias(alias)
+    let existing_profile = registry.resolve_alias(alias);
+    let current_sequence = existing_profile
+        .as_ref()
         .map(|signed| signed.profile.sequence.unwrap_or(0))
         .unwrap_or(0);
+    let existing_policy = existing_profile
+        .ok()
+        .and_then(|signed| signed.profile.recovery_policy.clone());
 
     let t = now();
     let rotation = satspath_core::rotation::KeyRotation::create(
@@ -383,6 +395,8 @@ pub fn cmd_wallet_rotate() -> Result<()> {
         hybrid_pubkey: None,
         pqc_required: false,
         revoked: false,
+        recovery_policy: existing_policy,
+        recovery: None,
     };
 
     let signed = sign_profile(profile, &new_kp.secret_key)?;
@@ -394,6 +408,219 @@ pub fn cmd_wallet_rotate() -> Result<()> {
         "New identity fingerprint: {}",
         fingerprint_pubkey(&new_pubkey_hex)?
     );
+
+    Ok(())
+}
+
+/// Best-effort in-place memory erasure guard for secp256k1 secret keys on drop.
+///
+/// Note: secp256k1::SecretKey implements Copy and non_secure_erase is best-effort.
+/// This guard performs in-place erasure on its own wrapped key storage, but does not
+/// provide compiler-barrier zeroization guarantees against transient register or stack copies.
+struct SecretGuard(Option<secp256k1::SecretKey>);
+impl SecretGuard {
+    fn new(sk: secp256k1::SecretKey) -> Self {
+        Self(Some(sk))
+    }
+    fn key(&self) -> &secp256k1::SecretKey {
+        self.0.as_ref().unwrap()
+    }
+}
+impl Drop for SecretGuard {
+    fn drop(&mut self) {
+        if let Some(sk) = self.0.as_mut() {
+            sk.non_secure_erase();
+        }
+        self.0 = None;
+    }
+}
+
+/// `satspath wallet recover` — recover lost identity key via seed or guardian proof.
+pub fn cmd_wallet_recover(
+    alias: Option<&str>,
+    seed_hex: Option<&str>,
+    account_index: u32,
+    proof_file: Option<&str>,
+) -> Result<()> {
+    if seed_hex.is_none() && proof_file.is_none() {
+        anyhow::bail!(
+            "Sovereign recovery requires either deterministic seed derivation (--seed-hex) \
+             or M-of-N guardian threshold recovery (--proof-file). \
+             Email and SMS recovery are strictly rejected in the SatsPath threat model."
+        );
+    }
+    ensure_dir()?;
+
+    if let Some(seed_str) = seed_hex {
+        let seed_bytes = zeroize::Zeroizing::new(
+            hex::decode(seed_str.trim()).map_err(|e| anyhow::anyhow!("invalid hex seed: {e}"))?,
+        );
+        if !(16..=64).contains(&seed_bytes.len()) {
+            anyhow::bail!("seed must be 16..=64 bytes (BIP-32 bounds)");
+        }
+        let derived_guard = SecretGuard::new(satspath_core::crypto::derive_identity_key_from_seed(
+            &seed_bytes,
+            account_index,
+        )?);
+        let derived_secret = derived_guard.key();
+        let secp = secp256k1::Secp256k1::new();
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, derived_secret);
+        let pubkey_hex = hex::encode(pubkey.serialize());
+
+        let existing_wallet = load_wallet()?;
+        let mut confirmed = false;
+
+        let target_alias = if let Some(a) = alias {
+            validate_ascii_identifier(a)?;
+            Some(canonical_identifier(a))
+        } else {
+            existing_wallet.alias.clone()
+        };
+
+        if let Some(target) = &target_alias {
+            let reg = open_registry()?;
+            match reg.resolve_alias(target) {
+                Ok(existing) => {
+                    if existing.profile.identity_pubkey != pubkey_hex {
+                        anyhow::bail!(
+                            "derived key does not match the registered identity key for '{}'; nothing was changed",
+                            mask_identifier(target)
+                        );
+                    }
+                    confirmed = true;
+                }
+                Err(satspath_core::SatsPathError::AliasNotFound(_)) => {
+                    // Alias not yet in local registry; key derivation can proceed.
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        if let Some(current) = &existing_wallet.identity_pubkey {
+            if current != &pubkey_hex {
+                anyhow::bail!(
+                    "wallet already holds a different identity; refusing to switch identities during recovery; nothing was changed"
+                );
+            }
+        }
+        if let (Some(cur), Some(tgt)) = (&existing_wallet.alias, &target_alias) {
+            if cur != tgt {
+                anyhow::bail!("wallet is bound to a different alias; nothing was changed");
+            }
+        }
+        let _ = confirmed;
+
+        keystore::save_identity_key(&satspath_dir(), derived_secret)?;
+
+        let mut state = existing_wallet;
+        state.identity_pubkey = Some(pubkey_hex.clone());
+        state.updated_at = Some(now());
+        if let Some(a) = target_alias {
+            state.alias = Some(a);
+        }
+        save_wallet(&state)?;
+
+        let fp = fingerprint_pubkey(&pubkey_hex)?;
+        println!(
+            "Identity key recovered successfully from seed (account index {}).",
+            account_index
+        );
+        println!("Identity pubkey: {}", mask_pubkey(&pubkey_hex));
+        println!("Fingerprint:     {}", fp);
+        if let Some(a) = &state.alias {
+            println!("Alias:           {}", mask_identifier(a));
+        }
+        print_receiver_warning();
+        return Ok(());
+    }
+
+    if let Some(proof_path) = proof_file {
+        let data = std::fs::read_to_string(proof_path)
+            .map_err(|e| anyhow::anyhow!("failed to read proof file {}: {e}", proof_path))?;
+        let proof: satspath_core::recovery::KeyRecoveryProof = serde_json::from_str(&data)
+            .map_err(|e| anyhow::anyhow!("invalid KeyRecoveryProof JSON: {e}"))?;
+
+        let mut registry = open_registry()?;
+        let target_alias = if let Some(a) = alias {
+            validate_ascii_identifier(a)?;
+            canonical_identifier(a)
+        } else {
+            load_wallet()
+                .ok()
+                .and_then(|w| w.alias)
+                .ok_or_else(|| anyhow::anyhow!("alias must be specified with --alias"))?
+        };
+
+        let existing = registry.resolve_alias(&target_alias).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to resolve alias '{}': {e}",
+                mask_identifier(&target_alias)
+            )
+        })?;
+
+        let policy = existing.profile.recovery_policy.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no RecoveryPolicy was pre-committed for '{}'. Recovery is disabled (fail-closed).",
+                mask_identifier(&target_alias)
+            )
+        })?;
+
+        if !proof.verify(policy)? {
+            anyhow::bail!(
+                "recovery proof failed cryptographic verification against committed policy"
+            );
+        }
+
+        let expected_seq = existing.profile.sequence.unwrap_or(0).saturating_add(1);
+        if proof.previous_pubkey != existing.profile.identity_pubkey
+            || proof.identifier_hash != satspath_core::privacy::identifier_hash(&target_alias)
+            || proof.sequence != expected_seq
+        {
+            anyhow::bail!("recovery proof is not bound to this identifier, key, or sequence");
+        }
+
+        let new_pubkey = proof.new_pubkey.clone();
+        let fp = fingerprint_pubkey(&new_pubkey)?;
+
+        let mut new_profile = existing.profile.clone();
+        new_profile.identity_pubkey = new_pubkey.clone();
+        new_profile.sequence = Some(proof.sequence);
+        new_profile.recovery = Some(proof.clone());
+        let t = now();
+        new_profile.updated_at = t;
+        new_profile.expires_at = Some(t + 30 * 24 * 3600);
+        new_profile.nonce = Some(generate_nonce());
+        new_profile.rotation = None;
+        new_profile.method_verifications = Vec::new();
+        new_profile.hybrid_pubkey = None;
+        new_profile.pqc_required = false;
+
+        // If the new identity key is present in local keystore, sign the profile.
+        if let Ok(new_secret) = keystore::load_identity_key(&satspath_dir(), &new_pubkey) {
+            let signed = sign_profile(new_profile, &new_secret)?;
+            if !satspath_core::recovery::verify_key_recovery(existing, &signed)? {
+                anyhow::bail!("recovery proof is not bound to this identifier, key, or sequence");
+            }
+            registry.update_profile(signed)?;
+            let mut state = load_wallet()?;
+            state.identity_pubkey = Some(new_pubkey.clone());
+            state.alias = Some(target_alias.clone());
+            state.updated_at = Some(now());
+            save_wallet(&state)?;
+            println!(
+                "Identity key recovered and signed successfully using guardian threshold proof."
+            );
+        } else {
+            anyhow::bail!(
+                "proof is valid for identity {}, but its private key is not in the local keystore; nothing was changed",
+                mask_pubkey(&new_pubkey)
+            );
+        }
+
+        println!("Recovered identity fingerprint: {}", fp);
+        print_receiver_warning();
+        return Ok(());
+    }
 
     Ok(())
 }
@@ -760,5 +987,33 @@ mod tests {
         assert!(!build_methods(&state)
             .iter()
             .any(|m| matches!(m, PaymentMethod::Ark { .. })));
+    }
+
+    #[test]
+    fn wallet_recover_rejects_missing_inputs_and_reiterates_sovereign_model() {
+        let err = cmd_wallet_recover(None, None, 0, None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Sovereign recovery requires either"));
+        assert!(err
+            .to_string()
+            .contains("Email and SMS recovery are strictly rejected"));
+    }
+
+    #[test]
+    fn wallet_recover_deterministic_seed_derivation() {
+        let seed = [42u8; 32];
+        let sk1 = satspath_core::crypto::derive_identity_key_from_seed(&seed, 0).unwrap();
+        let sk2 = satspath_core::crypto::derive_identity_key_from_seed(&seed, 0).unwrap();
+        assert_eq!(sk1, sk2);
+
+        let sk_acc1 = satspath_core::crypto::derive_identity_key_from_seed(&seed, 1).unwrap();
+        assert_ne!(sk1, sk_acc1);
+
+        // BIP-32 length bounds: <16 bytes or >64 bytes rejected
+        let short_seed = [1u8; 15];
+        assert!(satspath_core::crypto::derive_identity_key_from_seed(&short_seed, 0).is_err());
+        let long_seed = [1u8; 65];
+        assert!(satspath_core::crypto::derive_identity_key_from_seed(&long_seed, 0).is_err());
     }
 }

@@ -235,6 +235,8 @@ enum WalletCommand {
     Init,
     /// Rotate the identity key and issue a KeyRotation proof
     Rotate,
+    /// Recover lost identity key via deterministic seed derivation or guardian threshold proof
+    Recover(WalletRecoverArgs),
     /// Set the alias + public receive methods, then sign and save the profile
     AddMethods(WalletAddMethodsArgs),
     /// Add/replace the Lightning Address (re-signs the profile)
@@ -278,6 +280,25 @@ struct WalletAddMethodsArgs {
     ark_server: Option<String>,
     #[arg(long)]
     ark_pubkey: Option<String>,
+}
+
+#[derive(Args)]
+struct WalletRecoverArgs {
+    /// Alias to recover (e.g. alice@example.com)
+    #[arg(long)]
+    alias: Option<String>,
+    /// Hex-encoded seed for deterministic identity derivation (warning: visible in process list; prefer --seed-stdin)
+    #[arg(long, conflicts_with_all = ["seed_stdin", "proof_file"])]
+    seed_hex: Option<String>,
+    /// Read hex-encoded seed securely from stdin
+    #[arg(long, conflicts_with = "proof_file")]
+    seed_stdin: bool,
+    /// Account index for deterministic derivation (default 0)
+    #[arg(long, default_value_t = 0)]
+    account_index: u32,
+    /// Path to JSON file containing KeyRecoveryProof
+    #[arg(long)]
+    proof_file: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -611,6 +632,27 @@ async fn main() -> Result<()> {
             }
             WalletCommand::Show { debug } => commands::cmd_wallet_show(debug)?,
             WalletCommand::Publish { alias } => commands::cmd_wallet_publish(alias.as_deref())?,
+            WalletCommand::Recover(args) => {
+                let seed_hex: Option<zeroize::Zeroizing<String>> = if args.seed_stdin {
+                    use std::io::IsTerminal;
+                    let input = zeroize::Zeroizing::new(if std::io::stdin().is_terminal() {
+                        rpassword::prompt_password("Enter dedicated identity seed hex: ")?
+                    } else {
+                        let mut line = String::new();
+                        std::io::stdin().read_line(&mut line)?;
+                        line
+                    });
+                    Some(zeroize::Zeroizing::new(input.trim().to_owned()))
+                } else {
+                    args.seed_hex.map(zeroize::Zeroizing::new)
+                };
+                commands::cmd_wallet_recover(
+                    args.alias.as_deref(),
+                    seed_hex.as_ref().map(|s| s.as_str()),
+                    args.account_index,
+                    args.proof_file.as_deref(),
+                )?
+            }
             WalletCommand::Receive {
                 alias,
                 amount_sats,
