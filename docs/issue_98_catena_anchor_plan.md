@@ -70,7 +70,7 @@ flowchart LR
 
 1. **Génesis Fijo y Anunciado**: El identificador de la cadena Catena está unívocamente determinado por `GenesisOutpoint = (genesis_txid, genesis_vout)`.
 2. **Linealidad Estricta**: Para todo $i \ge 1$, el input de continuación de $Tx_i$ debe referenciar exactamente el outpoint `(txid_{i-1}, vout_continuation_{i-1})`.
-3. **Compromiso Inmutable**: Cada $Tx_i$ incluye una salida `OP_RETURN` con el prefijo de dominio `SatsPathCatenaAnchorV1` seguido del hash del checkpoint y el índice secuencial.
+3. **Compromiso Inmutable**: Cada $Tx_i$ incluye una salida `OP_RETURN` con `6a20<SHA256("SatsPathCatenaAnchorV1" || chain_index_be64 || checkpoint_hash)>` (la etiqueta de dominio forma parte del pre-image del hash SHA-256 de 32 bytes, no viaja en texto plano en la cadena).
 4. **Conservación de Capital**: El valor del UTXO de continuación (e.g. 1,000 satoshis) se transfiere de $Tx_{i-1}$ a $Tx_i$, deduciendo únicamente las tarifas de red normales a través de un input de tarifa complementario.
 
 ---
@@ -153,33 +153,33 @@ pub fn catena_commitment(checkpoint_hash: &str, chain_index: u64) -> Result<Stri
 
 ## 4. Algoritmos de Construcción y Verificación
 
-### 4.1 Construcción del Siguiente Anclaje (`anchor_next_checkpoint`)
+### 4.1 Construcción del Siguiente Anclaje (`anchor_catena_next` / `anchor_catena_next_with_hook`)
 
 Cuando el daemon emite un nuevo checkpoint en el log de transparencia:
-1. **Consulta del Último Estado**: Recupera el último `CatenaAnchor` registrado en la base de datos (o el `CatenaGenesis` si es el primer anclaje).
+1. **Consulta del Último Estado**: Recupera el último anclaje registrado (`BitcoinAnchor`) en el log de transparencia (o crea el génesis si es el primer anclaje).
 2. **Selección del UTXO de Continuación**: Especifica el input 0 como `(prev_txid, continuation_vout)`.
 3. **Construcción de Salidas**:
    - Output 0: `OP_RETURN <catena_commitment>`
    - Output 1: `continuation_address` (P2TR o P2WPKH del operador) con valor de 1,000 satoshis.
 4. **Financiación y Firma**:
    - Bitcoin Core agrega inputs adicionales para cubrir el fee mediante `fundrawtransaction`.
-   - Se firman todos los inputs usando la billetera de Bitcoin Core mediante `signrawtransactionwithwallet`.
-5. **Transmisión y Confirmación**: Se emite la transacción mediante `sendrawtransaction`, se mina un bloque y el anclaje confirmado se almacena dentro de `TransparencyCheckpoint.bitcoin_anchor`.
+   - Se firman todos los inputs usando la billetera de Bitcoin Core mediante `signrawtransactionwithwallet` (o desacoplado vía `create_signed_catena_next`).
+5. **Transmisión y Confirmación**: Se emite la transacción mediante `broadcast_raw_transaction` / `sendrawtransaction`, se mina un bloque y el anclaje confirmado se almacena dentro de `TransparencyCheckpoint.bitcoin_anchor`.
 
 ### 4.2 Verificación de Cadena Hacia Atrás (Backward Verification)
 
-Un verificador o cliente que recibe un `CatenaAnchor` para un checkpoint realiza:
+Un verificador o cliente que recibe un `BitcoinAnchor` para un checkpoint realiza:
 1. Comprueba que el `OP_RETURN` contiene el compromiso válido del checkpoint.
 2. Obtiene la transacción $Tx_i$ desde su nodo Bitcoin o API RPC.
 3. Verifica que el input 0 gasta $(Tx_{i-1}, vout_{cont})$.
 4. Itera recursivamente hasta alcanzar $(genesis\_txid, genesis\_vout)$.
 5. Valida que cada anclaje esté confirmado (`confirmations > 0`; los clientes y auditores imponen la profundidad de confirmaciones requerida según su política de finalidad).
 
-### 4.3 Detección Irrefutable de Equivocación (Split-View Detection)
+### 4.3 Detección de Equivocación (Split-View Detection)
 
 Si un observador $A$ tiene un anclaje con hash de checkpoint $H_A$ y el observador $B$ tiene $H_B$ para el mismo `chain_index`, o si una transacción alternativa gasta el mismo $(Tx_{i-1}, vout_{cont})$ con diferente compromiso:
-- Se genera un `CatenaEquivocationProof` conteniendo ambas transacciones firmadas de Bitcoin.
-- Debido a la regla de consenso de Bitcoin, una de ellas quedó fuera de la cadena principal o ambas demuestran intento de doble gasto, exponiendo la mala fe del operador sin ambigüedades.
+- Se genera un `CatenaEquivocationProof` conteniendo ambos registros de anclaje candidatos (`BitcoinAnchor`).
+- Este objeto constituye evidencia candidata que los clientes y observadores deben contrastar contra la red Bitcoin para verificar el intento de doble gasto del operador.
 
 ---
 
@@ -209,7 +209,7 @@ Si un observador $A$ tiene un anclaje con hash de checkpoint $H_A$ y el observad
 
 ### Fase 1: Núcleo Criptográfico y Tipos (`satspath-core`) [COMPLETADA]
 - [x] Crear `crates/satspath-core/src/transparency/catena.rs`:
-  - Definición de `CatenaGenesis`, `CatenaAnchor`, `CatenaChainProof`, `CATENA_CONTINUATION_VOUT = 1`.
+  - Definición de `CatenaGenesis`, `BitcoinAnchor` con campos Catena opcionales, `CatenaChainProof`, `CATENA_CONTINUATION_VOUT = 1`.
   - Función de compromiso de dominio `catena_commitment(checkpoint_hash, chain_index)`.
   - Validador local de encadenamiento de transacciones `verify_catena_links(...)`.
   - Validador de compromisos `verify_catena_commitments(...)`.
@@ -225,7 +225,7 @@ Si un observador $A$ tiene un anclaje con hash de checkpoint $H_A$ y el observad
 
 ### Fase 3: Persistencia Transaccional en SQLite (`satspathd`) [SUPERADA POR DISEÑO COMPATIBLE]
 - [x] En lugar de una migración de esquema SQLite disruptiva (v11), se integraron los campos Catena opcionales (`prev_txid`, `prev_vout`, `continuation_vout`, `chain_index`) directamente en `BitcoinAnchor`, persistidos dentro del JSON de `TransparencyCheckpoint` existente y respaldados en la tabla `anchors`.
-- [x] Persistencia atómica de anclajes pendientes (`pending-catena-anchor.json`) para reconciliación post-reinicio antes de transmisión.
+- [x] Persistencia atómica de anclajes pendientes (`catena_pending_anchor.json`) para reconciliación post-reinicio antes de transmisión.
 - [x] Integración de `replace_checkpoint_by_hash` y `replace_latest_checkpoint` con validación de compromisos y prevención de sobreescritura.
 
 ### Fase 4: Endpoints del Daemon y Verificación [COMPLETADA / ADAPTADA]

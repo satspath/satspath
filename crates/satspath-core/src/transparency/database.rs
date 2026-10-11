@@ -338,7 +338,23 @@ impl TransactionalTransparencyStore {
             )
             .into());
         }
+        let stored_json: String = transaction
+            .query_row(
+                "SELECT checkpoint_json FROM checkpoints WHERE checkpoint_index=?1",
+                params![index],
+                |r| r.get(0),
+            )
+            .map_err(db_error)?;
+        let stored: TransparencyCheckpoint = serde_json::from_str(&stored_json)?;
+        validate_replacement_anchor(previous_hash, &stored, checkpoint)?;
+
         let new_hash = checkpoint.checkpoint_hash()?;
+        if new_hash != previous_hash {
+            return Err(TransparencyError::CorruptCheckpointChain(
+                "replacement may only change the Bitcoin receipt and signature".into(),
+            )
+            .into());
+        }
         let json = serde_json::to_string(checkpoint)?;
         transaction.execute("UPDATE checkpoints SET checkpoint_hash=?1,checkpoint_json=?2 WHERE checkpoint_index=?3", params![new_hash, json, index]).map_err(db_error)?;
         upsert_anchor(&transaction, checkpoint.bitcoin_anchor.as_ref())?;
@@ -377,19 +393,6 @@ impl TransactionalTransparencyStore {
             )
             .into());
         }
-        if let Some(anchor) = &checkpoint.bitcoin_anchor {
-            let expected = match anchor.chain_index {
-                Some(idx) => super::catena_commitment(target_hash, idx),
-                None => super::anchor_commitment(target_hash),
-            }
-            .map_err(|e| TransparencyError::CorruptCheckpointChain(e.to_string()))?;
-            if anchor.network != crate::BitcoinNetwork::Regtest || anchor.commitment != expected {
-                return Err(TransparencyError::CorruptCheckpointChain(
-                    "replacement anchor commitment or network mismatch".into(),
-                )
-                .into());
-            }
-        }
         let stored_json: String = transaction
             .query_row(
                 "SELECT checkpoint_json FROM checkpoints WHERE checkpoint_index=?1",
@@ -398,14 +401,8 @@ impl TransactionalTransparencyStore {
             )
             .map_err(db_error)?;
         let stored: TransparencyCheckpoint = serde_json::from_str(&stored_json)?;
-        if let (Some(old), Some(new)) = (&stored.bitcoin_anchor, &checkpoint.bitcoin_anchor) {
-            if old.txid != new.txid {
-                return Err(TransparencyError::CorruptCheckpointChain(
-                    "checkpoint already carries a different Bitcoin anchor".into(),
-                )
-                .into());
-            }
-        }
+        validate_replacement_anchor(target_hash, &stored, checkpoint)?;
+
         let json = serde_json::to_string(checkpoint)?;
         transaction
             .execute(
@@ -416,6 +413,42 @@ impl TransactionalTransparencyStore {
         upsert_anchor(&transaction, checkpoint.bitcoin_anchor.as_ref())?;
         transaction.commit().map_err(db_error)
     }
+}
+
+fn validate_replacement_anchor(
+    target_hash: &str,
+    stored: &TransparencyCheckpoint,
+    replacement: &TransparencyCheckpoint,
+) -> Result<()> {
+    match (&stored.bitcoin_anchor, &replacement.bitcoin_anchor) {
+        (Some(_), None) => {
+            return Err(TransparencyError::CorruptCheckpointChain(
+                "replacement may not remove an existing Bitcoin anchor".into(),
+            )
+            .into());
+        }
+        (Some(old), Some(new)) if old.txid != new.txid => {
+            return Err(TransparencyError::CorruptCheckpointChain(
+                "checkpoint already carries a different Bitcoin anchor".into(),
+            )
+            .into());
+        }
+        _ => {}
+    }
+    if let Some(anchor) = &replacement.bitcoin_anchor {
+        let expected = match anchor.chain_index {
+            Some(idx) => super::catena_commitment(target_hash, idx),
+            None => super::anchor_commitment(target_hash),
+        }
+        .map_err(|e| TransparencyError::CorruptCheckpointChain(e.to_string()))?;
+        if anchor.network != crate::BitcoinNetwork::Regtest || anchor.commitment != expected {
+            return Err(TransparencyError::CorruptCheckpointChain(
+                "replacement anchor commitment or network mismatch".into(),
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn upsert_anchor(
