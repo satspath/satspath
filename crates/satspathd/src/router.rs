@@ -339,7 +339,6 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
                 Ok(structurally_consistent) => json_response(
                     StatusCode(200),
                     &serde_json::json!({
-                        "valid": structurally_consistent,
                         "structurally_consistent": structurally_consistent
                     }),
                 ),
