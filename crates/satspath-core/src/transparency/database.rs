@@ -341,24 +341,7 @@ impl TransactionalTransparencyStore {
         let new_hash = checkpoint.checkpoint_hash()?;
         let json = serde_json::to_string(checkpoint)?;
         transaction.execute("UPDATE checkpoints SET checkpoint_hash=?1,checkpoint_json=?2 WHERE checkpoint_index=?3", params![new_hash, json, index]).map_err(db_error)?;
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO anchors(txid,anchor_json) VALUES (?1,?2)",
-                params![
-                    checkpoint
-                        .bitcoin_anchor
-                        .as_ref()
-                        .map(|a| a.txid.as_str())
-                        .unwrap_or(""),
-                    checkpoint
-                        .bitcoin_anchor
-                        .as_ref()
-                        .map(serde_json::to_string)
-                        .transpose()?
-                        .unwrap_or_default()
-                ],
-            )
-            .map_err(db_error)?;
+        upsert_anchor(&transaction, checkpoint.bitcoin_anchor.as_ref())?;
         transaction.commit().map_err(db_error)
     }
 
@@ -394,6 +377,35 @@ impl TransactionalTransparencyStore {
             )
             .into());
         }
+        if let Some(anchor) = &checkpoint.bitcoin_anchor {
+            let expected = match anchor.chain_index {
+                Some(idx) => super::catena_commitment(target_hash, idx),
+                None => super::anchor_commitment(target_hash),
+            }
+            .map_err(|e| TransparencyError::CorruptCheckpointChain(e.to_string()))?;
+            if anchor.network != crate::BitcoinNetwork::Regtest || anchor.commitment != expected {
+                return Err(TransparencyError::CorruptCheckpointChain(
+                    "replacement anchor commitment or network mismatch".into(),
+                )
+                .into());
+            }
+        }
+        let stored_json: String = transaction
+            .query_row(
+                "SELECT checkpoint_json FROM checkpoints WHERE checkpoint_index=?1",
+                params![index],
+                |r| r.get(0),
+            )
+            .map_err(db_error)?;
+        let stored: TransparencyCheckpoint = serde_json::from_str(&stored_json)?;
+        if let (Some(old), Some(new)) = (&stored.bitcoin_anchor, &checkpoint.bitcoin_anchor) {
+            if old.txid != new.txid {
+                return Err(TransparencyError::CorruptCheckpointChain(
+                    "checkpoint already carries a different Bitcoin anchor".into(),
+                )
+                .into());
+            }
+        }
         let json = serde_json::to_string(checkpoint)?;
         transaction
             .execute(
@@ -401,24 +413,26 @@ impl TransactionalTransparencyStore {
                 params![new_hash, json, index],
             )
             .map_err(db_error)?;
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO anchors(txid,anchor_json) VALUES (?1,?2)",
-                params![
-                    checkpoint
-                        .bitcoin_anchor
-                        .as_ref()
-                        .map(|a| a.txid.as_str())
-                        .unwrap_or(""),
-                    checkpoint
-                        .bitcoin_anchor
-                        .as_ref()
-                        .map(serde_json::to_string)
-                        .transpose()?
-                        .unwrap_or_default()
-                ],
-            )
-            .map_err(db_error)?;
+        upsert_anchor(&transaction, checkpoint.bitcoin_anchor.as_ref())?;
         transaction.commit().map_err(db_error)
     }
+}
+
+fn upsert_anchor(
+    transaction: &rusqlite::Transaction,
+    anchor: Option<&super::BitcoinAnchor>,
+) -> Result<()> {
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO anchors(txid,anchor_json) VALUES (?1,?2)",
+            params![
+                anchor.map(|a| a.txid.as_str()).unwrap_or(""),
+                anchor
+                    .map(serde_json::to_string)
+                    .transpose()?
+                    .unwrap_or_default()
+            ],
+        )
+        .map_err(db_error)?;
+    Ok(())
 }

@@ -30,7 +30,7 @@ En este esquema:
 Catena transforma a Bitcoin en un **servicio de consenso de no-equivocación de solo-lectura**:
 - El registro se inicia con una **transacción génesis** conocida públicamente ($Tx_0$) que crea un UTXO de continuación $V_0$.
 - Cada anclaje posterior $Tx_i$ ($i \ge 1$) **debe gastar obligatoriamente** el UTXO de continuación $V_{i-1}$ de la transacción $Tx_{i-1}$.
-- Dado que las reglas de consenso de Bitcoin prohíben estrictamente el doble gasto de cualquier UTXO, **es matemáticamente imposible para el operador generar dos anclajes válidos a la misma altura sin provocar un doble gasto que los mineros y nodos de Bitcoin rechazarán**.
+- Dado que las reglas de consenso de Bitcoin prohíben estrictamente el doble gasto de cualquier UTXO, **dentro de una historia canónica de Bitcoin para un outpoint génesis fijado, el operador no puede generar dos anclajes válidos a la misma altura sin provocar un doble gasto que los mineros y nodos de Bitcoin rechazarán** (gastos conflictivos no confirmados en mempool y reorganizaciones de cadena permanecen como consideraciones de finalidad resueltas mediante confirmaciones acumuladas).
 
 ---
 
@@ -173,7 +173,7 @@ Un verificador o cliente que recibe un `CatenaAnchor` para un checkpoint realiza
 2. Obtiene la transacción $Tx_i$ desde su nodo Bitcoin o API RPC.
 3. Verifica que el input 0 gasta $(Tx_{i-1}, vout_{cont})$.
 4. Itera recursivamente hasta alcanzar $(genesis\_txid, genesis\_vout)$.
-5. Valida que ningún bloque intermedio haya experimentado bifurcaciones (confirmaciones mínimas $> k$).
+5. Valida que cada anclaje esté confirmado (`confirmations > 0`; los clientes y auditores imponen la profundidad de confirmaciones requerida según su política de finalidad).
 
 ### 4.3 Detección Irrefutable de Equivocación (Split-View Detection)
 
@@ -207,37 +207,41 @@ Si un observador $A$ tiene un anclaje con hash de checkpoint $H_A$ y el observad
 
 ## 6. Fases de Implementación y Tareas
 
-### Fase 1: Núcleo Criptográfico y Tipos (`satspath-core`)
-- [ ] Crear `crates/satspath-core/src/transparency/catena.rs`:
-  - Definición de `CatenaGenesis`, `CatenaAnchor`, `CatenaChainProof`.
+### Fase 1: Núcleo Criptográfico y Tipos (`satspath-core`) [COMPLETADA]
+- [x] Crear `crates/satspath-core/src/transparency/catena.rs`:
+  - Definición de `CatenaGenesis`, `CatenaAnchor`, `CatenaChainProof`, `CATENA_CONTINUATION_VOUT = 1`.
   - Función de compromiso de dominio `catena_commitment(checkpoint_hash, chain_index)`.
-  - Validador local de encadenamiento de transacciones `verify_catena_link(...)`.
-- [ ] Exponer el módulo en `crates/satspath-core/src/transparency/mod.rs` y `crates/satspath-core/src/lib.rs`.
+  - Validador local de encadenamiento de transacciones `verify_catena_links(...)`.
+  - Validador de compromisos `verify_catena_commitments(...)`.
+  - Detector de equivocación `detect_catena_equivocation(...)`.
+- [x] Exponer el módulo en `crates/satspath-core/src/transparency/mod.rs` y `crates/satspath-core/src/lib.rs`.
 
-### Fase 2: Cliente RPC y Gestor de Cadena Bitcoin Core
-- [ ] Extender `RegtestAnchorClient` o crear `CatenaAnchorClient` en `crates/satspath-core/src/transparency/anchor.rs`:
-  - `initialize_genesis()`: crea y financia la transacción génesis con el output inicial de continuación.
-  - `anchor_next_checkpoint()`: arma la transacción con gasto del UTXO de continuación previo y generación del nuevo.
-  - `trace_chain()`: consulta la secuencia de transacciones hacia atrás hasta el génesis.
+### Fase 2: Cliente RPC y Gestor de Cadena Bitcoin Core [COMPLETADA]
+- [x] Extender `RegtestAnchorClient` en `crates/satspath-core/src/transparency/anchor.rs`:
+  - `anchor_catena_genesis()` / `anchor_catena_genesis_with_hook()`: crea y financia la transacción génesis con vout 1 canonical.
+  - `anchor_catena_next()` / `anchor_catena_next_with_hook()`: arma y transmite la transacción con gasto del UTXO de continuación previo y generación del nuevo vout 1.
+  - `create_signed_catena_next()` y `broadcast_raw_transaction()`: desacopla firma y transmisión para pruebas de equivocación.
+  - `verify_catena_chain()` y `verify_catena_chain_with_checkpoints()`: consulta y verifica la secuencia de transacciones hacia atrás hasta el génesis.
 
-### Fase 3: Persistencia Transaccional en SQLite (`satspathd`)
-- [ ] Añadir migración SQLite (v11) en `satspath-transparency-v1.sqlite3`:
-  - Tabla `catena_genesis (network, txid, vout, operator_pubkey, created_at)`.
-  - Tabla `catena_anchors (chain_index PRIMARY KEY, txid, prev_txid, prev_vout, continuation_vout, checkpoint_hash, commitment, block_height, block_hash, confirmations, verified, created_at)`.
-- [ ] Integrar el commit de anclaje dentro de la transacción SQLite `BEGIN IMMEDIATE` para mantener consistencia con los checkpoints.
+### Fase 3: Persistencia Transaccional en SQLite (`satspathd`) [SUPERADA POR DISEÑO COMPATIBLE]
+- [x] En lugar de una migración de esquema SQLite disruptiva (v11), se integraron los campos Catena opcionales (`prev_txid`, `prev_vout`, `continuation_vout`, `chain_index`) directamente en `BitcoinAnchor`, persistidos dentro del JSON de `TransparencyCheckpoint` existente y respaldados en la tabla `anchors`.
+- [x] Persistencia atómica de anclajes pendientes (`pending-catena-anchor.json`) para reconciliación post-reinicio antes de transmisión.
+- [x] Integración de `replace_checkpoint_by_hash` y `replace_latest_checkpoint` con validación de compromisos y prevención de sobreescritura.
 
-### Fase 4: Endpoints del Daemon y CLI de Auditoría
-- [ ] Endpoint `GET /v1/transparency/catena/proof`: devuelve la prueba de la cadena desde el génesis hasta el último checkpoint.
-- [ ] Endpoint `GET /v1/transparency/catena/latest`: devuelve el estado actual del anclaje y el UTXO de continuación activo.
-- [ ] Subcomando CLI: `satspath transparency catena-verify --genesis-txid <TXID> --genesis-vout <VOUT>` para verificación independiente sin confiar en el daemon.
+### Fase 4: Endpoints del Daemon y Verificación [COMPLETADA / ADAPTADA]
+- [x] Endpoint `GET /v1/transparency/catena/chain`: expone la secuencia completa de anclajes Catena registrados en el log.
+- [x] Endpoint `POST /v1/transparency/verify/catena`: valida consistencia estructural y compromisos criptográficos en memoria.
+- [x] Endpoint `POST /v1/transparency/anchors`: ancla el checkpoint más reciente encadenando al último anclaje Catena existente.
 
-### Fase 5: Pruebas Automatizadas y Validación
-- [ ] Pruebas unitarias en `catena.rs` simulando secuencias válidas y ataques de bifurcación/doble gasto.
-- [ ] Prueba de integración Regtest con Bitcoin Core (`tests/catena_regtest.rs`):
+### Fase 5: Pruebas Automatizadas y Validación [COMPLETADA]
+- [x] Pruebas unitarias en `catena.rs` y `log.rs` simulando secuencias válidas, rechazo de índices/vouts no canónicos y compromisos.
+- [x] Pruebas de integración en `crates/satspath-core/tests/regtest_anchor.rs`:
   - Creación de génesis.
-  - Creación secuencial de 5 anclajes encadenados.
-  - Intento de bifurcación (generar dos anclajes gastando el mismo output) verificando el rechazo por doble gasto.
-- [ ] Actualización de documentación en `docs/key_transparency.md`.
+  - Creación secuencial de anclajes encadenados.
+  - Verificación hacia atrás con Bitcoin Core RPC y binding de checkpoints.
+  - Prueba de doble gasto pre-firmando dos ramas y verificando el rechazo nativo de Bitcoin Core (`bad-txns-inputs-missingorspent`).
+- [x] Pruebas de endpoints HTTP en `satspathd` (`test_catena_endpoints`).
+- [x] Actualización de documentación y diagramas Mermaid en `docs/key_transparency.md`.
 
 ---
 
