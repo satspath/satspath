@@ -155,9 +155,7 @@ impl TransactionalTransparencyStore {
         ).map_err(db_error)?;
         Ok(())
     }
-
-    pub fn load_log(&self) -> Result<TransparencyLog> {
-        let connection = self.connection()?;
+    fn load_log_from_connection(&self, connection: &Connection) -> Result<TransparencyLog> {
         let mut event_statement = connection
             .prepare("SELECT event_json FROM name_events ORDER BY event_index")
             .map_err(db_error)?;
@@ -209,6 +207,11 @@ impl TransactionalTransparencyStore {
             }
         }
         Ok(log)
+    }
+
+    pub fn load_log(&self) -> Result<TransparencyLog> {
+        let connection = self.connection()?;
+        self.load_log_from_connection(&connection)
     }
 
     /// Atomically commits the complete security state. SQLite's WAL recovers
@@ -348,6 +351,11 @@ impl TransactionalTransparencyStore {
         let stored: TransparencyCheckpoint = serde_json::from_str(&stored_json)?;
         validate_replacement_anchor(previous_hash, &stored, checkpoint)?;
 
+        // Validate the candidate log to ensure full replay and Catena integrity before committing
+        let mut candidate = self.load_log_from_connection(&transaction)?;
+        candidate.replace_checkpoint_by_hash_in_memory(previous_hash, checkpoint.clone())?;
+        candidate.verify_checkpoint_chain_integrity()?;
+
         let new_hash = checkpoint.checkpoint_hash()?;
         if new_hash != previous_hash {
             return Err(TransparencyError::CorruptCheckpointChain(
@@ -403,6 +411,11 @@ impl TransactionalTransparencyStore {
         let stored: TransparencyCheckpoint = serde_json::from_str(&stored_json)?;
         validate_replacement_anchor(target_hash, &stored, checkpoint)?;
 
+        // Validate the candidate log to ensure full replay and Catena integrity before committing
+        let mut candidate = self.load_log_from_connection(&transaction)?;
+        candidate.replace_checkpoint_by_hash_in_memory(target_hash, checkpoint.clone())?;
+        candidate.verify_checkpoint_chain_integrity()?;
+
         let json = serde_json::to_string(checkpoint)?;
         transaction
             .execute(
@@ -427,11 +440,25 @@ fn validate_replacement_anchor(
             )
             .into());
         }
-        (Some(old), Some(new)) if old.txid != new.txid => {
-            return Err(TransparencyError::CorruptCheckpointChain(
-                "checkpoint already carries a different Bitcoin anchor".into(),
-            )
-            .into());
+        (Some(old), Some(new)) => {
+            if old.txid != new.txid {
+                return Err(TransparencyError::CorruptCheckpointChain(
+                    "checkpoint already carries a different Bitcoin anchor".into(),
+                )
+                .into());
+            }
+            if old.network != new.network
+                || old.commitment != new.commitment
+                || old.chain_index != new.chain_index
+                || old.prev_txid != new.prev_txid
+                || old.prev_vout != new.prev_vout
+                || old.continuation_vout != new.continuation_vout
+            {
+                return Err(TransparencyError::CorruptCheckpointChain(
+                    "replacement anchor may not alter immutable chain metadata".into(),
+                )
+                .into());
+            }
         }
         _ => {}
     }

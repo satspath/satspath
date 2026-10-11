@@ -373,14 +373,7 @@ impl TransparencyLog {
             )
             .into());
         }
-        if let Some(idx) = anchor.chain_index {
-            if anchor.continuation_vout != Some(CATENA_CONTINUATION_VOUT) {
-                return Err(TransparencyError::CorruptCheckpointChain(format!(
-                    "Catena anchor continuation_vout is {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
-                    anchor.continuation_vout
-                ))
-                .into());
-            }
+        if anchor.chain_index.is_some() {
             let last_catena = self
                 .checkpoints
                 .iter()
@@ -391,41 +384,7 @@ impl TransparencyLog {
                         .as_ref()
                         .filter(|a| a.chain_index.is_some())
                 });
-            match last_catena {
-                None => {
-                    if idx != 0 || anchor.prev_txid.is_some() || anchor.prev_vout.is_some() {
-                        return Err(TransparencyError::CorruptCheckpointChain(format!(
-                            "genesis Catena anchor must have chain_index 0 and no predecessor, got index {idx}, prev_txid: {:?}, prev_vout: {:?}",
-                            anchor.prev_txid, anchor.prev_vout
-                        ))
-                        .into());
-                    }
-                }
-                Some(prev) => {
-                    let expected_index = prev.chain_index.map(|i| i + 1);
-                    if Some(idx) != expected_index {
-                        return Err(TransparencyError::CorruptCheckpointChain(format!(
-                            "non-sequential Catena chain_index: got {idx}, expected {:?}",
-                            expected_index
-                        ))
-                        .into());
-                    }
-                    if anchor.prev_txid.as_deref() != Some(prev.txid.as_str()) {
-                        return Err(TransparencyError::CorruptCheckpointChain(format!(
-                            "Catena prev_txid mismatch: got {:?}, expected {}",
-                            anchor.prev_txid, prev.txid
-                        ))
-                        .into());
-                    }
-                    if anchor.prev_vout != Some(CATENA_CONTINUATION_VOUT) {
-                        return Err(TransparencyError::CorruptCheckpointChain(format!(
-                            "Catena prev_vout mismatch: got {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
-                            anchor.prev_vout
-                        ))
-                        .into());
-                    }
-                }
-            }
+            validate_catena_successor(last_catena, &anchor)?;
         }
         let checkpoint = self
             .checkpoints
@@ -586,55 +545,31 @@ impl TransparencyLog {
                     )
                     .into());
                 }
-                if let Some(idx) = anchor.chain_index {
-                    if anchor.continuation_vout != Some(CATENA_CONTINUATION_VOUT) {
-                        return Err(TransparencyError::CorruptCheckpointChain(format!(
-                            "Catena anchor continuation_vout is {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
-                            anchor.continuation_vout
-                        ))
-                        .into());
-                    }
-                    match last_catena {
-                        None => {
-                            if idx != 0 || anchor.prev_txid.is_some() || anchor.prev_vout.is_some()
-                            {
-                                return Err(TransparencyError::CorruptCheckpointChain(format!(
-                                    "genesis Catena anchor must have chain_index 0 and no predecessor, got index {idx}, prev_txid: {:?}, prev_vout: {:?}",
-                                    anchor.prev_txid, anchor.prev_vout
-                                ))
-                                .into());
-                            }
-                        }
-                        Some(prev) => {
-                            let expected_index = prev.chain_index.map(|i| i + 1);
-                            if Some(idx) != expected_index {
-                                return Err(TransparencyError::CorruptCheckpointChain(format!(
-                                    "non-sequential Catena chain_index: got {idx}, expected {:?}",
-                                    expected_index
-                                ))
-                                .into());
-                            }
-                            if anchor.prev_txid.as_deref() != Some(prev.txid.as_str()) {
-                                return Err(TransparencyError::CorruptCheckpointChain(format!(
-                                    "Catena prev_txid mismatch: got {:?}, expected {}",
-                                    anchor.prev_txid, prev.txid
-                                ))
-                                .into());
-                            }
-                            if anchor.prev_vout != Some(CATENA_CONTINUATION_VOUT) {
-                                return Err(TransparencyError::CorruptCheckpointChain(format!(
-                                    "Catena prev_vout mismatch: got {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
-                                    anchor.prev_vout
-                                ))
-                                .into());
-                            }
-                        }
-                    }
+                if anchor.chain_index.is_some() {
+                    validate_catena_successor(last_catena, anchor)?;
                     last_catena = Some(anchor);
                 }
             }
             previous = Some(checkpoint);
         }
+        Ok(())
+    }
+
+    pub(crate) fn replace_checkpoint_by_hash_in_memory(
+        &mut self,
+        target_hash: &str,
+        checkpoint: TransparencyCheckpoint,
+    ) -> Result<()> {
+        let index = self
+            .checkpoints
+            .iter()
+            .position(|c| c.checkpoint_hash().ok().as_deref() == Some(target_hash))
+            .ok_or_else(|| {
+                TransparencyError::CorruptCheckpointChain(format!(
+                    "checkpoint with hash {target_hash} not found in memory"
+                ))
+            })?;
+        self.checkpoints[index] = checkpoint;
         Ok(())
     }
 
@@ -645,4 +580,56 @@ impl TransparencyLog {
         std::fs::rename(tmp, path)?;
         Ok(())
     }
+}
+
+pub fn validate_catena_successor(
+    prev: Option<&BitcoinAnchor>,
+    anchor: &BitcoinAnchor,
+) -> Result<()> {
+    let Some(idx) = anchor.chain_index else {
+        return Ok(());
+    };
+    if anchor.continuation_vout != Some(CATENA_CONTINUATION_VOUT) {
+        return Err(TransparencyError::CorruptCheckpointChain(format!(
+            "Catena anchor continuation_vout is {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
+            anchor.continuation_vout
+        ))
+        .into());
+    }
+    match prev {
+        None => {
+            if idx != 0 || anchor.prev_txid.is_some() || anchor.prev_vout.is_some() {
+                return Err(TransparencyError::CorruptCheckpointChain(format!(
+                    "genesis Catena anchor must have chain_index 0 and no predecessor, got index {idx}, prev_txid: {:?}, prev_vout: {:?}",
+                    anchor.prev_txid, anchor.prev_vout
+                ))
+                .into());
+            }
+        }
+        Some(p) => {
+            let expected = p.chain_index.and_then(|i| i.checked_add(1));
+            if Some(idx) != expected {
+                return Err(TransparencyError::CorruptCheckpointChain(format!(
+                    "non-sequential Catena chain_index: got {idx}, expected {:?}",
+                    expected
+                ))
+                .into());
+            }
+            if anchor.prev_txid.as_deref() != Some(p.txid.as_str()) {
+                return Err(TransparencyError::CorruptCheckpointChain(format!(
+                    "Catena prev_txid mismatch: got {:?}, expected {}",
+                    anchor.prev_txid, p.txid
+                ))
+                .into());
+            }
+            if anchor.prev_vout != Some(CATENA_CONTINUATION_VOUT) {
+                return Err(TransparencyError::CorruptCheckpointChain(format!(
+                    "Catena prev_vout mismatch: got {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
+                    anchor.prev_vout
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(())
 }
