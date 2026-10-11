@@ -412,6 +412,23 @@ pub fn cmd_wallet_rotate() -> Result<()> {
     Ok(())
 }
 
+struct SecretGuard(Option<secp256k1::SecretKey>);
+impl SecretGuard {
+    fn new(sk: secp256k1::SecretKey) -> Self {
+        Self(Some(sk))
+    }
+    fn key(&self) -> &secp256k1::SecretKey {
+        self.0.as_ref().unwrap()
+    }
+}
+impl Drop for SecretGuard {
+    fn drop(&mut self) {
+        if let Some(mut sk) = self.0.take() {
+            sk.non_secure_erase();
+        }
+    }
+}
+
 /// `satspath wallet recover` — recover lost identity key via seed or guardian proof.
 pub fn cmd_wallet_recover(
     alias: Option<&str>,
@@ -435,10 +452,13 @@ pub fn cmd_wallet_recover(
         if !(16..=64).contains(&seed_bytes.len()) {
             anyhow::bail!("seed must be 16..=64 bytes (BIP-32 bounds)");
         }
-        let derived_secret =
-            satspath_core::crypto::derive_identity_key_from_seed(&seed_bytes, account_index)?;
+        let derived_guard = SecretGuard::new(satspath_core::crypto::derive_identity_key_from_seed(
+            &seed_bytes,
+            account_index,
+        )?);
+        let derived_secret = derived_guard.key();
         let secp = secp256k1::Secp256k1::new();
-        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &derived_secret);
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, derived_secret);
         let pubkey_hex = hex::encode(pubkey.serialize());
 
         let existing_wallet = load_wallet()?;
@@ -457,7 +477,8 @@ pub fn cmd_wallet_recover(
                 Ok(existing) => {
                     if existing.profile.identity_pubkey != pubkey_hex {
                         anyhow::bail!(
-                            "derived key does not match the registered identity key for '{target}'; nothing was changed"
+                            "derived key does not match the registered identity key for '{}'; nothing was changed",
+                            mask_identifier(target)
                         );
                     }
                     confirmed = true;
@@ -479,7 +500,7 @@ pub fn cmd_wallet_recover(
             }
         }
 
-        keystore::save_identity_key(&satspath_dir(), &derived_secret)?;
+        keystore::save_identity_key(&satspath_dir(), derived_secret)?;
 
         let mut state = existing_wallet;
         state.identity_pubkey = Some(pubkey_hex.clone());
@@ -520,14 +541,17 @@ pub fn cmd_wallet_recover(
                 .ok_or_else(|| anyhow::anyhow!("alias must be specified with --alias"))?
         };
 
-        let existing = registry
-            .resolve_alias(&target_alias)
-            .map_err(|e| anyhow::anyhow!("failed to resolve alias '{}': {e}", target_alias))?;
+        let existing = registry.resolve_alias(&target_alias).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to resolve alias '{}': {e}",
+                mask_identifier(&target_alias)
+            )
+        })?;
 
         let policy = existing.profile.recovery_policy.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "no RecoveryPolicy was pre-committed for '{}'. Recovery is disabled (fail-closed).",
-                target_alias
+                mask_identifier(&target_alias)
             )
         })?;
 

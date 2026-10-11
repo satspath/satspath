@@ -289,6 +289,10 @@ pub fn recover_identity_key(
     new_profile.identity_pubkey = new_pubkey_hex;
     new_profile.recovery = Some(recovery);
     new_profile.sequence = Some(sequence);
+    new_profile.rotation = None;
+    new_profile.method_verifications.clear();
+    new_profile.hybrid_pubkey = None;
+    new_profile.pqc_required = false;
     // Profile signature is cleared; caller must sign with new_secret_key
     Ok(SignedPaymentProfile {
         profile: new_profile,
@@ -307,6 +311,9 @@ pub fn verify_key_recovery(
         None => return Ok(false),
     };
     if let Some(recovery) = &new_profile.profile.recovery {
+        if new_profile.profile.rotation.is_some() {
+            return Ok(false);
+        }
         if recovery.previous_pubkey != old_profile.profile.identity_pubkey {
             return Ok(false);
         }
