@@ -119,18 +119,29 @@ pub(crate) async fn anchor_latest_checkpoint(
         }
     }
 
-    // Search for a predecessor anchor that has a continuation output for Catena chaining
+    // Find the latest Catena anchor by selecting the anchor with the maximum chain_index
     let prev_anchor = log
         .checkpoints()
         .iter()
-        .rev()
         .filter_map(|c| c.bitcoin_anchor.as_ref())
-        .find(|a| a.continuation_vout.is_some())
+        .filter(|a| a.chain_index.is_some() && a.continuation_vout.is_some())
+        .max_by_key(|a| a.chain_index.unwrap_or(0))
         .cloned();
 
     let anchor = match prev_anchor {
         Some(prev) => client.anchor_catena_next(&checkpoint_hash, &prev).await?,
-        None => client.anchor_catena_genesis(&checkpoint_hash).await?,
+        None => {
+            let allow_genesis = log.checkpoints().iter().all(|c| c.bitcoin_anchor.is_none())
+                || std::env::var("SATSPATH_ALLOW_CATENA_GENESIS")
+                    .map(|v| v == "1" || v == "true")
+                    .unwrap_or(false);
+            if !allow_genesis {
+                anyhow::bail!(
+                    "no previous Catena anchor found in log; set SATSPATH_ALLOW_CATENA_GENESIS=1 to initialize a new Catena genesis chain"
+                );
+            }
+            client.anchor_catena_genesis(&checkpoint_hash).await?
+        }
     };
 
     if !anchor.verified {
@@ -142,9 +153,8 @@ pub(crate) async fn anchor_latest_checkpoint(
         checkpoint_hash: checkpoint_hash.clone(),
         anchor: anchor.clone(),
     };
-    if let Ok(data) = serde_json::to_vec(&pending) {
-        let _ = write_owner_only_file(&pending_file, &data);
-    }
+    let data = serde_json::to_vec(&pending)?;
+    write_owner_only_file(&pending_file, &data)?;
 
     let operator = load_or_create_transparency_operator(&state.home)?;
     let mut anchored = checkpoint;

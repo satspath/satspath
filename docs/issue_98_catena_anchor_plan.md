@@ -242,7 +242,7 @@ Si un observador $A$ tiene un anclaje con hash de checkpoint $H_A$ y el observad
 ---
 
 ## 7. Criterios de Aceptación (Definition of Done)
-1. **Unicidad Probada**: La prueba de integración demuestra que no es posible generar dos anclajes aceptados por Bitcoin Core para el mismo eslabón de la cadena sin un doble gasto detectado.
-2. **Compatibilidad Descendente**: Si no se configura `SATSPATH_BITCOIN_NETWORK=regtest`, el daemon continúa operando normalmente en modo local o witness-only sin fallos.
-3. **Auditoría Completa**: Un cliente externo puede verificar la cadena completa de anclajes desde el génesis con una sola llamada RPC a Bitcoin Core o servicio electrum.
+1. **Unicidad y Resistencia a Bifurcación**: La prueba de integración demuestra que no es posible generar dos anclajes aceptados por Bitcoin Core para el mismo eslabón de la cadena sin que Bitcoin rechace el segundo por intento de doble gasto. La verificación vincula explícitamente el outpoint génesis fijado (`genesis_txid:genesis_vout`).
+2. **Compatibilidad Descendente**: Si no se configura `SATSPATH_BITCOIN_NETWORK=regtest`, el daemon continúa operando normalmente en modo local o witness-only sin fallos, persistiendo los anclajes opcionales dentro de `TransparencyCheckpoint.bitcoin_anchor`.
+3. **Auditoría de Cadena**: Un cliente externo o auditor puede verificar la cadena completa de anclajes Catena hacia atrás hasta el génesis mediante `RegtestAnchorClient::verify_catena_chain(latest_txid, genesis_txid, genesis_vout)`, validar la consistencia estructural mediante `/v1/transparency/verify/catena` o inspeccionar el historial con `/v1/transparency/catena/chain` y `/v1/transparency/anchors`.
 4. **CI en Verde**: Todos los tests de workspace, linter clippy, formateo y análisis de CodeRabbit pasan sin advertencias.

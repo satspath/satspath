@@ -53,7 +53,7 @@ async fn catena_chain_anchoring_and_backward_verification_on_regtest() {
 
     // 4. Verify chain backwards via Bitcoin Core RPC
     let verified_chain = client
-        .verify_catena_chain(&a2.txid, &a0.txid)
+        .verify_catena_chain(&a2.txid, &a0.txid, a0.continuation_vout.unwrap())
         .await
         .unwrap();
     assert_eq!(verified_chain.len(), 3);
@@ -73,7 +73,12 @@ async fn catena_chain_anchoring_and_backward_verification_on_regtest() {
 
     // 7. Verify full chain backwards with checkpoint binding via RPC
     let verified_with_cps = client
-        .verify_catena_chain_with_checkpoints(&a2.txid, &a0.txid, &[&cp0, &cp1, &cp2])
+        .verify_catena_chain_with_checkpoints(
+            &a2.txid,
+            &a0.txid,
+            a0.continuation_vout.unwrap(),
+            &[&cp0, &cp1, &cp2],
+        )
         .await
         .unwrap();
     assert_eq!(verified_with_cps.len(), 3);
@@ -126,5 +131,5 @@ async fn catena_double_spend_equivocation_rejected_by_bitcoin_core() {
     assert!(equivocation_evidence.is_some());
     let proof = equivocation_evidence.unwrap();
     assert_eq!(proof.spent_txid, genesis.txid);
-    assert!(proof.evidence.contains("Double-spend detected"));
+    assert!(proof.evidence.contains("Candidate double-spend detected"));
 }

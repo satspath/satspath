@@ -333,6 +333,9 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
                 Err(e) => json_error(StatusCode(400), e),
             }
         }
+        // Evaluates purely in-memory structural consistency of the caller-supplied sequence of anchors
+        // (linkage, sequence indices, and optional checkpoint hash commitments).
+        // This endpoint does NOT query a live Bitcoin node; clients must independently verify on-chain confirmations and outpoints.
         (Method::Post, "/v1/transparency/verify/catena") => {
             match read_json::<CatenaVerifyRequest>(&mut request).and_then(|body| {
                 let structurally_consistent =

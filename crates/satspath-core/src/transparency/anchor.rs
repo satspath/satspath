@@ -58,28 +58,6 @@ fn find_continuation_vout_for_address(tx: &Value, addr: &str) -> Option<u32> {
 }
 
 #[cfg(feature = "std")]
-fn find_continuation_vout(tx: &Value) -> Option<u32> {
-    tx["vout"].as_array().and_then(|outputs| {
-        outputs.iter().find_map(|out| {
-            let is_op_return = out["scriptPubKey"]["type"].as_str() == Some("nulldata")
-                || out["scriptPubKey"]["hex"]
-                    .as_str()
-                    .map(|h| h.starts_with("6a"))
-                    .unwrap_or(false);
-            if is_op_return {
-                return None;
-            }
-            let sats = parse_sats(&out["value"]).unwrap_or(0);
-            if sats == CONTINUATION_SATOSHIS {
-                out["n"].as_u64().map(|n| n as u32)
-            } else {
-                None
-            }
-        })
-    })
-}
-
-#[cfg(feature = "std")]
 pub struct RegtestAnchorClient {
     rpc_url: String,
     rpc_user: String,
@@ -367,12 +345,13 @@ impl RegtestAnchorClient {
         })
     }
 
-    /// Trace backwards through Bitcoin transactions from `latest_txid` to `genesis_txid`,
+    /// Trace backwards through Bitcoin transactions from `latest_txid` to pinned `(genesis_txid, genesis_vout)`,
     /// verifying that each anchor spent the previous continuation UTXO.
     pub async fn verify_catena_chain(
         &self,
         latest_txid: &str,
         genesis_txid: &str,
+        genesis_vout: u32,
     ) -> crate::Result<Vec<BitcoinAnchor>> {
         let mut chain = Vec::new();
         let mut curr_txid = latest_txid.to_string();
@@ -433,17 +412,23 @@ impl RegtestAnchorClient {
             let block_hash = tx["blockhash"].as_str().map(str::to_owned);
 
             if curr_txid == genesis_txid {
-                let genesis_continuation_vout = continuation_vout.or_else(|| {
-                    if chain.is_empty() {
-                        find_continuation_vout(&tx)
-                    } else {
-                        None
-                    }
-                });
-                if chain.is_empty() && genesis_continuation_vout.is_none() {
+                let genesis_out = vouts.get(genesis_vout as usize).ok_or_else(|| {
+                    crate::SatsPathError::ValidationError(format!(
+                        "genesis_vout {genesis_vout} out of bounds in genesis tx {curr_txid}"
+                    ))
+                })?;
+                let genesis_sats = parse_sats(&genesis_out["value"]).unwrap_or(0);
+                if genesis_sats != CONTINUATION_SATOSHIS {
                     return Err(crate::SatsPathError::ValidationError(format!(
-                        "Genesis tx {curr_txid} does not contain a valid 1000-sat continuation UTXO"
+                        "Genesis outpoint {curr_txid}:{genesis_vout} has {genesis_sats} sats, expected {CONTINUATION_SATOSHIS}"
                     )));
+                }
+                if let Some(successor_vout) = successor_continuation_vout {
+                    if successor_vout != genesis_vout {
+                        return Err(crate::SatsPathError::ValidationError(format!(
+                            "Successor anchor vin[0] spent vout {successor_vout}, but pinned genesis_vout is {genesis_vout}"
+                        )));
+                    }
                 }
                 chain.push(BitcoinAnchor {
                     network: BitcoinNetwork::Regtest,
@@ -455,7 +440,7 @@ impl RegtestAnchorClient {
                     verified: true,
                     prev_txid: None,
                     prev_vout: None,
-                    continuation_vout: genesis_continuation_vout,
+                    continuation_vout: Some(genesis_vout),
                     chain_index: Some(0),
                 });
                 break;
@@ -545,15 +530,18 @@ impl RegtestAnchorClient {
         Ok(chain)
     }
 
-    /// Trace backwards through Bitcoin transactions from `latest_txid` to `genesis_txid`,
+    /// Trace backwards through Bitcoin transactions from `latest_txid` to pinned `(genesis_txid, genesis_vout)`,
     /// verifying continuation UTXO spends and cryptographic binding to `checkpoint_hashes`.
     pub async fn verify_catena_chain_with_checkpoints(
         &self,
         latest_txid: &str,
         genesis_txid: &str,
+        genesis_vout: u32,
         checkpoint_hashes: &[&str],
     ) -> crate::Result<Vec<BitcoinAnchor>> {
-        let chain = self.verify_catena_chain(latest_txid, genesis_txid).await?;
+        let chain = self
+            .verify_catena_chain(latest_txid, genesis_txid, genesis_vout)
+            .await?;
         super::catena::verify_catena_commitments(&chain, checkpoint_hashes)
             .map_err(|e| crate::SatsPathError::ValidationError(e.to_string()))?;
         Ok(chain)
