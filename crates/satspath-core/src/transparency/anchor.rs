@@ -152,6 +152,19 @@ impl RegtestAnchorClient {
         &self,
         checkpoint_hash: &str,
     ) -> crate::Result<BitcoinAnchor> {
+        self.anchor_catena_genesis_with_hook(checkpoint_hash, |_| Ok(()))
+            .await
+    }
+
+    /// Create, fund, sign, broadcast and mine a Catena Genesis anchor transaction with a pre-broadcast hook.
+    pub async fn anchor_catena_genesis_with_hook<F>(
+        &self,
+        checkpoint_hash: &str,
+        on_pre_broadcast: F,
+    ) -> crate::Result<BitcoinAnchor>
+    where
+        F: FnOnce(&BitcoinAnchor) -> crate::Result<()>,
+    {
         let commitment = catena_commitment(checkpoint_hash, 0)
             .map_err(|e| crate::SatsPathError::SerializationError(e.to_string()))?;
         let continuation_addr = self
@@ -193,6 +206,24 @@ impl RegtestAnchorClient {
                     "could not locate 1000-sat continuation UTXO in decoded genesis tx".into(),
                 )
             })?;
+        let decoded_txid = decoded["txid"].as_str().ok_or_else(|| {
+            crate::SatsPathError::NetworkError("missing txid in decoded genesis tx".into())
+        })?;
+
+        let pre_anchor = BitcoinAnchor {
+            network: BitcoinNetwork::Regtest,
+            txid: decoded_txid.to_string(),
+            block_hash: None,
+            block_height: None,
+            confirmations: 0,
+            commitment: commitment.clone(),
+            verified: false,
+            prev_txid: None,
+            prev_vout: None,
+            continuation_vout: Some(continuation_vout),
+            chain_index: Some(0),
+        };
+        on_pre_broadcast(&pre_anchor)?;
 
         let txid = self
             .rpc("sendrawtransaction", json!([signed_hex]))
@@ -240,6 +271,20 @@ impl RegtestAnchorClient {
         checkpoint_hash: &str,
         prev_anchor: &BitcoinAnchor,
     ) -> crate::Result<BitcoinAnchor> {
+        self.anchor_catena_next_with_hook(checkpoint_hash, prev_anchor, |_| Ok(()))
+            .await
+    }
+
+    /// Create, fund, sign, broadcast and mine the next Catena anchor transaction with a pre-broadcast hook.
+    pub async fn anchor_catena_next_with_hook<F>(
+        &self,
+        checkpoint_hash: &str,
+        prev_anchor: &BitcoinAnchor,
+        on_pre_broadcast: F,
+    ) -> crate::Result<BitcoinAnchor>
+    where
+        F: FnOnce(&BitcoinAnchor) -> crate::Result<()>,
+    {
         let prev_continuation_vout = prev_anchor.continuation_vout.ok_or_else(|| {
             crate::SatsPathError::ValidationError(
                 "previous anchor is missing continuation_vout for chaining".into(),
@@ -307,6 +352,24 @@ impl RegtestAnchorClient {
                     "could not locate 1000-sat continuation UTXO in decoded chained tx".into(),
                 )
             })?;
+        let decoded_txid = decoded["txid"].as_str().ok_or_else(|| {
+            crate::SatsPathError::NetworkError("missing txid in decoded chained tx".into())
+        })?;
+
+        let pre_anchor = BitcoinAnchor {
+            network: BitcoinNetwork::Regtest,
+            txid: decoded_txid.to_string(),
+            block_hash: None,
+            block_height: None,
+            confirmations: 0,
+            commitment: commitment.clone(),
+            verified: false,
+            prev_txid: Some(prev_anchor.txid.clone()),
+            prev_vout: Some(prev_continuation_vout),
+            continuation_vout: Some(next_continuation_vout),
+            chain_index: Some(next_index),
+        };
+        on_pre_broadcast(&pre_anchor)?;
 
         let txid = self
             .rpc("sendrawtransaction", json!([signed_hex]))

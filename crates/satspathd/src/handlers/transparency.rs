@@ -92,33 +92,6 @@ pub(crate) async fn anchor_latest_checkpoint(
     let checkpoint_hash = checkpoint.checkpoint_hash()?;
     let client = satspath_core::transparency::RegtestAnchorClient::from_env()?;
 
-    // Crash resilience: check if a pending anchor was broadcast before an uncommitted shutdown
-    let pending_file = state.home.join("catena_pending_anchor.json");
-    if pending_file.exists() {
-        if let Ok(bytes) = fs::read(&pending_file) {
-            if let Ok(pending) = serde_json::from_slice::<PendingCatenaAnchor>(&bytes) {
-                if pending.checkpoint_hash == checkpoint_hash {
-                    if let Ok(verified) = client
-                        .verify_anchor(&pending.anchor.txid, &pending.anchor.commitment)
-                        .await
-                    {
-                        if verified.verified {
-                            let operator = load_or_create_transparency_operator(&state.home)?;
-                            let mut anchored = checkpoint.clone();
-                            anchored.bitcoin_anchor = Some(pending.anchor.clone());
-                            anchored.sign(&operator)?;
-                            let _mutation_guard = state.mutation_lock.lock().await;
-                            TransactionalTransparencyStore::open(&state.home)?
-                                .replace_latest_checkpoint(&checkpoint_hash, &anchored)?;
-                            let _ = fs::remove_file(&pending_file);
-                            return Ok(pending.anchor);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     // Find the latest Catena anchor by selecting the anchor with the maximum chain_index
     let prev_anchor = log
         .checkpoints()
@@ -128,8 +101,92 @@ pub(crate) async fn anchor_latest_checkpoint(
         .max_by_key(|a| a.chain_index.unwrap_or(0))
         .cloned();
 
+    // Crash resilience: check if a pending anchor was broadcast before an uncommitted shutdown
+    let pending_file = state.home.join("catena_pending_anchor.json");
+    if pending_file.exists() {
+        let bytes = fs::read(&pending_file)
+            .map_err(|e| anyhow::anyhow!("failed to read pending anchor file: {e}"))?;
+        let pending: PendingCatenaAnchor = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("failed to parse pending anchor file: {e}"))?;
+        if pending.checkpoint_hash != checkpoint_hash {
+            anyhow::bail!(
+                "pending anchor is for checkpoint {}, expected {}",
+                pending.checkpoint_hash,
+                checkpoint_hash
+            );
+        }
+
+        // Validate linkage against the current tip
+        match &prev_anchor {
+            Some(tip) => {
+                let expected_index = tip.chain_index.unwrap_or(0) + 1;
+                if pending.anchor.prev_txid.as_deref() != Some(&tip.txid)
+                    || pending.anchor.prev_vout != tip.continuation_vout
+                    || pending.anchor.chain_index != Some(expected_index)
+                {
+                    anyhow::bail!(
+                        "pending anchor does not link to the current Catena tip {} (expected chain index {})",
+                        tip.txid,
+                        expected_index
+                    );
+                }
+            }
+            None => {
+                if pending.anchor.prev_txid.is_some()
+                    || pending.anchor.prev_vout.is_some()
+                    || pending.anchor.chain_index != Some(0)
+                {
+                    anyhow::bail!("pending anchor is not a valid genesis anchor");
+                }
+            }
+        }
+
+        let verified = client
+            .verify_anchor(&pending.anchor.txid, &pending.anchor.commitment)
+            .await?;
+        if !verified.verified || verified.confirmations == 0 {
+            anyhow::bail!(
+                "pending anchor {} is not yet confirmed on Bitcoin",
+                pending.anchor.txid
+            );
+        }
+
+        let mut reconciled_anchor = pending.anchor;
+        reconciled_anchor.confirmations = verified.confirmations;
+        reconciled_anchor.block_hash = verified.block_hash;
+        reconciled_anchor.verified = true;
+
+        let operator = load_or_create_transparency_operator(&state.home)?;
+        let mut anchored = checkpoint.clone();
+        anchored.bitcoin_anchor = Some(reconciled_anchor.clone());
+        anchored.sign(&operator)?;
+        let _mutation_guard = state.mutation_lock.lock().await;
+        TransactionalTransparencyStore::open(&state.home)?
+            .replace_latest_checkpoint(&checkpoint_hash, &anchored)?;
+        let _ = fs::remove_file(&pending_file);
+        return Ok(reconciled_anchor);
+    }
+
+    let pre_broadcast =
+        |pre_anchor: &satspath_core::transparency::BitcoinAnchor| -> anyhow::Result<()> {
+            let pending = PendingCatenaAnchor {
+                checkpoint_hash: checkpoint_hash.clone(),
+                anchor: pre_anchor.clone(),
+            };
+            let data = serde_json::to_vec(&pending)?;
+            write_owner_only_file(&pending_file, &data)?;
+            Ok(())
+        };
+
     let anchor = match prev_anchor {
-        Some(prev) => client.anchor_catena_next(&checkpoint_hash, &prev).await?,
+        Some(prev) => {
+            client
+                .anchor_catena_next_with_hook(&checkpoint_hash, &prev, |pre| {
+                    pre_broadcast(pre)
+                        .map_err(|e| satspath_core::SatsPathError::ValidationError(e.to_string()))
+                })
+                .await?
+        }
         None => {
             let allow_genesis = log.checkpoints().iter().all(|c| c.bitcoin_anchor.is_none())
                 || std::env::var("SATSPATH_ALLOW_CATENA_GENESIS")
@@ -140,21 +197,18 @@ pub(crate) async fn anchor_latest_checkpoint(
                     "no previous Catena anchor found in log; set SATSPATH_ALLOW_CATENA_GENESIS=1 to initialize a new Catena genesis chain"
                 );
             }
-            client.anchor_catena_genesis(&checkpoint_hash).await?
+            client
+                .anchor_catena_genesis_with_hook(&checkpoint_hash, |pre| {
+                    pre_broadcast(pre)
+                        .map_err(|e| satspath_core::SatsPathError::ValidationError(e.to_string()))
+                })
+                .await?
         }
     };
 
     if !anchor.verified {
         anyhow::bail!("regtest anchor could not be verified after confirmation");
     }
-
-    // Persist pending record before store commit so crashes can reconcile confirmed anchor
-    let pending = PendingCatenaAnchor {
-        checkpoint_hash: checkpoint_hash.clone(),
-        anchor: anchor.clone(),
-    };
-    let data = serde_json::to_vec(&pending)?;
-    write_owner_only_file(&pending_file, &data)?;
 
     let operator = load_or_create_transparency_operator(&state.home)?;
     let mut anchored = checkpoint;
