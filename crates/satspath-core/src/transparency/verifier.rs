@@ -401,6 +401,9 @@ pub fn verify_event_transition_with_policy(
         if proposed.action == NameAction::RecoverKey {
             return Err(TransparencyError::RecoveryDisabled.into());
         }
+        if let Some(policy) = &proposed.recovery_policy {
+            policy.validate()?;
+        }
         if !verify_message_signature(
             &proposed.signing_message()?,
             &proposed.owner_signature,

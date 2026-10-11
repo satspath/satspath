@@ -557,6 +557,9 @@ pub fn cmd_wallet_recover(
         new_profile.expires_at = Some(t + 30 * 24 * 3600);
         new_profile.nonce = Some(generate_nonce());
         new_profile.rotation = None;
+        new_profile.method_verifications = Vec::new();
+        new_profile.hybrid_pubkey = None;
+        new_profile.pqc_required = false;
 
         // If the new identity key is present in local keystore, sign the profile.
         if let Ok(new_secret) = keystore::load_identity_key(&satspath_dir(), &new_pubkey) {
