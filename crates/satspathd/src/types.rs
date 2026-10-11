@@ -217,6 +217,7 @@ pub(crate) struct ProfileUpdateRequest {
     pub(crate) ark_pubkey: Option<String>,
     #[serde(default)]
     pub(crate) remove_methods: Vec<String>,
+    pub(crate) recovery_policy: Option<satspath_core::recovery::RecoveryPolicy>,
 }
 
 #[derive(Debug, Deserialize)]

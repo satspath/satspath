@@ -121,9 +121,15 @@ pub(crate) fn apply_method_updates(
         || body.onchain_pubkey.is_some()
         || body.ark_server.is_some()
         || body.ark_pubkey.is_some()
-        || !body.remove_methods.is_empty();
+        || !body.remove_methods.is_empty()
+        || body.recovery_policy.is_some();
     if !allow_empty && !has_method {
         anyhow::bail!("provide at least one receive method");
+    }
+
+    if let Some(policy) = body.recovery_policy {
+        policy.validate()?;
+        wallet.recovery_policy = Some(policy);
     }
 
     for method in &body.remove_methods {
@@ -214,9 +220,11 @@ pub(crate) fn sign_and_store(
         hybrid_pubkey: None,
         pqc_required: false,
         revoked: false,
-        recovery_policy: existing
-            .as_ref()
-            .and_then(|old| old.profile.recovery_policy.clone()),
+        recovery_policy: wallet.recovery_policy.clone().or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|old| old.profile.recovery_policy.clone())
+        }),
         recovery: None,
     };
     let signed = sign_profile(profile, &secret)?;
@@ -443,6 +451,7 @@ pub(crate) fn recover_profile_key(
         && load_identity_key(&state.home, &signed.profile.identity_pubkey).is_ok()
     {
         wallet.identity_pubkey = Some(signed.profile.identity_pubkey.clone());
+        wallet.recovery_policy = signed.profile.recovery_policy.clone();
         wallet.updated_at = Some(now());
         save_wallet(&state.home, &wallet)
             .map_err(|e| anyhow::anyhow!("recovery committed but wallet update failed: {e}"))?;

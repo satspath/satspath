@@ -423,9 +423,10 @@ impl SecretGuard {
 }
 impl Drop for SecretGuard {
     fn drop(&mut self) {
-        if let Some(mut sk) = self.0.take() {
+        if let Some(sk) = self.0.as_mut() {
             sk.non_secure_erase();
         }
+        self.0 = None;
     }
 }
 

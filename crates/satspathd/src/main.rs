@@ -562,6 +562,56 @@ mod tests {
     }
 
     #[test]
+    fn update_profile_configures_and_commits_recovery_policy() {
+        use satspath_core::recovery::RecoveryPolicy;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut wallet = load_or_create_identity(dir.path()).unwrap();
+        wallet.alias = Some("alice@example.com".into());
+        wallet.lightning_address = Some("alice@example.com".into());
+        sign_and_store(dir.path(), &mut wallet, "devnet").unwrap();
+        save_wallet(dir.path(), &wallet).unwrap();
+
+        let g1 = generate_identity_keypair();
+        let g2 = generate_identity_keypair();
+        let policy = RecoveryPolicy::new(
+            2,
+            vec![
+                hex::encode(g1.public_key.serialize()),
+                hex::encode(g2.public_key.serialize()),
+            ],
+        )
+        .unwrap();
+
+        let state = test_state(dir.path());
+        let update_req = crate::types::ProfileUpdateRequest {
+            alias: Some("alice@example.com".into()),
+            lightning_address: None,
+            onchain_address: None,
+            onchain_pubkey: None,
+            ark_server: None,
+            ark_pubkey: None,
+            remove_methods: vec![],
+            recovery_policy: Some(policy.clone()),
+        };
+
+        let response = crate::handlers::profile::update_profile(&state, update_req).unwrap();
+        assert_eq!(
+            response.wallet.recovery_policy.as_ref().unwrap().threshold,
+            2
+        );
+
+        let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
+        let profile = store.profile("alice@example.com").unwrap().unwrap();
+        assert_eq!(profile.profile.recovery_policy, Some(policy.clone()));
+
+        let log = store.load_log().unwrap();
+        let latest = log.events().last().unwrap();
+        assert_eq!(latest.action, satspath_core::NameAction::UpdateProfile);
+        assert_eq!(latest.recovery_policy, Some(policy));
+    }
+
+    #[test]
     fn key_recovery_with_guardian_threshold_succeeds_and_updates_transparency_log() {
         use satspath_core::recovery::{
             sign_guardian_authorization, KeyRecoveryProof, RecoveryPolicy,

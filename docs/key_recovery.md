@@ -6,7 +6,7 @@ SatsPath adheres to the Bitcoin-grade sovereign security model:
 1. **Strict Rejection of Email / SMS / Phone Recovery:**
    Identity keys in SatsPath control sovereign payment profiles, routing preferences, and recipient ownership. Delegating key recovery to email verification or SMS codes introduces custodian risk, SIM-swapping vulnerability, and third-party censorship vectors. Neither the SatsPath daemon nor any third-party infrastructure may unilaterally reset or replace an identity key.
 2. **Fail-Closed Guarantee:**
-   Until an owner-signed event commits a `RecoveryPolicy` into the identifier's transparency log history, guardian recovery is disabled (`TransparencyError::RecoveryDisabled`). A `RecoverKey` event cannot supply the policy that authorizes it. Once committed, a policy can be replaced by a later owner-signed event but cannot currently be removed. No default or backdoor recovery exists.
+   Until an owner-signed event commits a `RecoveryPolicy` into the identifier's transparency log history, guardian recovery is disabled (`TransparencyError::RecoveryDisabled`). A `RecoverKey` event cannot supply the policy that authorizes it. Once committed, a policy can be replaced by a later owner-signed event or a verified `RecoverKey` event (which installs the recoverer's profile policy without guardian approval of that new policy), but cannot currently be removed. No default or backdoor recovery exists.
 
 ---
 
@@ -91,7 +91,7 @@ When an identifier transition occurs via `RecoverKey`:
 4. **Acceptance Signature:** The proof must include a valid acceptance signature from `new_pubkey`.
 5. **Sequence & Continuity:** `sequence == predecessor.sequence + 1`, and `previous_event_hash == predecessor.signed_event_hash()`.
 6. **Full Event Authentication:** `event.owner_signature` must be a valid Schnorr signature over `event.signing_message()` produced by `new_pubkey`.
-7. **Policy Continuation:** If the recovery event does not specify a new `recovery_policy`, the previous policy remains active; if specified, the new policy is validated and becomes active for subsequent events.
+7. **Policy Continuation:** If the recovery event does not specify a new `recovery_policy`, the previous policy remains active; if specified, the new policy is validated and becomes active for subsequent events (allowing the holder of the recovered key to install a replacement policy without requiring guardian approval of that new policy).
 
 ---
 
