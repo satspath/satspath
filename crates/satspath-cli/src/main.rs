@@ -633,22 +633,22 @@ async fn main() -> Result<()> {
             WalletCommand::Show { debug } => commands::cmd_wallet_show(debug)?,
             WalletCommand::Publish { alias } => commands::cmd_wallet_publish(alias.as_deref())?,
             WalletCommand::Recover(args) => {
-                let seed_hex = if args.seed_stdin {
+                let seed_hex: Option<zeroize::Zeroizing<String>> = if args.seed_stdin {
                     use std::io::IsTerminal;
-                    let input = if std::io::stdin().is_terminal() {
+                    let input = zeroize::Zeroizing::new(if std::io::stdin().is_terminal() {
                         rpassword::prompt_password("Enter dedicated identity seed hex: ")?
                     } else {
                         let mut line = String::new();
                         std::io::stdin().read_line(&mut line)?;
                         line
-                    };
-                    Some(input.trim().to_string())
+                    });
+                    Some(zeroize::Zeroizing::new(input.trim().to_owned()))
                 } else {
-                    args.seed_hex
+                    args.seed_hex.map(zeroize::Zeroizing::new)
                 };
                 commands::cmd_wallet_recover(
                     args.alias.as_deref(),
-                    seed_hex.as_deref(),
+                    seed_hex.as_ref().map(|s| s.as_str()),
                     args.account_index,
                     args.proof_file.as_deref(),
                 )?

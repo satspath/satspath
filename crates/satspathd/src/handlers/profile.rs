@@ -359,6 +359,7 @@ pub(crate) fn recover_profile_key(
     if signed.profile.recovery.as_ref() != Some(&proof) {
         anyhow::bail!("profile recovery object does not match submitted proof");
     }
+    satspath_core::validation::validate_public_profile(&signed.profile)?;
 
     let store = TransactionalTransparencyStore::open(&state.home)?;
     let existing = store

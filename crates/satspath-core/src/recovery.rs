@@ -63,7 +63,8 @@ impl RecoveryPolicy {
             validate_compressed_pubkey(g).map_err(|e| {
                 SatsPathError::ValidationError(format!("invalid guardian pubkey: {e}"))
             })?;
-            if !distinct.insert(g.to_ascii_lowercase()) {
+            // BIP-340 verifies against x-only keys: 02X and 03X represent the same signer.
+            if !distinct.insert(g[2..].to_ascii_lowercase()) {
                 return Err(SatsPathError::ValidationError(format!(
                     "duplicate guardian pubkey in recovery policy: {g}"
                 )));
@@ -177,16 +178,19 @@ impl KeyRecoveryProof {
         let allowed_guardians: std::collections::HashSet<String> = policy
             .guardians
             .iter()
-            .map(|g| g.to_ascii_lowercase())
+            .map(|g| g[2..].to_ascii_lowercase())
             .collect();
 
         let mut seen_guardians = std::collections::HashSet::new();
         for sig in &self.guardian_signatures {
-            let normalized = sig.guardian_pubkey.to_ascii_lowercase();
-            if !allowed_guardians.contains(&normalized) {
+            validate_compressed_pubkey(&sig.guardian_pubkey).map_err(|e| {
+                SatsPathError::ValidationError(format!("invalid guardian pubkey: {e}"))
+            })?;
+            let x_only = sig.guardian_pubkey[2..].to_ascii_lowercase();
+            if !allowed_guardians.contains(&x_only) {
                 return Ok(false);
             }
-            if !seen_guardians.insert(normalized) {
+            if !seen_guardians.insert(x_only) {
                 // Duplicate signature from the same guardian
                 return Ok(false);
             }
@@ -522,5 +526,22 @@ mod tests {
         )
         .unwrap();
         assert!(!proof_outsider.verify(&policy).unwrap());
+    }
+
+    #[test]
+    fn guardian_policy_and_proof_reject_opposite_parity_encodings_of_same_key() {
+        let g1 = generate_identity_keypair();
+        let g1_even = hex::encode(g1.public_key.serialize());
+        // Invert prefix between 02 and 03
+        let alt_prefix = if g1_even.starts_with("02") {
+            "03"
+        } else {
+            "02"
+        };
+        let g1_odd = format!("{alt_prefix}{}", &g1_even[2..]);
+
+        // Policy cannot include both 02X and 03X
+        let policy_err = RecoveryPolicy::new(2, vec![g1_even.clone(), g1_odd.clone()]);
+        assert!(policy_err.is_err());
     }
 }

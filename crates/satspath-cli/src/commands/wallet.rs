@@ -537,6 +537,14 @@ pub fn cmd_wallet_recover(
             );
         }
 
+        let expected_seq = existing.profile.sequence.unwrap_or(0).saturating_add(1);
+        if proof.previous_pubkey != existing.profile.identity_pubkey
+            || proof.identifier_hash != satspath_core::privacy::identifier_hash(&target_alias)
+            || proof.sequence != expected_seq
+        {
+            anyhow::bail!("recovery proof is not bound to this identifier, key, or sequence");
+        }
+
         let new_pubkey = proof.new_pubkey.clone();
         let fp = fingerprint_pubkey(&new_pubkey)?;
 
@@ -566,11 +574,10 @@ pub fn cmd_wallet_recover(
                 "Identity key recovered and signed successfully using guardian threshold proof."
             );
         } else {
-            println!(
-                "Guardian threshold proof verified for identity {}.",
+            anyhow::bail!(
+                "proof is valid for identity {}, but its private key is not in the local keystore; nothing was changed",
                 mask_pubkey(&new_pubkey)
             );
-            println!("Note: New identity private key not found in local keystore.");
         }
 
         println!("Recovered identity fingerprint: {}", fp);
