@@ -72,59 +72,52 @@ pub const MAX_CATENA_HOPS: usize = 1000;
 ///
 /// NOTE: This function checks structural linkage between anchor records without querying
 /// a live Bitcoin node. Full blockchain-backed verification requires
-/// `RegtestAnchorClient::verify_catena_chain` (or querying Bitcoin Core RPC).
-///
-/// Ensures:
-/// 1. The chain is non-empty and bounded by `MAX_CATENA_HOPS`.
-/// 2. The first anchor is a valid genesis anchor (`chain_index == 0`, `prev_txid == None`, valid `continuation_vout`).
-/// 3. For each consecutive pair `(A_{i-1}, A_i)`:
-///    - `A_i.chain_index == A_{i-1}.chain_index + 1`
-///    - `A_i.prev_txid == Some(A_{i-1}.txid)`
-///    - `A_i.prev_vout == A_{i-1}.continuation_vout`
-///    - `A_i.continuation_vout` is present
-///    - `A_i.verified == true`
-///    - `A_i.confirmations > 0`
-pub fn verify_catena_links(anchors: &[BitcoinAnchor]) -> Result<bool, TransparencyError> {
+/// Pure cryptographic verification of a bounded sequence of Catena anchors starting from `expected_start_index`.
+pub fn verify_catena_links_bounded(
+    anchors: &[BitcoinAnchor],
+    expected_start_index: u64,
+    max_hops: usize,
+) -> Result<bool, TransparencyError> {
     if anchors.is_empty() {
         return Err(TransparencyError::InvalidCatenaChain(
             "empty anchor sequence".into(),
         ));
     }
-    if anchors.len() > MAX_CATENA_HOPS {
+    if anchors.len() > max_hops {
         return Err(TransparencyError::InvalidCatenaChain(format!(
-            "anchor sequence length ({}) exceeds maximum allowed hops ({MAX_CATENA_HOPS})",
+            "anchor sequence length ({}) exceeds maximum allowed hops ({max_hops})",
             anchors.len()
         )));
     }
 
-    let genesis = &anchors[0];
-    if genesis.chain_index != Some(0) {
+    let first = &anchors[0];
+    if first.chain_index != Some(expected_start_index) {
         return Err(TransparencyError::InvalidCatenaChain(format!(
-            "genesis anchor must have chain_index 0, got {:?}",
-            genesis.chain_index
+            "first anchor must have chain_index {expected_start_index}, got {:?}",
+            first.chain_index
         )));
     }
-    if genesis.prev_txid.is_some() || genesis.prev_vout.is_some() {
+    if expected_start_index == 0 && (first.prev_txid.is_some() || first.prev_vout.is_some()) {
         return Err(TransparencyError::InvalidCatenaChain(
             "genesis anchor cannot have a predecessor UTXO".into(),
         ));
     }
-    if genesis.continuation_vout != Some(CATENA_CONTINUATION_VOUT) {
+    if first.continuation_vout != Some(CATENA_CONTINUATION_VOUT) {
         return Err(TransparencyError::InvalidCatenaChain(format!(
-            "genesis anchor continuation_vout is {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
-            genesis.continuation_vout
+            "first anchor continuation_vout is {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
+            first.continuation_vout
         )));
     }
-    if !genesis.verified || genesis.confirmations == 0 {
+    if !first.verified || first.confirmations == 0 {
         return Err(TransparencyError::InvalidCatenaChain(
-            "genesis anchor must be verified with at least 1 confirmation".into(),
+            "first anchor must be verified with at least 1 confirmation".into(),
         ));
     }
 
     for (i, pair) in anchors.windows(2).enumerate() {
         let prev = &pair[0];
         let curr = &pair[1];
-        let expected_index = prev.chain_index.unwrap_or(0) + 1;
+        let expected_index = prev.chain_index.unwrap_or(expected_start_index) + 1;
 
         if curr.chain_index != Some(expected_index) {
             return Err(TransparencyError::InvalidCatenaChain(format!(
@@ -171,14 +164,28 @@ pub fn verify_catena_links(anchors: &[BitcoinAnchor]) -> Result<bool, Transparen
     Ok(true)
 }
 
-/// Verifies that each anchor in the sequence correctly commits to the corresponding checkpoint hash.
+/// Pure cryptographic verification of an in-memory Catena anchor chain.
 ///
 /// Ensures:
-/// 1. The number of anchors matches the number of checkpoint hashes.
-/// 2. For each anchor `A_i` with `chain_index == i`, its commitment matches `catena_commitment(checkpoint_hash[i], i)`.
-pub fn verify_catena_commitments(
+/// 1. The chain is non-empty and bounded by `MAX_CATENA_HOPS`.
+/// 2. The first anchor is a valid genesis anchor (`chain_index == 0`, `prev_txid == None`, valid `continuation_vout`).
+/// 3. For each consecutive pair `(A_{i-1}, A_i)`:
+///    - `A_i.chain_index == A_{i-1}.chain_index + 1`
+///    - `A_i.prev_txid == Some(A_{i-1}.txid)`
+///    - `A_i.prev_vout == A_{i-1}.continuation_vout == CATENA_CONTINUATION_VOUT`
+///    - `A_i.continuation_vout == Some(CATENA_CONTINUATION_VOUT)`
+///    - `A_i.verified == true`
+///    - `A_i.confirmations > 0`
+pub fn verify_catena_links(anchors: &[BitcoinAnchor]) -> Result<bool, TransparencyError> {
+    verify_catena_links_bounded(anchors, 0, MAX_CATENA_HOPS)
+}
+
+/// Verifies that each anchor in the sequence correctly commits to the corresponding checkpoint hash,
+/// starting at `expected_start_index`.
+pub fn verify_catena_commitments_bounded(
     anchors: &[BitcoinAnchor],
     checkpoint_hashes: &[&str],
+    expected_start_index: u64,
 ) -> Result<bool, TransparencyError> {
     if anchors.len() != checkpoint_hashes.len() {
         return Err(TransparencyError::InvalidCatenaChain(format!(
@@ -189,7 +196,7 @@ pub fn verify_catena_commitments(
     }
 
     for (i, (anchor, &cp_hash)) in anchors.iter().zip(checkpoint_hashes.iter()).enumerate() {
-        let expected_index = i as u64;
+        let expected_index = expected_start_index + i as u64;
         if anchor.chain_index != Some(expected_index) {
             return Err(TransparencyError::InvalidCatenaChain(format!(
                 "anchor at step {} has unexpected chain index {:?}, expected Some({})",
@@ -208,6 +215,18 @@ pub fn verify_catena_commitments(
     }
 
     Ok(true)
+}
+
+/// Verifies that each anchor in the sequence correctly commits to the corresponding checkpoint hash.
+///
+/// Ensures:
+/// 1. The number of anchors matches the number of checkpoint hashes.
+/// 2. For each anchor `A_i` with `chain_index == i`, its commitment matches `catena_commitment(checkpoint_hash[i], i)`.
+pub fn verify_catena_commitments(
+    anchors: &[BitcoinAnchor],
+    checkpoint_hashes: &[&str],
+) -> Result<bool, TransparencyError> {
+    verify_catena_commitments_bounded(anchors, checkpoint_hashes, 0)
 }
 
 /// Detect whether two anchors represent a candidate continuation conflict or equivocation attempt
@@ -523,6 +542,60 @@ mod tests {
         let res2 = verify_catena_links(&[a0, a1, a2_bad_spend]);
         assert!(matches!(
             res2,
+            Err(TransparencyError::InvalidCatenaChain(_))
+        ));
+    }
+
+    #[test]
+    fn test_catena_bounded_verification() {
+        let cp1 = "11".repeat(32);
+        let cp2 = "22".repeat(32);
+
+        let mut a1 = make_test_anchor(
+            0x11,
+            Some(1),
+            Some("10".repeat(32)),
+            Some(1),
+            Some(1),
+            true,
+            1,
+        );
+        a1.commitment = catena_commitment(&cp1, 1).unwrap();
+
+        let mut a2 = make_test_anchor(
+            0x12,
+            Some(2),
+            Some(a1.txid.clone()),
+            Some(1),
+            Some(1),
+            true,
+            1,
+        );
+        a2.commitment = catena_commitment(&cp2, 2).unwrap();
+
+        let subchain = vec![a1.clone(), a2.clone()];
+
+        // Valid bounded link verification starting at index 1 with max_hops 2
+        assert!(verify_catena_links_bounded(&subchain, 1, 2).unwrap());
+
+        // Max hops exceeded
+        assert!(matches!(
+            verify_catena_links_bounded(&subchain, 1, 1),
+            Err(TransparencyError::InvalidCatenaChain(_))
+        ));
+
+        // Wrong start index
+        assert!(matches!(
+            verify_catena_links_bounded(&subchain, 0, 5),
+            Err(TransparencyError::InvalidCatenaChain(_))
+        ));
+
+        // Valid bounded commitment verification
+        assert!(verify_catena_commitments_bounded(&subchain, &[&cp1, &cp2], 1).unwrap());
+
+        // Wrong start index for commitments
+        assert!(matches!(
+            verify_catena_commitments_bounded(&subchain, &[&cp1, &cp2], 0),
             Err(TransparencyError::InvalidCatenaChain(_))
         ));
     }

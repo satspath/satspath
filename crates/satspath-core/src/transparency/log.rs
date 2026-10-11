@@ -13,7 +13,7 @@ use super::tree::inclusion_proof;
 use super::{
     anchor_commitment, catena_commitment, leaf_hash, merkle_root, verify_identifier_history,
     BitcoinAnchor, MerkleConsistencyProof, MerkleInclusionProof, NameAction, NameEvent,
-    TransparencyCheckpoint, TransparencyError,
+    TransparencyCheckpoint, TransparencyError, CATENA_CONTINUATION_VOUT,
 };
 
 const EVENTS_FILE: &str = "transparency-events-v1.jsonl";
@@ -355,14 +355,14 @@ impl TransparencyLog {
         anchor: BitcoinAnchor,
         operator_key: &SecretKey,
     ) -> Result<TransparencyCheckpoint> {
-        let checkpoint = self
+        let last_checkpoint = self
             .checkpoints
-            .last_mut()
+            .last()
             .ok_or_else(|| TransparencyError::CorruptStore("no checkpoint to anchor".into()))?;
         let expected_commitment = match anchor.chain_index {
-            Some(idx) => catena_commitment(&checkpoint.checkpoint_hash()?, idx)
+            Some(idx) => catena_commitment(&last_checkpoint.checkpoint_hash()?, idx)
                 .map_err(|e| crate::SatsPathError::SerializationError(e.to_string()))?,
-            None => anchor_commitment(&checkpoint.checkpoint_hash()?)
+            None => anchor_commitment(&last_checkpoint.checkpoint_hash()?)
                 .map_err(|e| crate::SatsPathError::SerializationError(e.to_string()))?,
         };
         if anchor.network != crate::BitcoinNetwork::Regtest
@@ -373,6 +373,64 @@ impl TransparencyLog {
             )
             .into());
         }
+        if let Some(idx) = anchor.chain_index {
+            if anchor.continuation_vout != Some(CATENA_CONTINUATION_VOUT) {
+                return Err(TransparencyError::CorruptCheckpointChain(format!(
+                    "Catena anchor continuation_vout is {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
+                    anchor.continuation_vout
+                ))
+                .into());
+            }
+            let last_catena = self
+                .checkpoints
+                .iter()
+                .take(self.checkpoints.len().saturating_sub(1))
+                .rev()
+                .find_map(|c| {
+                    c.bitcoin_anchor
+                        .as_ref()
+                        .filter(|a| a.chain_index.is_some())
+                });
+            match last_catena {
+                None => {
+                    if idx != 0 || anchor.prev_txid.is_some() || anchor.prev_vout.is_some() {
+                        return Err(TransparencyError::CorruptCheckpointChain(format!(
+                            "genesis Catena anchor must have chain_index 0 and no predecessor, got index {idx}, prev_txid: {:?}, prev_vout: {:?}",
+                            anchor.prev_txid, anchor.prev_vout
+                        ))
+                        .into());
+                    }
+                }
+                Some(prev) => {
+                    let expected_index = prev.chain_index.map(|i| i + 1);
+                    if Some(idx) != expected_index {
+                        return Err(TransparencyError::CorruptCheckpointChain(format!(
+                            "non-sequential Catena chain_index: got {idx}, expected {:?}",
+                            expected_index
+                        ))
+                        .into());
+                    }
+                    if anchor.prev_txid.as_deref() != Some(prev.txid.as_str()) {
+                        return Err(TransparencyError::CorruptCheckpointChain(format!(
+                            "Catena prev_txid mismatch: got {:?}, expected {}",
+                            anchor.prev_txid, prev.txid
+                        ))
+                        .into());
+                    }
+                    if anchor.prev_vout != Some(CATENA_CONTINUATION_VOUT) {
+                        return Err(TransparencyError::CorruptCheckpointChain(format!(
+                            "Catena prev_vout mismatch: got {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
+                            anchor.prev_vout
+                        ))
+                        .into());
+                    }
+                }
+            }
+        }
+        let checkpoint = self
+            .checkpoints
+            .last_mut()
+            .expect("checked non-empty above");
         checkpoint.bitcoin_anchor = Some(anchor);
         checkpoint.sign(operator_key)?;
         let result = checkpoint.clone();
@@ -438,8 +496,15 @@ impl TransparencyLog {
         for history in histories.values() {
             verify_identifier_history(history)?;
         }
+        self.verify_checkpoint_chain_integrity()?;
+        Ok(())
+    }
+
+    pub fn verify_checkpoint_chain_integrity(&self) -> Result<()> {
         let mut previous: Option<&TransparencyCheckpoint> = None;
         let mut seen_sizes: HashMap<u64, String> = HashMap::new();
+        let mut last_catena: Option<&BitcoinAnchor> = None;
+
         for checkpoint in &self.checkpoints {
             if checkpoint.log_id != self.log_id
                 || !super::verify_checkpoint(checkpoint)?
@@ -520,6 +585,52 @@ impl TransparencyLog {
                         "invalid anchor commitment or disallowed network".into(),
                     )
                     .into());
+                }
+                if let Some(idx) = anchor.chain_index {
+                    if anchor.continuation_vout != Some(CATENA_CONTINUATION_VOUT) {
+                        return Err(TransparencyError::CorruptCheckpointChain(format!(
+                            "Catena anchor continuation_vout is {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
+                            anchor.continuation_vout
+                        ))
+                        .into());
+                    }
+                    match last_catena {
+                        None => {
+                            if idx != 0 || anchor.prev_txid.is_some() || anchor.prev_vout.is_some()
+                            {
+                                return Err(TransparencyError::CorruptCheckpointChain(format!(
+                                    "genesis Catena anchor must have chain_index 0 and no predecessor, got index {idx}, prev_txid: {:?}, prev_vout: {:?}",
+                                    anchor.prev_txid, anchor.prev_vout
+                                ))
+                                .into());
+                            }
+                        }
+                        Some(prev) => {
+                            let expected_index = prev.chain_index.map(|i| i + 1);
+                            if Some(idx) != expected_index {
+                                return Err(TransparencyError::CorruptCheckpointChain(format!(
+                                    "non-sequential Catena chain_index: got {idx}, expected {:?}",
+                                    expected_index
+                                ))
+                                .into());
+                            }
+                            if anchor.prev_txid.as_deref() != Some(prev.txid.as_str()) {
+                                return Err(TransparencyError::CorruptCheckpointChain(format!(
+                                    "Catena prev_txid mismatch: got {:?}, expected {}",
+                                    anchor.prev_txid, prev.txid
+                                ))
+                                .into());
+                            }
+                            if anchor.prev_vout != Some(CATENA_CONTINUATION_VOUT) {
+                                return Err(TransparencyError::CorruptCheckpointChain(format!(
+                                    "Catena prev_vout mismatch: got {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
+                                    anchor.prev_vout
+                                ))
+                                .into());
+                            }
+                        }
+                    }
+                    last_catena = Some(anchor);
                 }
             }
             previous = Some(checkpoint);

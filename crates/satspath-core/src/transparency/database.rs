@@ -447,6 +447,16 @@ fn validate_replacement_anchor(
             )
             .into());
         }
+        if anchor.chain_index.is_some()
+            && anchor.continuation_vout != Some(super::CATENA_CONTINUATION_VOUT)
+        {
+            return Err(TransparencyError::CorruptCheckpointChain(format!(
+                "replacement Catena anchor continuation_vout is {:?}, expected Some({})",
+                anchor.continuation_vout,
+                super::CATENA_CONTINUATION_VOUT
+            ))
+            .into());
+        }
     }
     Ok(())
 }

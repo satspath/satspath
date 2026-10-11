@@ -460,34 +460,44 @@ impl RegtestAnchorClient {
         })
     }
 
-    /// Trace backwards through Bitcoin transactions from `latest_txid` to pinned `(genesis_txid, genesis_vout)`,
+    /// Trace backwards through Bitcoin transactions from `latest_txid` to pinned `(trusted_txid, trusted_vout)` at `trusted_index`,
     /// verifying that each anchor spent the previous continuation UTXO.
-    pub async fn verify_catena_chain(
+    ///
+    /// The parent transaction fetched in step `i` is cached and used as the child transaction in step `i+1`,
+    /// reducing RPC calls from 2N to N+1.
+    pub async fn verify_catena_chain_bounded(
         &self,
         latest_txid: &str,
-        genesis_txid: &str,
-        genesis_vout: u32,
+        trusted_txid: &str,
+        trusted_vout: u32,
+        trusted_index: u64,
+        max_hops: usize,
     ) -> crate::Result<Vec<BitcoinAnchor>> {
-        if genesis_vout != super::catena::CATENA_CONTINUATION_VOUT {
+        if trusted_vout != super::catena::CATENA_CONTINUATION_VOUT {
             return Err(crate::SatsPathError::ValidationError(format!(
-                "pinned genesis_vout is {genesis_vout}, expected fixed index {}",
+                "trusted_vout is {trusted_vout}, expected fixed index {}",
                 super::catena::CATENA_CONTINUATION_VOUT
             )));
         }
         let mut chain = Vec::new();
         let mut curr_txid = latest_txid.to_string();
         let mut successor_continuation_vout: Option<u32> = None;
+        let mut cached_tx: Option<Value> = None;
 
         loop {
-            if chain.len() >= MAX_CATENA_HOPS {
+            if chain.len() >= max_hops {
                 return Err(crate::SatsPathError::ValidationError(format!(
-                    "Catena chain traversal exceeded maximum allowed hops ({MAX_CATENA_HOPS})"
+                    "Catena chain traversal exceeded maximum allowed hops ({max_hops})"
                 )));
             }
 
-            let tx = self
-                .rpc("getrawtransaction", json!([curr_txid, true]))
-                .await?;
+            let tx = match cached_tx.take() {
+                Some(t) => t,
+                None => {
+                    self.rpc("getrawtransaction", json!([curr_txid, true]))
+                        .await?
+                }
+            };
             let confirmations = tx["confirmations"].as_u64().unwrap_or(0) as u32;
             if confirmations == 0 {
                 return Err(crate::SatsPathError::ValidationError(format!(
@@ -548,25 +558,33 @@ impl RegtestAnchorClient {
 
             let block_hash = tx["blockhash"].as_str().map(str::to_owned);
 
-            if curr_txid == genesis_txid {
-                let genesis_out = vouts.get(genesis_vout as usize).ok_or_else(|| {
+            if curr_txid == trusted_txid {
+                let trusted_out = vouts.get(trusted_vout as usize).ok_or_else(|| {
                     crate::SatsPathError::ValidationError(format!(
-                        "genesis_vout {genesis_vout} out of bounds in genesis tx {curr_txid}"
+                        "trusted_vout {trusted_vout} out of bounds in trusted tx {curr_txid}"
                     ))
                 })?;
-                let genesis_sats = parse_sats(&genesis_out["value"]).unwrap_or(0);
-                if genesis_sats != CONTINUATION_SATOSHIS {
+                let trusted_sats = parse_sats(&trusted_out["value"]).unwrap_or(0);
+                if trusted_sats != CONTINUATION_SATOSHIS {
                     return Err(crate::SatsPathError::ValidationError(format!(
-                        "Genesis outpoint {curr_txid}:{genesis_vout} has {genesis_sats} sats, expected {CONTINUATION_SATOSHIS}"
+                        "Trusted outpoint {curr_txid}:{trusted_vout} has {trusted_sats} sats, expected {CONTINUATION_SATOSHIS}"
                     )));
                 }
                 if let Some(successor_vout) = successor_continuation_vout {
-                    if successor_vout != genesis_vout {
+                    if successor_vout != trusted_vout {
                         return Err(crate::SatsPathError::ValidationError(format!(
-                            "Successor anchor vin[0] spent vout {successor_vout}, but pinned genesis_vout is {genesis_vout}"
+                            "Successor anchor vin[0] spent vout {successor_vout}, but pinned trusted_vout is {trusted_vout}"
                         )));
                     }
                 }
+                let (prev_txid, prev_vout) = if trusted_index == 0 {
+                    (None, None)
+                } else {
+                    let vin_0 = tx["vin"].as_array().and_then(|v| v.first());
+                    let p_txid = vin_0.and_then(|v| v["txid"].as_str()).map(str::to_owned);
+                    let p_vout = vin_0.and_then(|v| v["vout"].as_u64()).map(|v| v as u32);
+                    (p_txid, p_vout)
+                };
                 chain.push(BitcoinAnchor {
                     network: BitcoinNetwork::Regtest,
                     txid: curr_txid,
@@ -575,10 +593,10 @@ impl RegtestAnchorClient {
                     confirmations,
                     commitment,
                     verified: true,
-                    prev_txid: None,
-                    prev_vout: None,
-                    continuation_vout: Some(genesis_vout),
-                    chain_index: Some(0),
+                    prev_txid,
+                    prev_vout,
+                    continuation_vout: Some(trusted_vout),
+                    chain_index: Some(trusted_index),
                 });
                 break;
             }
@@ -664,14 +682,33 @@ impl RegtestAnchorClient {
 
             curr_txid = prev_txid;
             successor_continuation_vout = Some(prev_vout);
+            cached_tx = Some(parent_tx);
         }
 
         chain.reverse();
         for (idx, anchor) in chain.iter_mut().enumerate() {
-            anchor.chain_index = Some(idx as u64);
+            anchor.chain_index = Some(trusted_index + idx as u64);
         }
 
         Ok(chain)
+    }
+
+    /// Trace backwards through Bitcoin transactions from `latest_txid` to pinned `(genesis_txid, genesis_vout)`,
+    /// verifying that each anchor spent the previous continuation UTXO.
+    pub async fn verify_catena_chain(
+        &self,
+        latest_txid: &str,
+        genesis_txid: &str,
+        genesis_vout: u32,
+    ) -> crate::Result<Vec<BitcoinAnchor>> {
+        self.verify_catena_chain_bounded(
+            latest_txid,
+            genesis_txid,
+            genesis_vout,
+            0,
+            MAX_CATENA_HOPS,
+        )
+        .await
     }
 
     /// Trace backwards through Bitcoin transactions from `latest_txid` to pinned `(genesis_txid, genesis_vout)`,
@@ -683,10 +720,38 @@ impl RegtestAnchorClient {
         genesis_vout: u32,
         checkpoint_hashes: &[&str],
     ) -> crate::Result<Vec<BitcoinAnchor>> {
+        self.verify_catena_chain_with_checkpoints_bounded(
+            latest_txid,
+            genesis_txid,
+            genesis_vout,
+            0,
+            MAX_CATENA_HOPS,
+            checkpoint_hashes,
+        )
+        .await
+    }
+
+    /// Trace backwards through Bitcoin transactions from `latest_txid` to pinned `(trusted_txid, trusted_vout)` at `trusted_index`,
+    /// verifying continuation UTXO spends and cryptographic binding to `checkpoint_hashes`.
+    pub async fn verify_catena_chain_with_checkpoints_bounded(
+        &self,
+        latest_txid: &str,
+        trusted_txid: &str,
+        trusted_vout: u32,
+        trusted_index: u64,
+        max_hops: usize,
+        checkpoint_hashes: &[&str],
+    ) -> crate::Result<Vec<BitcoinAnchor>> {
         let chain = self
-            .verify_catena_chain(latest_txid, genesis_txid, genesis_vout)
+            .verify_catena_chain_bounded(
+                latest_txid,
+                trusted_txid,
+                trusted_vout,
+                trusted_index,
+                max_hops,
+            )
             .await?;
-        super::catena::verify_catena_commitments(&chain, checkpoint_hashes)
+        super::catena::verify_catena_commitments_bounded(&chain, checkpoint_hashes, trusted_index)
             .map_err(|e| crate::SatsPathError::ValidationError(e.to_string()))?;
         Ok(chain)
     }
