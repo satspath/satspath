@@ -342,6 +342,7 @@ impl RegtestAnchorClient {
     ) -> crate::Result<Vec<BitcoinAnchor>> {
         let mut chain = Vec::new();
         let mut curr_txid = latest_txid.to_string();
+        let mut successor_continuation_vout: Option<u32> = None;
 
         loop {
             if chain.len() >= MAX_CATENA_HOPS {
@@ -375,7 +376,8 @@ impl RegtestAnchorClient {
                     ))
                 })?;
 
-            let continuation_vout = find_continuation_vout(&tx);
+            let continuation_vout =
+                successor_continuation_vout.or_else(|| find_continuation_vout(&tx));
             let block_hash = tx["blockhash"].as_str().map(str::to_owned);
 
             if curr_txid == genesis_txid {
@@ -468,6 +470,7 @@ impl RegtestAnchorClient {
             });
 
             curr_txid = prev_txid;
+            successor_continuation_vout = Some(prev_vout);
         }
 
         chain.reverse();
@@ -553,10 +556,10 @@ impl MockAnchorClient {
         let chain_index = prev.chain_index.unwrap_or(0) + 1;
         let commitment = catena_commitment(checkpoint_hash, chain_index)
             .map_err(|e| crate::SatsPathError::SerializationError(e.to_string()))?;
-        let hex_byte = format!("{:02x}", (chain_index as u8) + 0x10);
+        let txid = format!("{:064x}", chain_index + 0x10);
         Ok(BitcoinAnchor {
             network: BitcoinNetwork::Regtest,
-            txid: hex_byte.repeat(32),
+            txid,
             block_hash: Some("20".repeat(32)),
             block_height: Some(101 + chain_index),
             confirmations: 1,

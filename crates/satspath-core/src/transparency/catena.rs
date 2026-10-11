@@ -174,22 +174,19 @@ pub fn detect_catena_equivocation(
     let p_vout1 = a1.prev_vout?;
     let p_vout2 = a2.prev_vout?;
 
-    if p_tx1 == p_tx2 && p_vout1 == p_vout2 {
-        // If they have distinct txids or distinct commitments, an equivocation occurred!
-        if a1.txid != a2.txid || a1.commitment != a2.commitment {
-            let index = a1.chain_index.or(a2.chain_index).unwrap_or(1);
-            return Some(CatenaEquivocationProof {
-                chain_index: index,
-                spent_txid: p_tx1.clone(),
-                spent_vout: p_vout1,
-                first_anchor: a1.clone(),
-                second_anchor: a2.clone(),
-                evidence: format!(
-                    "Double-spend detected on continuation UTXO {p_tx1}:{p_vout1}: tx1={} (commitment={}) vs tx2={} (commitment={})",
-                    a1.txid, a1.commitment, a2.txid, a2.commitment
-                ),
-            });
-        }
+    if p_tx1 == p_tx2 && p_vout1 == p_vout2 && a1.txid != a2.txid {
+        let index = a1.chain_index.or(a2.chain_index)?;
+        return Some(CatenaEquivocationProof {
+            chain_index: index,
+            spent_txid: p_tx1.clone(),
+            spent_vout: p_vout1,
+            first_anchor: a1.clone(),
+            second_anchor: a2.clone(),
+            evidence: format!(
+                "Double-spend detected on continuation UTXO {p_tx1}:{p_vout1}: tx1={} (commitment={}) vs tx2={} (commitment={})",
+                a1.txid, a1.commitment, a2.txid, a2.commitment
+            ),
+        });
     }
 
     None

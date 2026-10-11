@@ -77,7 +77,7 @@ flowchart LR
 
 ## 3. Especificación de Tipos y Estructuras (`satspath-core`)
 
-En `crates/satspath-core/src/transparency/catena.rs`:
+En `crates/satspath-core/src/transparency/catena.rs` y `anchor.rs`:
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -88,36 +88,54 @@ use crate::BitcoinNetwork;
 pub struct CatenaGenesis {
     pub network: BitcoinNetwork,
     pub txid: String,
-    pub vout: u32,
-    pub operator_pubkey: String,
-    pub created_at: i64,
-}
-
-/// Registro de un eslabón confirmado en la cadena Catena.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CatenaAnchor {
-    pub network: BitcoinNetwork,
-    pub chain_index: u64,
-    pub txid: String,
-    pub prev_txid: String,
-    pub prev_vout: u32,
     pub continuation_vout: u32,
-    pub checkpoint_hash: String,
     pub commitment: String,
     pub block_hash: Option<String>,
     pub block_height: Option<u64>,
-    pub confirmations: u32,
-    pub verified: bool,
 }
 
-/// Prueba de inclusión y trazabilidad de una secuencia Catena desde el génesis.
+/// Registro de un eslabón confirmado en la cadena Catena (extendido sobre BitcoinAnchor con compatibilidad retroactiva).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BitcoinAnchor {
+    pub network: BitcoinNetwork,
+    pub txid: String,
+    pub block_hash: Option<String>,
+    pub block_height: Option<u64>,
+    pub confirmations: u32,
+    pub commitment: String,
+    pub verified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_txid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_vout: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_vout: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_index: Option<u64>,
+}
+
+/// Prueba de trazabilidad y encadenamiento Catena desde el génesis.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CatenaChainProof {
     pub genesis: CatenaGenesis,
-    pub anchors: Vec<CatenaAnchor>,
-    pub latest_checkpoint_hash: String,
+    pub anchors: Vec<BitcoinAnchor>,
+    pub latest_txid: String,
+    pub verified: bool,
+}
+
+/// Prueba de no-equivocación y detección de bifurcación (split-view).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CatenaEquivocationProof {
+    pub chain_index: u64,
+    pub spent_txid: String,
+    pub spent_vout: u32,
+    pub first_anchor: BitcoinAnchor,
+    pub second_anchor: BitcoinAnchor,
+    pub evidence: String,
 }
 ```
+
+> **Nota de implementación y compatibilidad**: Se preservó la compatibilidad con el esquema de almacenamiento de `TransparencyCheckpoint` integrando los campos de encadenamiento Catena opcionales directamente en `BitcoinAnchor` sin requerir migraciones de base de datos disruptivas. Los endpoints expuestos en el daemon son `POST /v1/transparency/anchors`, `GET /v1/transparency/catena/chain`, y `POST /v1/transparency/verify/catena`.
 
 ### Formato del Compromiso `OP_RETURN` (V2)
 
