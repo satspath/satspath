@@ -414,7 +414,6 @@ pub fn cmd_wallet_rotate() -> Result<()> {
 
 /// `satspath alias recover` — recover control of an alias identity key using a pre-committed guardian threshold proof.
 pub fn cmd_alias_recover(alias: Option<&str>, proof_file: &str) -> Result<()> {
-    ensure_dir()?;
     let data = std::fs::read_to_string(proof_file)
         .map_err(|e| anyhow::anyhow!("failed to read proof file {}: {e}", proof_file))?;
     let proof: satspath_core::recovery::KeyRecoveryProof = serde_json::from_str(&data)

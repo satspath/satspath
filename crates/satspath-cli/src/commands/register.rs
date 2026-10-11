@@ -125,7 +125,7 @@ pub async fn cmd_register(
         key_path.display()
     );
     println!("   This randomly generated key cannot be re-derived from a seed, and no guardian recovery policy is committed for it.");
-    println!("   CLI guardian recovery is unavailable until a RecoveryPolicy is committed to this profile in the local registry. See docs/key_recovery.md.");
+    println!("   The CLI cannot yet commit a guardian RecoveryPolicy; CLI guardian recovery is therefore unavailable for this profile. See docs/key_recovery.md.");
     println!();
     println!(
         "Prove ownership of a method:  satspath prove {} --method-index 0",
