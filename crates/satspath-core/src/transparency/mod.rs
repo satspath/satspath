@@ -110,6 +110,8 @@ pub enum TransparencyError {
     IdentifierRevoked,
     #[error("recovery is disabled")]
     RecoveryDisabled,
+    #[error("invalid key recovery: {0}")]
+    InvalidRecovery(String),
     #[error("corrupt transparency store: {0}")]
     CorruptStore(String),
     #[error("invalid identifier attestation: {0}")]

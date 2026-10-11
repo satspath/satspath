@@ -279,6 +279,8 @@ fn sign_and_store(state: &WalletState) -> Result<String> {
         hybrid_pubkey: None,
         pqc_required: false,
         revoked: false,
+        recovery_policy: None,
+        recovery: None,
     };
     let signed = sign_profile(profile, &secret)?;
     let fp = fingerprint_pubkey(pubkey)?;
@@ -383,6 +385,8 @@ pub fn cmd_wallet_rotate() -> Result<()> {
         hybrid_pubkey: None,
         pqc_required: false,
         revoked: false,
+        recovery_policy: None,
+        recovery: None,
     };
 
     let signed = sign_profile(profile, &new_kp.secret_key)?;
@@ -394,6 +398,121 @@ pub fn cmd_wallet_rotate() -> Result<()> {
         "New identity fingerprint: {}",
         fingerprint_pubkey(&new_pubkey_hex)?
     );
+
+    Ok(())
+}
+
+/// `satspath wallet recover` — recover lost identity key via seed or guardian proof.
+pub fn cmd_wallet_recover(
+    alias: Option<&str>,
+    seed_hex: Option<&str>,
+    account_index: u32,
+    proof_file: Option<&str>,
+) -> Result<()> {
+    ensure_dir()?;
+    if seed_hex.is_none() && proof_file.is_none() {
+        anyhow::bail!(
+            "Sovereign recovery requires either deterministic seed derivation (--seed-hex) \
+             or M-of-N guardian threshold recovery (--proof-file). \
+             Email and SMS recovery are strictly rejected in the SatsPath threat model."
+        );
+    }
+
+    if let Some(seed_str) = seed_hex {
+        let seed_bytes =
+            hex::decode(seed_str.trim()).map_err(|e| anyhow::anyhow!("invalid hex seed: {e}"))?;
+        let derived_secret =
+            satspath_core::crypto::derive_identity_key_from_seed(&seed_bytes, account_index)?;
+        let secp = secp256k1::Secp256k1::new();
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &derived_secret);
+        let pubkey_hex = hex::encode(pubkey.serialize());
+
+        keystore::save_identity_key(&satspath_dir(), &derived_secret)?;
+
+        let mut state = load_wallet()?;
+        state.identity_pubkey = Some(pubkey_hex.clone());
+        state.updated_at = Some(now());
+        if let Some(a) = alias {
+            state.alias = Some(a.to_string());
+        }
+        save_wallet(&state)?;
+
+        let fp = fingerprint_pubkey(&pubkey_hex)?;
+        println!(
+            "Identity key recovered successfully from seed (account index {}).",
+            account_index
+        );
+        println!("Identity pubkey: {}", mask_pubkey(&pubkey_hex));
+        println!("Fingerprint:     {}", fp);
+        if let Some(a) = &state.alias {
+            println!("Alias:           {}", mask_identifier(a));
+        }
+        print_receiver_warning();
+        return Ok(());
+    }
+
+    if let Some(proof_path) = proof_file {
+        let data = std::fs::read_to_string(proof_path)
+            .map_err(|e| anyhow::anyhow!("failed to read proof file {}: {e}", proof_path))?;
+        let proof: satspath_core::recovery::KeyRecoveryProof = serde_json::from_str(&data)
+            .map_err(|e| anyhow::anyhow!("invalid KeyRecoveryProof JSON: {e}"))?;
+
+        let mut registry = open_registry()?;
+        let target_alias = alias
+            .map(str::to_string)
+            .or_else(|| load_wallet().ok().and_then(|w| w.alias))
+            .ok_or_else(|| anyhow::anyhow!("alias must be specified with --alias"))?;
+
+        let existing = registry
+            .resolve_alias(&target_alias)
+            .map_err(|e| anyhow::anyhow!("failed to resolve alias '{}': {e}", target_alias))?;
+
+        let policy = existing.profile.recovery_policy.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no RecoveryPolicy was pre-committed for '{}'. Recovery is disabled (fail-closed).",
+                target_alias
+            )
+        })?;
+
+        if !proof.verify(policy)? {
+            anyhow::bail!(
+                "recovery proof failed cryptographic verification against committed policy"
+            );
+        }
+
+        let new_pubkey = proof.new_pubkey.clone();
+        let fp = fingerprint_pubkey(&new_pubkey)?;
+
+        let mut new_profile = existing.profile.clone();
+        new_profile.identity_pubkey = new_pubkey.clone();
+        new_profile.sequence = Some(proof.sequence);
+        new_profile.recovery = Some(proof.clone());
+        new_profile.updated_at = now();
+
+        // If the new identity key is present in local keystore, sign the profile.
+        if let Ok(new_secret) = keystore::load_identity_key(&satspath_dir(), &new_pubkey) {
+            let signed = sign_profile(new_profile, &new_secret)?;
+            registry.update_profile(signed)?;
+            let mut state = load_wallet()?;
+            state.identity_pubkey = Some(new_pubkey.clone());
+            state.alias = Some(target_alias.clone());
+            state.updated_at = Some(now());
+            save_wallet(&state)?;
+            println!(
+                "Identity key recovered and signed successfully using guardian threshold proof."
+            );
+        } else {
+            println!(
+                "Guardian threshold proof verified for identity {}.",
+                mask_pubkey(&new_pubkey)
+            );
+            println!("Note: New identity private key not found in local keystore.");
+        }
+
+        println!("Recovered identity fingerprint: {}", fp);
+        print_receiver_warning();
+        return Ok(());
+    }
 
     Ok(())
 }
@@ -760,5 +879,32 @@ mod tests {
         assert!(!build_methods(&state)
             .iter()
             .any(|m| matches!(m, PaymentMethod::Ark { .. })));
+    }
+
+    #[test]
+    fn wallet_recover_rejects_missing_inputs_and_reiterates_sovereign_model() {
+        let err = cmd_wallet_recover(None, None, 0, None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Sovereign recovery requires either"));
+        assert!(err
+            .to_string()
+            .contains("Email and SMS recovery are strictly rejected"));
+    }
+
+    #[test]
+    fn wallet_recover_deterministic_seed_derivation() {
+        std::env::set_var("SATSPATH_PASSWORD", "testpass");
+        let seed = [42u8; 32];
+        let seed_hex = hex::encode(seed);
+        assert!(cmd_wallet_recover(None, Some(&seed_hex), 0, None).is_ok());
+
+        let sk1 = satspath_core::crypto::derive_identity_key_from_seed(&seed, 0).unwrap();
+        let sk2 = satspath_core::crypto::derive_identity_key_from_seed(&seed, 0).unwrap();
+        assert_eq!(sk1, sk2);
+
+        let sk_acc1 = satspath_core::crypto::derive_identity_key_from_seed(&seed, 1).unwrap();
+        assert_ne!(sk1, sk_acc1);
+        std::env::remove_var("SATSPATH_PASSWORD");
     }
 }

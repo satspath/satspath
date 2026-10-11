@@ -36,7 +36,7 @@ pub use show::cmd_show;
 pub use wallet::{
     cmd_wallet_add_ark, cmd_wallet_add_bolt12, cmd_wallet_add_lightning, cmd_wallet_add_methods,
     cmd_wallet_add_onchain, cmd_wallet_init, cmd_wallet_publish, cmd_wallet_receive,
-    cmd_wallet_rotate, cmd_wallet_show,
+    cmd_wallet_recover, cmd_wallet_rotate, cmd_wallet_show,
 };
 pub use web::cmd_web;
 

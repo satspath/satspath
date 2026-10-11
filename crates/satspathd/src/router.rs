@@ -12,8 +12,8 @@ use crate::handlers::{
         mark_notification_read_handler,
     },
     profile::{
-        create_challenge, profile_response, rotate_profile_key, update_profile,
-        update_profile_methods, verify_challenge,
+        create_challenge, profile_response, recover_profile_key, rotate_profile_key,
+        update_profile, update_profile_methods, verify_challenge,
     },
     quote::{pay_response, quote_response},
     resolve::{dns_resolve_response, resolve_profile, resolve_v2_envelope},
@@ -30,8 +30,8 @@ use crate::http::{
 use crate::rate_limit;
 use crate::types::{
     safety_warnings, AliasRequest, ClaimRequest, ConsistencyVerifyRequest, DnsResolveRequest,
-    InclusionVerifyRequest, PayRequest, PreviewResponse, ProfileUpdateRequest, QuoteRequest,
-    ReceiveRequest, SendRequest, VerifyRequest,
+    InclusionVerifyRequest, PayRequest, PreviewResponse, ProfileRecoverRequest,
+    ProfileUpdateRequest, QuoteRequest, ReceiveRequest, SendRequest, VerifyRequest,
 };
 use crate::ui::{html_response, INDEX_HTML};
 use crate::v2_api;
@@ -88,6 +88,7 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
         || path == "/v1/claim"
         || path == "/v1/dns/resolve"
         || path == "/v1/transparency/verify/inclusion"
+        || path == "/v1/profile/recover"
         || path == "/v2/resolve";
 
     if is_mutation && !is_public_mutation {
@@ -347,6 +348,15 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
         (Method::Post, "/v1/profile/rotate-key") => {
             let _guard = state.mutation_lock.lock().await;
             match rotate_profile_key(state) {
+                Ok(response) => json_response(StatusCode(200), &response),
+                Err(error) => json_error(StatusCode(400), error),
+            }
+        }
+        (Method::Post, "/v1/profile/recover") => {
+            let _guard = state.mutation_lock.lock().await;
+            match read_json::<ProfileRecoverRequest>(&mut request)
+                .and_then(|body| recover_profile_key(state, body))
+            {
                 Ok(response) => json_response(StatusCode(200), &response),
                 Err(error) => json_error(StatusCode(400), error),
             }

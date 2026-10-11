@@ -198,6 +198,7 @@ pub fn verify_identifier_history(events: &[NameEvent]) -> Result<()> {
     }
     let identifier = &events[0].identifier_hash;
     let mut authorized_key = events[0].identity_pubkey.clone();
+    let mut active_recovery_policy: Option<crate::recovery::RecoveryPolicy> = None;
     let mut previous_hash: Option<String> = None;
     let mut revoked = false;
     for (index, event) in events.iter().enumerate() {
@@ -216,10 +217,32 @@ pub fn verify_identifier_history(events: &[NameEvent]) -> Result<()> {
         if revoked {
             return Err(TransparencyError::IdentifierRevoked.into());
         }
-        if event.action == NameAction::RecoverKey {
-            return Err(TransparencyError::RecoveryDisabled.into());
+        if let Some(policy) = &event.recovery_policy {
+            policy.validate()?;
+            active_recovery_policy = Some(policy.clone());
         }
-        let signing_key = if event.action == NameAction::RotateKey {
+        let signing_key = if event.action == NameAction::RecoverKey {
+            let policy = active_recovery_policy
+                .as_ref()
+                .ok_or(TransparencyError::RecoveryDisabled)?;
+            let recovery = event.recovery.as_ref().ok_or_else(|| {
+                TransparencyError::InvalidRecovery("missing recovery proof".into())
+            })?;
+            if recovery.previous_pubkey != authorized_key
+                || recovery.new_pubkey != event.identity_pubkey
+                || recovery.identifier_hash != event.identifier_hash
+                || recovery.previous_event_hash
+                    != event.previous_event_hash.clone().unwrap_or_default()
+                || recovery.sequence != event.sequence
+                || !recovery.verify(policy)?
+            {
+                return Err(TransparencyError::InvalidRecovery(
+                    "guardian authorization or new acceptance failed".into(),
+                )
+                .into());
+            }
+            event.identity_pubkey.clone()
+        } else if event.action == NameAction::RotateKey {
             let rotation = event
                 .rotation
                 .as_ref()
@@ -244,14 +267,28 @@ pub fn verify_identifier_history(events: &[NameEvent]) -> Result<()> {
             }
             authorized_key.clone()
         };
-        if !verify_message_signature(
-            &event.signing_message()?,
-            &event.owner_signature,
-            &signing_key,
-        )? {
+        let is_valid_sig = if event.action == NameAction::RecoverKey {
+            if let Some(recovery) = event.recovery.as_ref() {
+                event.owner_signature == recovery.acceptance_signature
+                    || verify_message_signature(
+                        &event.signing_message()?,
+                        &event.owner_signature,
+                        &signing_key,
+                    )?
+            } else {
+                false
+            }
+        } else {
+            verify_message_signature(
+                &event.signing_message()?,
+                &event.owner_signature,
+                &signing_key,
+            )?
+        };
+        if !is_valid_sig {
             return Err(TransparencyError::InvalidEventSignature.into());
         }
-        if event.action == NameAction::RotateKey {
+        if event.action == NameAction::RotateKey || event.action == NameAction::RecoverKey {
             authorized_key = event.identity_pubkey.clone();
         }
         revoked = event.action == NameAction::Revoke;
@@ -304,7 +341,31 @@ pub fn verify_event_transition(head: Option<&NameEvent>, proposed: &NameEvent) -
                 return Err(TransparencyError::IdentifierRevoked.into());
             }
 
-            let signing_key = if proposed.action == NameAction::RotateKey {
+            let signing_key = if proposed.action == NameAction::RecoverKey {
+                let policy = head_event
+                    .recovery_policy
+                    .as_ref()
+                    .or(proposed.recovery_policy.as_ref())
+                    .ok_or(TransparencyError::RecoveryDisabled)?;
+                let recovery = proposed.recovery.as_ref().ok_or_else(|| {
+                    TransparencyError::InvalidRecovery("missing recovery proof".into())
+                })?;
+
+                if recovery.previous_pubkey != head_event.identity_pubkey
+                    || recovery.new_pubkey != proposed.identity_pubkey
+                    || recovery.identifier_hash != proposed.identifier_hash
+                    || recovery.previous_event_hash
+                        != proposed.previous_event_hash.clone().unwrap_or_default()
+                    || recovery.sequence != proposed.sequence
+                    || !recovery.verify(policy)?
+                {
+                    return Err(TransparencyError::InvalidRecovery(
+                        "guardian authorization or new acceptance failed".into(),
+                    )
+                    .into());
+                }
+                proposed.identity_pubkey.clone()
+            } else if proposed.action == NameAction::RotateKey {
                 let rotation = proposed.rotation.as_ref().ok_or_else(|| {
                     TransparencyError::InvalidRotation("missing dual proof".into())
                 })?;
@@ -330,28 +391,42 @@ pub fn verify_event_transition(head: Option<&NameEvent>, proposed: &NameEvent) -
                 head_event.identity_pubkey.clone()
             };
 
-            if !verify_message_signature(
-                &proposed.signing_message()?,
-                &proposed.owner_signature,
-                &signing_key,
-            )? {
+            let is_valid_sig = if proposed.action == NameAction::RecoverKey {
+                if let Some(recovery) = proposed.recovery.as_ref() {
+                    proposed.owner_signature == recovery.acceptance_signature
+                        || verify_message_signature(
+                            &proposed.signing_message()?,
+                            &proposed.owner_signature,
+                            &signing_key,
+                        )?
+                } else {
+                    false
+                }
+            } else {
+                verify_message_signature(
+                    &proposed.signing_message()?,
+                    &proposed.owner_signature,
+                    &signing_key,
+                )?
+            };
+
+            if !is_valid_sig {
                 return Err(TransparencyError::InvalidEventSignature.into());
             }
         }
     }
 
-    if proposed.action == NameAction::RecoverKey {
-        return Err(TransparencyError::RecoveryDisabled.into());
-    }
-
-    if head.is_none()
-        && !verify_message_signature(
+    if head.is_none() {
+        if proposed.action == NameAction::RecoverKey {
+            return Err(TransparencyError::RecoveryDisabled.into());
+        }
+        if !verify_message_signature(
             &proposed.signing_message()?,
             &proposed.owner_signature,
             &proposed.identity_pubkey,
-        )?
-    {
-        return Err(TransparencyError::InvalidEventSignature.into());
+        )? {
+            return Err(TransparencyError::InvalidEventSignature.into());
+        }
     }
 
     Ok(())

@@ -203,7 +203,7 @@ mod tests {
 
     use crate::config::AppState;
     use crate::handlers::{
-        profile::{rotate_profile_key, sign_and_store},
+        profile::{recover_profile_key, rotate_profile_key, sign_and_store},
         quote::{pay_response, quote_response},
         resolve::resolve_v2_envelope,
         send::send_response,
@@ -483,6 +483,8 @@ mod tests {
             hybrid_pubkey: None,
             pqc_required: false,
             revoked: false,
+            recovery_policy: None,
+            recovery: None,
         };
         Registry::open(dir.path())
             .unwrap()
@@ -557,6 +559,157 @@ mod tests {
         assert_eq!(response.sequence, 1);
         assert_eq!(profile.profile.sequence, Some(latest.sequence));
         assert_eq!(latest.rotation.as_ref().unwrap().sequence, latest.sequence);
+    }
+
+    #[test]
+    fn key_recovery_with_guardian_threshold_succeeds_and_updates_transparency_log() {
+        use satspath_core::crypto::sign_message;
+        use satspath_core::recovery::{
+            recovery_message, sign_guardian_authorization, KeyRecoveryProof, RecoveryPolicy,
+            RECOVERY_ACCEPTANCE_DOMAIN,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let key = generate_identity_keypair();
+        let pubkey_hex = hex::encode(key.public_key.serialize());
+
+        let g1 = generate_identity_keypair();
+        let g2 = generate_identity_keypair();
+        let g3 = generate_identity_keypair();
+        let g1_pk = hex::encode(g1.public_key.serialize());
+        let g2_pk = hex::encode(g2.public_key.serialize());
+        let g3_pk = hex::encode(g3.public_key.serialize());
+
+        let policy = RecoveryPolicy::new(2, vec![g1_pk.clone(), g2_pk.clone(), g3_pk]).unwrap();
+
+        let initial_profile = PaymentProfile {
+            alias: "alice@example.com".into(),
+            identity_pubkey: pubkey_hex.clone(),
+            methods: vec![PaymentMethod::Lightning {
+                label: "LN".into(),
+                lightning_address: Some("alice@example.com".into()),
+                lnurl: None,
+                bolt12: None,
+                receiver_pubkey: None,
+            }],
+            updated_at: 1_700_000_000,
+            expires_at: None,
+            sequence: Some(0),
+            preferences: vec![],
+            nonce: None,
+            rotation: None,
+            method_verifications: vec![],
+            hybrid_pubkey: None,
+            pqc_required: false,
+            revoked: false,
+            recovery_policy: Some(policy.clone()),
+            recovery: None,
+        };
+        let signed_initial = sign_profile(initial_profile, &key.secret_key).unwrap();
+
+        let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
+        let log = store.load_log().unwrap();
+        let id_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+        let mut initial_event = satspath_core::NameEvent {
+            version: 1,
+            identifier_hash: id_hash.clone(),
+            action: satspath_core::NameAction::Register,
+            identity_pubkey: pubkey_hex.clone(),
+            profile_hash: satspath_core::transparency::profile_hash(&signed_initial).unwrap(),
+            sequence: 0,
+            previous_event_hash: None,
+            created_at: 1_700_000_000,
+            identifier_attestation_hash: None,
+            removed_method_hashes: vec![],
+            rotation: None,
+            recovery_policy: Some(policy),
+            recovery: None,
+            owner_signature: String::new(),
+        };
+        initial_event.sign(&key.secret_key).unwrap();
+        let candidate = log
+            .prepare_append(initial_event.clone(), &signed_initial)
+            .unwrap();
+        let operator =
+            crate::handlers::transparency::load_or_create_transparency_operator(dir.path())
+                .unwrap();
+        let checkpoint = candidate.prepare_checkpoint(&operator).unwrap();
+        store
+            .commit_profile_event_checkpoint(
+                "alice@example.com",
+                &signed_initial,
+                &initial_event,
+                &checkpoint,
+            )
+            .unwrap();
+
+        // Simulate recovery
+        let new_key = generate_identity_keypair();
+        let new_pk_hex = hex::encode(new_key.public_key.serialize());
+        let prev_hash = initial_event.signed_event_hash().unwrap();
+        let now_ts = chrono::Utc::now().timestamp();
+
+        let sig1 = sign_guardian_authorization(
+            &id_hash,
+            &pubkey_hex,
+            &new_pk_hex,
+            &prev_hash,
+            1,
+            now_ts,
+            &g1.secret_key,
+        );
+        let sig2 = sign_guardian_authorization(
+            &id_hash,
+            &pubkey_hex,
+            &new_pk_hex,
+            &prev_hash,
+            1,
+            now_ts,
+            &g2.secret_key,
+        );
+
+        let mut proof = KeyRecoveryProof::create(
+            id_hash,
+            pubkey_hex,
+            new_pk_hex.clone(),
+            &new_key.secret_key,
+            prev_hash,
+            1,
+            vec![sig1, sig2],
+        )
+        .unwrap();
+        proof.recovered_at = now_ts;
+        let accept_msg = recovery_message(
+            RECOVERY_ACCEPTANCE_DOMAIN,
+            &proof.identifier_hash,
+            &proof.previous_pubkey,
+            &proof.new_pubkey,
+            &proof.previous_event_hash,
+            proof.sequence,
+            proof.recovered_at,
+        );
+        proof.acceptance_signature = sign_message(&accept_msg, &new_key.secret_key);
+
+        let mut recovered_profile = signed_initial.profile.clone();
+        recovered_profile.identity_pubkey = new_pk_hex.clone();
+        recovered_profile.sequence = Some(1);
+        recovered_profile.recovery = Some(proof.clone());
+        let signed_recovered = sign_profile(recovered_profile, &new_key.secret_key).unwrap();
+
+        let state = test_state(dir.path());
+        let request = crate::types::ProfileRecoverRequest {
+            alias: "alice@example.com".into(),
+            proof,
+            signed_profile: signed_recovered,
+        };
+        let response = recover_profile_key(&state, request).unwrap();
+        assert_eq!(response.alias, "alice@example.com");
+        assert_eq!(response.sequence, 1);
+
+        let updated_store = TransactionalTransparencyStore::open(dir.path()).unwrap();
+        let current_profile = updated_store.profile("alice@example.com").unwrap().unwrap();
+        assert_eq!(current_profile.profile.identity_pubkey, new_pk_hex);
+        assert_eq!(current_profile.profile.sequence, Some(1));
     }
 
     #[test]

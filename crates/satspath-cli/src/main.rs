@@ -235,6 +235,8 @@ enum WalletCommand {
     Init,
     /// Rotate the identity key and issue a KeyRotation proof
     Rotate,
+    /// Recover lost identity key via deterministic seed derivation or guardian threshold proof
+    Recover(WalletRecoverArgs),
     /// Set the alias + public receive methods, then sign and save the profile
     AddMethods(WalletAddMethodsArgs),
     /// Add/replace the Lightning Address (re-signs the profile)
@@ -278,6 +280,22 @@ struct WalletAddMethodsArgs {
     ark_server: Option<String>,
     #[arg(long)]
     ark_pubkey: Option<String>,
+}
+
+#[derive(Args)]
+struct WalletRecoverArgs {
+    /// Alias to recover (e.g. alice@example.com)
+    #[arg(long)]
+    alias: Option<String>,
+    /// Hex-encoded seed for deterministic identity derivation
+    #[arg(long)]
+    seed_hex: Option<String>,
+    /// Account index for deterministic derivation (default 0)
+    #[arg(long, default_value_t = 0)]
+    account_index: u32,
+    /// Path to JSON file containing KeyRecoveryProof
+    #[arg(long)]
+    proof_file: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -611,6 +629,12 @@ async fn main() -> Result<()> {
             }
             WalletCommand::Show { debug } => commands::cmd_wallet_show(debug)?,
             WalletCommand::Publish { alias } => commands::cmd_wallet_publish(alias.as_deref())?,
+            WalletCommand::Recover(args) => commands::cmd_wallet_recover(
+                args.alias.as_deref(),
+                args.seed_hex.as_deref(),
+                args.account_index,
+                args.proof_file.as_deref(),
+            )?,
             WalletCommand::Receive {
                 alias,
                 amount_sats,

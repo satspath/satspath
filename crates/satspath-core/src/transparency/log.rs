@@ -28,6 +28,8 @@ pub struct TransparencyStatus {
     pub latest_checkpoint_hash: Option<String>,
     pub registered_identifiers: u64,
     pub key_rotations: u64,
+    #[serde(default)]
+    pub key_recoveries: u64,
     pub revocations: u64,
     pub map_root: Option<String>,
     pub consistency_status: ConsistencyStatus,
@@ -393,6 +395,11 @@ impl TransparencyLog {
                 .events
                 .iter()
                 .filter(|e| e.action == NameAction::RotateKey)
+                .count() as u64,
+            key_recoveries: self
+                .events
+                .iter()
+                .filter(|e| e.action == NameAction::RecoverKey)
                 .count() as u64,
             revocations: self
                 .events

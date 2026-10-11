@@ -131,6 +131,23 @@ pub(crate) struct KeyRotationResponse {
     pub(crate) checkpoint_hash: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProfileRecoverRequest {
+    pub(crate) alias: String,
+    pub(crate) proof: satspath_core::recovery::KeyRecoveryProof,
+    pub(crate) signed_profile: satspath_core::SignedPaymentProfile,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct KeyRecoveryResponse {
+    pub(crate) alias: String,
+    pub(crate) sequence: u64,
+    pub(crate) previous_fingerprint: String,
+    pub(crate) new_fingerprint: String,
+    pub(crate) event_hash: String,
+    pub(crate) checkpoint_hash: String,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct ReceiveView {
     /// Masked alias, e.g. `r***@gmail.com` -- the raw identifier is never exposed.

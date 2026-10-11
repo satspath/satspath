@@ -135,6 +135,8 @@ pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Resu
             identifier_attestation_hash: None,
             removed_method_hashes: vec![],
             rotation: signed.profile.rotation.clone(),
+            recovery_policy: signed.profile.recovery_policy.clone(),
+            recovery: signed.profile.recovery.clone(),
             owner_signature: signed.signature.clone(),
         };
 

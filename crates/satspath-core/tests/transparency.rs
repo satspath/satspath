@@ -32,6 +32,8 @@ fn profile(
             hybrid_pubkey: None,
             pqc_required: false,
             revoked: false,
+            recovery_policy: None,
+            recovery: None,
         },
         &key.secret_key,
     )
@@ -57,6 +59,8 @@ fn event(
         identifier_attestation_hash: None,
         removed_method_hashes: Vec::new(),
         rotation: signed.profile.rotation.clone(),
+        recovery_policy: signed.profile.recovery_policy.clone(),
+        recovery: signed.profile.recovery.clone(),
         owner_signature: String::new(),
     };
     event.sign(signer).unwrap();
@@ -283,4 +287,134 @@ fn recovery_is_disabled_and_updates_after_revocation_fail() {
         verify_identifier_history(&[register, revoke, update]).unwrap_err(),
         SatsPathError::Transparency(TransparencyError::IdentifierRevoked)
     ));
+}
+
+#[test]
+fn recovery_without_policy_fails_with_recovery_disabled() {
+    let key = generate_identity_keypair();
+    let signed = profile("alice@example.com", &key, 0);
+    let register = event(&signed, NameAction::Register, 0, None, &key.secret_key);
+
+    let new_key = generate_identity_keypair();
+    let mut recover_event = event(
+        &signed,
+        NameAction::RecoverKey,
+        1,
+        Some(register.event_hash().unwrap()),
+        &new_key.secret_key,
+    );
+    recover_event.identity_pubkey = hex::encode(new_key.public_key.serialize());
+
+    assert!(matches!(
+        verify_identifier_history(&[register, recover_event]).unwrap_err(),
+        SatsPathError::Transparency(TransparencyError::RecoveryDisabled)
+    ));
+}
+
+#[test]
+fn recovery_with_valid_policy_and_proof_succeeds() {
+    use satspath_core::recovery::{
+        recovery_message, sign_guardian_authorization, KeyRecoveryProof, RecoveryPolicy,
+        RECOVERY_ACCEPTANCE_DOMAIN,
+    };
+
+    let key = generate_identity_keypair();
+    let g1 = generate_identity_keypair();
+    let g2 = generate_identity_keypair();
+
+    let policy = RecoveryPolicy::new(
+        2,
+        vec![
+            hex::encode(g1.public_key.serialize()),
+            hex::encode(g2.public_key.serialize()),
+        ],
+    )
+    .unwrap();
+
+    let mut reg_profile = profile("alice@example.com", &key, 0);
+    reg_profile.profile.recovery_policy = Some(policy.clone());
+    let signed_reg = sign_profile(reg_profile.profile, &key.secret_key).unwrap();
+
+    let mut register = event(&signed_reg, NameAction::Register, 0, None, &key.secret_key);
+    register.recovery_policy = Some(policy.clone());
+    register.sign(&key.secret_key).unwrap();
+
+    let new_key = generate_identity_keypair();
+    let id_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+    let prev_pk = hex::encode(key.public_key.serialize());
+    let new_pk = hex::encode(new_key.public_key.serialize());
+    let prev_event_hash = register.event_hash().unwrap();
+    let now_ts = 1_700_000_100;
+
+    let s1 = sign_guardian_authorization(
+        &id_hash,
+        &prev_pk,
+        &new_pk,
+        &prev_event_hash,
+        1,
+        now_ts,
+        &g1.secret_key,
+    );
+    let s2 = sign_guardian_authorization(
+        &id_hash,
+        &prev_pk,
+        &new_pk,
+        &prev_event_hash,
+        1,
+        now_ts,
+        &g2.secret_key,
+    );
+
+    let mut proof = KeyRecoveryProof::create(
+        id_hash.clone(),
+        prev_pk.clone(),
+        new_pk.clone(),
+        &new_key.secret_key,
+        prev_event_hash.clone(),
+        1,
+        vec![s1, s2],
+    )
+    .unwrap();
+    proof.recovered_at = now_ts;
+    let accept_msg = recovery_message(
+        RECOVERY_ACCEPTANCE_DOMAIN,
+        &proof.identifier_hash,
+        &proof.previous_pubkey,
+        &proof.new_pubkey,
+        &proof.previous_event_hash,
+        proof.sequence,
+        proof.recovered_at,
+    );
+    proof.acceptance_signature =
+        satspath_core::crypto::sign_message(&accept_msg, &new_key.secret_key);
+
+    let mut rec_profile = profile("alice@example.com", &new_key, 1);
+    rec_profile.profile.identity_pubkey = new_pk.clone();
+    rec_profile.profile.recovery = Some(proof.clone());
+    rec_profile.profile.recovery_policy = Some(policy.clone());
+    let signed_rec = sign_profile(rec_profile.profile, &new_key.secret_key).unwrap();
+
+    let rec_event = NameEvent {
+        version: 1,
+        identifier_hash: id_hash,
+        action: NameAction::RecoverKey,
+        identity_pubkey: new_pk,
+        profile_hash: profile_hash(&signed_rec).unwrap(),
+        sequence: 1,
+        previous_event_hash: Some(prev_event_hash),
+        created_at: now_ts,
+        identifier_attestation_hash: None,
+        removed_method_hashes: Vec::new(),
+        rotation: None,
+        recovery_policy: Some(policy),
+        recovery: Some(proof.clone()),
+        owner_signature: proof.acceptance_signature,
+    };
+
+    assert!(verify_identifier_history(&[register.clone(), rec_event.clone()]).is_ok());
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = TransparencyLog::open(dir.path()).unwrap();
+    log.append(register, &signed_reg).unwrap();
+    assert!(log.append(rec_event, &signed_rec).is_ok());
 }
