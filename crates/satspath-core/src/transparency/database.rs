@@ -492,16 +492,13 @@ fn upsert_anchor(
     transaction: &rusqlite::Transaction,
     anchor: Option<&super::BitcoinAnchor>,
 ) -> Result<()> {
+    let Some(anchor) = anchor else {
+        return Ok(());
+    };
     transaction
         .execute(
             "INSERT OR REPLACE INTO anchors(txid,anchor_json) VALUES (?1,?2)",
-            params![
-                anchor.map(|a| a.txid.as_str()).unwrap_or(""),
-                anchor
-                    .map(serde_json::to_string)
-                    .transpose()?
-                    .unwrap_or_default()
-            ],
+            params![anchor.txid.as_str(), serde_json::to_string(anchor)?],
         )
         .map_err(db_error)?;
     Ok(())
