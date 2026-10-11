@@ -27,7 +27,7 @@ Candidate scalar = first 32 bytes (must be valid secp256k1 scalar)
 
 **Key Isolation Invariant:** This derivation is strictly isolated from Bitcoin spending keys (e.g., `m/84'/0'/0'` or `m/86'/0'/0'`). The identity key is purely a `secp256k1` Schnorr identity signing key; it never signs transactions, touches UTXOs, or exposes wallet funds. Within `derive_identity_key_from_seed`, derived HMAC output and candidate scalar buffers are explicitly zeroized immediately after use.
 
-**Non-Custodial CLI Boundary:** SatsPath is a universal payment discovery router and never prompts for or manages seed phrases or spending keys in its user interface. The `derive_identity_key_from_seed` HMAC primitive remains available in `satspath-core` for offline or external tooling, but CLI recovery is performed via sovereign, pre-committed guardian threshold proofs ([`KeyRecoveryProof`](file:///home/chelo/antigravity/PlanB/satspath-issue97-recovery/crates/satspath-core/src/recovery.rs)).
+**Non-Custodial CLI Boundary:** SatsPath is a universal payment discovery router and never prompts for or manages seed phrases or spending keys in its user interface. The `derive_identity_key_from_seed` HMAC primitive remains available in `satspath-core` for offline or external tooling, but CLI recovery is performed via sovereign, pre-committed guardian threshold proofs ([`KeyRecoveryProof`](../crates/satspath-core/src/recovery.rs)).
 
 ### 2. M-of-N Threshold Guardian Recovery (Social / Multi-Device Recovery)
 
