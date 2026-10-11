@@ -116,6 +116,18 @@ impl RegtestAnchorClient {
         Ok(value["result"].clone())
     }
 
+    /// Bitcoin Core only serves confirmed non-mempool transactions via
+    /// `getrawtransaction` when `-txindex` is enabled and synced.
+    pub async fn ensure_txindex(&self) -> crate::Result<()> {
+        let info = self.rpc("getindexinfo", json!(["txindex"])).await?;
+        if info["txindex"]["synced"].as_bool() != Some(true) {
+            return Err(crate::SatsPathError::ValidationError(
+                "Catena anchoring requires a synced Bitcoin Core -txindex".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Create, fund, sign, broadcast and mine a legacy standalone OP_RETURN commitment.
     pub async fn anchor_checkpoint(&self, checkpoint_hash: &str) -> crate::Result<BitcoinAnchor> {
         let commitment = anchor_commitment(checkpoint_hash)
@@ -165,6 +177,7 @@ impl RegtestAnchorClient {
     where
         F: FnOnce(&BitcoinAnchor) -> crate::Result<()>,
     {
+        self.ensure_txindex().await?;
         let commitment = catena_commitment(checkpoint_hash, 0)
             .map_err(|e| crate::SatsPathError::SerializationError(e.to_string()))?;
         let continuation_addr = self
@@ -425,6 +438,7 @@ impl RegtestAnchorClient {
     where
         F: FnOnce(&BitcoinAnchor) -> crate::Result<()>,
     {
+        self.ensure_txindex().await?;
         let (signed_hex, pre_anchor) = self
             .create_signed_catena_next(checkpoint_hash, prev_anchor)
             .await?;
@@ -473,6 +487,7 @@ impl RegtestAnchorClient {
         trusted_index: u64,
         max_hops: usize,
     ) -> crate::Result<Vec<BitcoinAnchor>> {
+        self.ensure_txindex().await?;
         if trusted_vout != super::catena::CATENA_CONTINUATION_VOUT {
             return Err(crate::SatsPathError::ValidationError(format!(
                 "trusted_vout is {trusted_vout}, expected fixed index {}",

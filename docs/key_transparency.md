@@ -101,7 +101,7 @@ sequenceDiagram
   Daemon->>Daemon: verify commitment, continuation linkage & store anchor
 ```
 
-Anchoring is never automatic. Authenticated `POST /v1/transparency/anchors` requires `SATSPATH_BITCOIN_NETWORK=regtest` plus `SATSPATH_BITCOIN_RPC_URL`, `SATSPATH_BITCOIN_RPC_USER` and `SATSPATH_BITCOIN_RPC_PASSWORD`. Mainnet is rejected and credentials are never logged. SatsPath implements Catena-style UTXO chaining (`POST /v1/transparency/anchors`, `GET /v1/transparency/catena/chain`), where anchor transaction $Tx_N$ spends the 1,000-sat continuation UTXO of $Tx_{N-1}$ and emits a domain-separated `OP_RETURN` commitment (`SatsPathCatenaAnchorV1`).
+Anchoring is never automatic. Authenticated `POST /v1/transparency/anchors` requires `SATSPATH_BITCOIN_NETWORK=regtest` plus `SATSPATH_BITCOIN_RPC_URL`, `SATSPATH_BITCOIN_RPC_USER` and `SATSPATH_BITCOIN_RPC_PASSWORD`. The Bitcoin Core node must have `-txindex=1` enabled and synced to serve confirmed non-mempool transactions via `getrawtransaction`. Mainnet is rejected and credentials are never logged. SatsPath implements Catena-style UTXO chaining (`POST /v1/transparency/anchors`, `GET /v1/transparency/catena/chain`), where anchor transaction $Tx_N$ spends the 1,000-sat continuation UTXO of $Tx_{N-1}$ and emits a domain-separated `OP_RETURN` commitment (`SatsPathCatenaAnchorV1`).
 
 ## Explorer data flow
 
