@@ -412,6 +412,11 @@ pub fn cmd_wallet_rotate() -> Result<()> {
     Ok(())
 }
 
+/// Best-effort in-place memory erasure guard for secp256k1 secret keys on drop.
+///
+/// Note: secp256k1::SecretKey implements Copy and non_secure_erase is best-effort.
+/// This guard performs in-place erasure on its own wrapped key storage, but does not
+/// provide compiler-barrier zeroization guarantees against transient register or stack copies.
 struct SecretGuard(Option<secp256k1::SecretKey>);
 impl SecretGuard {
     fn new(sk: secp256k1::SecretKey) -> Self {

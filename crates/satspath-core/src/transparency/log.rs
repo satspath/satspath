@@ -74,6 +74,8 @@ impl TransparencyLog {
             || event.profile_hash != profile_hash(profile)?
             || profile.profile.sequence != Some(event.sequence)
             || event.identity_pubkey != profile.profile.identity_pubkey
+            || event.recovery_policy != profile.profile.recovery_policy
+            || event.recovery != profile.profile.recovery
             || !crate::crypto::verify_signed_profile(profile)?
         {
             return Err(TransparencyError::ProfileHashMismatch.into());
