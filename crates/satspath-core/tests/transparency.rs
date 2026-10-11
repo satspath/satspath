@@ -481,3 +481,180 @@ fn recovery_cannot_supply_its_own_policy_if_none_was_precommitted() {
         SatsPathError::Transparency(TransparencyError::RecoveryDisabled)
     ));
 }
+
+#[test]
+fn recovery_event_rejects_key_rotation_proof() {
+    use satspath_core::recovery::{sign_guardian_authorization, KeyRecoveryProof, RecoveryPolicy};
+
+    let key = generate_identity_keypair();
+    let g1 = generate_identity_keypair();
+    let policy = RecoveryPolicy::new(1, vec![hex::encode(g1.public_key.serialize())]).unwrap();
+
+    let mut reg_profile = profile("alice@example.com", &key, 0);
+    reg_profile.profile.recovery_policy = Some(policy.clone());
+    let signed_reg = sign_profile(reg_profile.profile, &key.secret_key).unwrap();
+    let mut register = event(&signed_reg, NameAction::Register, 0, None, &key.secret_key);
+    register.recovery_policy = Some(policy.clone());
+    register.sign(&key.secret_key).unwrap();
+
+    let new_key = generate_identity_keypair();
+    let id_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+    let prev_pk = hex::encode(key.public_key.serialize());
+    let new_pk = hex::encode(new_key.public_key.serialize());
+    let prev_event_hash = register.event_hash().unwrap();
+    let now_ts = 1_700_000_100;
+
+    let s1 = sign_guardian_authorization(
+        &id_hash,
+        &prev_pk,
+        &new_pk,
+        &prev_event_hash,
+        1,
+        now_ts,
+        &g1.secret_key,
+    );
+    let proof = KeyRecoveryProof::create(
+        id_hash.clone(),
+        prev_pk.clone(),
+        new_pk.clone(),
+        &new_key.secret_key,
+        prev_event_hash.clone(),
+        1,
+        now_ts,
+        vec![s1],
+    )
+    .unwrap();
+
+    let rotation = KeyRotation::create(
+        id_hash.clone(),
+        prev_pk.clone(),
+        &key.secret_key,
+        new_pk.clone(),
+        &new_key.secret_key,
+        prev_event_hash.clone(),
+        1,
+    )
+    .unwrap();
+
+    let mut rec_profile = profile("alice@example.com", &new_key, 1);
+    rec_profile.profile.identity_pubkey = new_pk.clone();
+    rec_profile.profile.recovery = Some(proof.clone());
+    rec_profile.profile.rotation = Some(rotation.clone());
+    rec_profile.profile.recovery_policy = Some(policy.clone());
+    let signed_rec = sign_profile(rec_profile.profile, &new_key.secret_key).unwrap();
+
+    let mut rec_event = NameEvent {
+        version: 1,
+        identifier_hash: id_hash,
+        action: NameAction::RecoverKey,
+        identity_pubkey: new_pk,
+        profile_hash: profile_hash(&signed_rec).unwrap(),
+        sequence: 1,
+        previous_event_hash: Some(prev_event_hash),
+        created_at: now_ts,
+        identifier_attestation_hash: None,
+        removed_method_hashes: Vec::new(),
+        rotation: Some(rotation),
+        recovery_policy: Some(policy),
+        recovery: Some(proof),
+        owner_signature: String::new(),
+    };
+    rec_event.sign(&new_key.secret_key).unwrap();
+
+    assert!(matches!(
+        verify_identifier_history(&[register.clone(), rec_event.clone()]).unwrap_err(),
+        SatsPathError::Transparency(TransparencyError::InvalidRecovery(_))
+    ));
+
+    assert!(matches!(
+        verify_event_transition(Some(&register), &rec_event).unwrap_err(),
+        SatsPathError::Transparency(TransparencyError::InvalidRecovery(_))
+    ));
+}
+
+#[test]
+fn non_recovery_event_rejects_recovery_proof() {
+    use satspath_core::recovery::{sign_guardian_authorization, KeyRecoveryProof, RecoveryPolicy};
+
+    let key = generate_identity_keypair();
+    let g1 = generate_identity_keypair();
+    let policy = RecoveryPolicy::new(1, vec![hex::encode(g1.public_key.serialize())]).unwrap();
+
+    let id_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+    let pk = hex::encode(key.public_key.serialize());
+    let s1 = sign_guardian_authorization(
+        &id_hash,
+        &pk,
+        &pk,
+        "00".repeat(32).as_str(),
+        0,
+        1_700_000_000,
+        &g1.secret_key,
+    );
+    let proof = KeyRecoveryProof::create(
+        id_hash.clone(),
+        pk.clone(),
+        pk.clone(),
+        &key.secret_key,
+        "00".repeat(32),
+        0,
+        1_700_000_000,
+        vec![s1],
+    )
+    .unwrap();
+
+    let mut reg_profile = profile("alice@example.com", &key, 0);
+    reg_profile.profile.recovery = Some(proof.clone());
+    reg_profile.profile.recovery_policy = Some(policy);
+    let signed_reg = sign_profile(reg_profile.profile, &key.secret_key).unwrap();
+
+    let mut register = event(&signed_reg, NameAction::Register, 0, None, &key.secret_key);
+    register.recovery = Some(proof);
+    register.sign(&key.secret_key).unwrap();
+
+    assert!(matches!(
+        verify_identifier_history(&[register.clone()]).unwrap_err(),
+        SatsPathError::Transparency(TransparencyError::InvalidRecovery(_))
+    ));
+
+    assert!(matches!(
+        verify_event_transition(None, &register).unwrap_err(),
+        SatsPathError::Transparency(TransparencyError::InvalidRecovery(_))
+    ));
+}
+
+#[test]
+fn non_rotation_event_rejects_rotation_proof() {
+    let key = generate_identity_keypair();
+    let id_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+    let pk = hex::encode(key.public_key.serialize());
+
+    let rotation = KeyRotation::create(
+        id_hash,
+        pk.clone(),
+        &key.secret_key,
+        pk,
+        &key.secret_key,
+        "00".repeat(32),
+        0,
+    )
+    .unwrap();
+
+    let mut reg_profile = profile("alice@example.com", &key, 0);
+    reg_profile.profile.rotation = Some(rotation.clone());
+    let signed_reg = sign_profile(reg_profile.profile, &key.secret_key).unwrap();
+
+    let mut register = event(&signed_reg, NameAction::Register, 0, None, &key.secret_key);
+    register.rotation = Some(rotation);
+    register.sign(&key.secret_key).unwrap();
+
+    assert!(matches!(
+        verify_identifier_history(&[register.clone()]).unwrap_err(),
+        SatsPathError::Transparency(TransparencyError::InvalidRotation(_))
+    ));
+
+    assert!(matches!(
+        verify_event_transition(None, &register).unwrap_err(),
+        SatsPathError::Transparency(TransparencyError::InvalidRotation(_))
+    ));
+}

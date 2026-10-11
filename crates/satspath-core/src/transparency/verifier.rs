@@ -217,6 +217,24 @@ pub fn verify_identifier_history(events: &[NameEvent]) -> Result<()> {
         if revoked {
             return Err(TransparencyError::IdentifierRevoked.into());
         }
+        if event.action == NameAction::RecoverKey && event.rotation.is_some() {
+            return Err(TransparencyError::InvalidRecovery(
+                "recovery event must not contain a key rotation".into(),
+            )
+            .into());
+        }
+        if event.action != NameAction::RecoverKey && event.recovery.is_some() {
+            return Err(TransparencyError::InvalidRecovery(
+                "recovery proof is only permitted on RecoverKey events".into(),
+            )
+            .into());
+        }
+        if event.action != NameAction::RotateKey && event.rotation.is_some() {
+            return Err(TransparencyError::InvalidRotation(
+                "rotation proof is only permitted on RotateKey events".into(),
+            )
+            .into());
+        }
         let signing_key = if event.action == NameAction::RecoverKey {
             let policy = active_recovery_policy
                 .as_ref()
@@ -299,6 +317,25 @@ pub fn verify_event_transition_with_policy(
     proposed: &NameEvent,
     active_recovery_policy: Option<&crate::recovery::RecoveryPolicy>,
 ) -> Result<()> {
+    if proposed.action == NameAction::RecoverKey && proposed.rotation.is_some() {
+        return Err(TransparencyError::InvalidRecovery(
+            "recovery event must not contain a key rotation".into(),
+        )
+        .into());
+    }
+    if proposed.action != NameAction::RecoverKey && proposed.recovery.is_some() {
+        return Err(TransparencyError::InvalidRecovery(
+            "recovery proof is only permitted on RecoverKey events".into(),
+        )
+        .into());
+    }
+    if proposed.action != NameAction::RotateKey && proposed.rotation.is_some() {
+        return Err(TransparencyError::InvalidRotation(
+            "rotation proof is only permitted on RotateKey events".into(),
+        )
+        .into());
+    }
+
     match head {
         None => {
             if proposed.action != NameAction::Register || proposed.sequence != 0 {

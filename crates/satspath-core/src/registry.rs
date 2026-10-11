@@ -86,6 +86,18 @@ impl Registry {
         signed: SignedPaymentProfile,
     ) -> Result<()> {
         Self::validate_profile_write(requested_alias, &signed)?;
+        if signed.profile.recovery.is_some() {
+            return Err(SatsPathError::Transparency(
+                crate::transparency::TransparencyError::InvalidRecovery(
+                    "recovery proof is only permitted on key updates".into(),
+                ),
+            ));
+        }
+        if signed.profile.rotation.is_some() {
+            return Err(SatsPathError::InvalidRotation(
+                "rotation proof is only permitted on key updates".into(),
+            ));
+        }
         let alias = canonical_identifier(&signed.profile.alias);
         let key = identifier_hash(&alias);
         if self.data.profiles.contains_key(&key) || self.data.profiles.contains_key(&alias) {
@@ -120,6 +132,13 @@ impl Registry {
         {
             if signed.profile.identity_pubkey != existing.profile.identity_pubkey {
                 if let Some(recovery) = &signed.profile.recovery {
+                    if signed.profile.rotation.is_some() {
+                        return Err(SatsPathError::Transparency(
+                            crate::transparency::TransparencyError::InvalidRecovery(
+                                "recovery profile must not contain a key rotation".into(),
+                            ),
+                        ));
+                    }
                     let policy = existing.profile.recovery_policy.as_ref().ok_or(
                         SatsPathError::Transparency(
                             crate::transparency::TransparencyError::RecoveryDisabled,
@@ -141,6 +160,11 @@ impl Registry {
                         ));
                     }
                 } else if let Some(rotation) = &signed.profile.rotation {
+                    if signed.profile.recovery.is_some() {
+                        return Err(SatsPathError::InvalidRotation(
+                            "rotation profile must not contain a key recovery".into(),
+                        ));
+                    }
                     if rotation.previous_pubkey != existing.profile.identity_pubkey
                         || rotation.new_pubkey != signed.profile.identity_pubkey
                         || rotation.identifier_hash != identifier_hash(&alias)
@@ -193,6 +217,19 @@ impl Registry {
                 // Reject removing sequence once it's been added
                 return Err(SatsPathError::RegistryError(
                     "Update rejected: cannot remove sequence number once added".into(),
+                ));
+            }
+        } else {
+            if signed.profile.recovery.is_some() {
+                return Err(SatsPathError::Transparency(
+                    crate::transparency::TransparencyError::InvalidRecovery(
+                        "recovery proof is only permitted on key updates".into(),
+                    ),
+                ));
+            }
+            if signed.profile.rotation.is_some() {
+                return Err(SatsPathError::InvalidRotation(
+                    "rotation proof is only permitted on key updates".into(),
                 ));
             }
         }
