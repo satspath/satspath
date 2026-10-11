@@ -431,7 +431,11 @@ fn write_checkpoints(dir: &std::path::Path, checkpoints: &[satspath_core::Transp
 fn tampered_checkpoint_signature_fails_on_open() {
     let dir = tempfile::tempdir().unwrap();
     let (_, mut checkpoints) = two_checkpoint_log(dir.path());
-    checkpoints[1].operator_signature.replace_range(0..2, "00");
+    let first_two = &checkpoints[1].operator_signature[0..2];
+    let new_prefix = if first_two == "00" { "ff" } else { "00" };
+    checkpoints[1]
+        .operator_signature
+        .replace_range(0..2, new_prefix);
     write_checkpoints(dir.path(), &checkpoints);
     assert!(TransparencyLog::open(dir.path()).is_err());
 }
