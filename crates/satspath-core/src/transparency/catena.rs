@@ -61,10 +61,14 @@ pub fn catena_commitment(
 /// Maximum number of hops allowed when traversing or verifying a Catena chain backwards.
 pub const MAX_CATENA_HOPS: usize = 1000;
 
-/// Pure in-memory verification of an ordered list of `BitcoinAnchor`s forming a Catena chain.
+/// Pure in-memory structural consistency verification of an ordered list of `BitcoinAnchor`s.
+///
+/// NOTE: This function checks structural linkage between anchor records without querying
+/// a live Bitcoin node. Full blockchain-backed verification requires
+/// `RegtestAnchorClient::verify_catena_chain` (or querying Bitcoin Core RPC).
 ///
 /// Ensures:
-/// 1. The chain is non-empty.
+/// 1. The chain is non-empty and bounded by `MAX_CATENA_HOPS`.
 /// 2. The first anchor is a valid genesis anchor (`chain_index == 0`, `prev_txid == None`, valid `continuation_vout`).
 /// 3. For each consecutive pair `(A_{i-1}, A_i)`:
 ///    - `A_i.chain_index == A_{i-1}.chain_index + 1`

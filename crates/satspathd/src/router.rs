@@ -336,7 +336,13 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
             match read_json::<CatenaVerifyRequest>(&mut request).and_then(|body| {
                 satspath_core::transparency::verify_catena_links(&body.anchors).map_err(Into::into)
             }) {
-                Ok(valid) => json_response(StatusCode(200), &serde_json::json!({"valid": valid})),
+                Ok(structurally_consistent) => json_response(
+                    StatusCode(200),
+                    &serde_json::json!({
+                        "valid": structurally_consistent,
+                        "structurally_consistent": structurally_consistent
+                    }),
+                ),
                 Err(e) => json_error(StatusCode(400), e),
             }
         }

@@ -329,16 +329,13 @@ impl RegtestAnchorClient {
                 .and_then(|vouts| {
                     vouts.iter().find_map(|vout| {
                         let hex = vout["scriptPubKey"]["hex"].as_str()?;
-                        if let Some(stripped) = hex.strip_prefix("6a20") {
-                            Some(stripped.to_string())
-                        } else {
-                            hex.strip_prefix("6a").map(|stripped| stripped.to_string())
-                        }
+                        let stripped = hex.strip_prefix("6a20")?;
+                        (stripped.len() == 64).then(|| stripped.to_string())
                     })
                 })
                 .ok_or_else(|| {
                     crate::SatsPathError::ValidationError(format!(
-                        "missing OP_RETURN in tx {curr_txid}"
+                        "missing valid Catena OP_RETURN commitment (6a20 + 32-byte hash) in tx {curr_txid}"
                     ))
                 })?;
 
@@ -384,18 +381,18 @@ impl RegtestAnchorClient {
                 .rpc("getrawtransaction", json!([vin_txid, true]))
                 .await?;
 
-            // Verify parent transaction contains a Catena OP_RETURN output
+            // Verify parent transaction contains a valid Catena OP_RETURN output (6a20 + 32-byte hash)
             let parent_has_op_return = parent_tx["vout"].as_array().is_some_and(|outputs| {
                 outputs.iter().any(|out| {
                     out["scriptPubKey"]["hex"]
                         .as_str()
-                        .map(|h| h.starts_with("6a"))
+                        .map(|h| h.starts_with("6a20") && h.len() == 68)
                         .unwrap_or(false)
                 })
             });
             if !parent_has_op_return {
                 return Err(crate::SatsPathError::ValidationError(format!(
-                    "Parent tx {vin_txid} does not contain an OP_RETURN output"
+                    "Parent tx {vin_txid} does not contain a valid Catena OP_RETURN output (6a20 + 32-byte hash)"
                 )));
             }
 
