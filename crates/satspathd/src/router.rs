@@ -356,6 +356,7 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
             match read_json::<ProfileRecoverRequest>(&mut request) {
                 Ok(body) => {
                     let precheck = || -> Result<()> {
+                        crate::handlers::profile::validate_recovery_request_shape(&body)?;
                         let alias = satspath_core::privacy::canonical_identifier(&body.alias);
                         let store = satspath_core::TransactionalTransparencyStore::open_read_only(
                             &state.home,

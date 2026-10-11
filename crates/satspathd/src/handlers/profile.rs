@@ -347,24 +347,17 @@ pub(crate) fn rotate_profile_key(state: &AppState) -> Result<KeyRotationResponse
     })
 }
 
-pub(crate) fn recover_profile_key(
-    state: &AppState,
-    body: ProfileRecoverRequest,
-) -> Result<KeyRecoveryResponse> {
-    use satspath_core::crypto::fingerprint_pubkey;
-    use satspath_core::recovery::verify_key_recovery;
-
-    let alias = body.alias;
-    let proof = body.proof;
-    let signed = body.signed_profile;
-
-    if signed.profile.alias != alias {
+/// Body-only recovery request checks. These need no store access, so they run before
+/// any O(log size) transparency replay on the unauthenticated recovery route.
+pub(crate) fn validate_recovery_request_shape(body: &ProfileRecoverRequest) -> Result<()> {
+    let signed = &body.signed_profile;
+    if signed.profile.alias != body.alias {
         anyhow::bail!("signed profile alias mismatch");
     }
-    if !verify_signed_profile(&signed)? {
+    if !verify_signed_profile(signed)? {
         anyhow::bail!("signed profile signature is invalid");
     }
-    if signed.profile.recovery.as_ref() != Some(&proof) {
+    if signed.profile.recovery.as_ref() != Some(&body.proof) {
         anyhow::bail!("profile recovery object does not match submitted proof");
     }
     if signed.profile.rotation.is_some() {
@@ -374,6 +367,21 @@ pub(crate) fn recover_profile_key(
         anyhow::bail!("recovered profile must carry a recovery_policy; policies cannot be removed");
     }
     satspath_core::validation::validate_public_profile(&signed.profile)?;
+    Ok(())
+}
+
+pub(crate) fn recover_profile_key(
+    state: &AppState,
+    body: ProfileRecoverRequest,
+) -> Result<KeyRecoveryResponse> {
+    use satspath_core::crypto::fingerprint_pubkey;
+    use satspath_core::recovery::verify_key_recovery;
+
+    validate_recovery_request_shape(&body)?;
+
+    let alias = body.alias;
+    let proof = body.proof;
+    let signed = body.signed_profile;
 
     let store = TransactionalTransparencyStore::open(&state.home)?;
     let existing = store

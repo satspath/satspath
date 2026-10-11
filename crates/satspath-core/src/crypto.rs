@@ -398,5 +398,9 @@ mod tests {
 
         // Empty seed rejected
         assert!(derive_identity_key_from_seed(&[], 0).is_err());
+        assert!(derive_identity_key_from_seed(&[0u8; 15], 0).is_err());
+        assert!(derive_identity_key_from_seed(&[0u8; 16], 0).is_ok());
+        assert!(derive_identity_key_from_seed(&[0u8; 64], 0).is_ok());
+        assert!(derive_identity_key_from_seed(&[0u8; 65], 0).is_err());
     }
 }

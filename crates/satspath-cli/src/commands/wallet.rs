@@ -474,16 +474,25 @@ pub fn cmd_alias_recover(alias: Option<&str>, proof_file: &str) -> Result<()> {
 
     // If the new identity key is present in local keystore, sign the profile.
     if let Ok(new_secret) = keystore::load_identity_key(&satspath_dir(), &new_pubkey) {
+        let mut state = load_wallet()?;
+        if let Some(existing_alias) = state.alias.as_deref() {
+            if canonical_identifier(existing_alias) != target_alias {
+                anyhow::bail!(
+                    "wallet is bound to a different alias; refusing to rebind it during recovery; nothing was changed"
+                );
+            }
+        }
         let signed = sign_profile(new_profile, &new_secret)?;
         if !satspath_core::recovery::verify_key_recovery(existing, &signed)? {
             anyhow::bail!("recovery proof is not bound to this identifier, key, or sequence");
         }
         registry.update_profile(signed)?;
-        let mut state = load_wallet()?;
         state.identity_pubkey = Some(new_pubkey.clone());
         state.alias = Some(target_alias.clone());
         state.updated_at = Some(now());
-        save_wallet(&state)?;
+        save_wallet(&state).map_err(|e| {
+            anyhow::anyhow!("recovery committed to registry but wallet update failed: {e}")
+        })?;
         println!("Identity key recovered and signed successfully using guardian threshold proof.");
     } else {
         anyhow::bail!(
