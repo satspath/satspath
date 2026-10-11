@@ -33,7 +33,10 @@ pub struct CatenaChainProof {
     pub verified: bool,
 }
 
-/// Irrefutable cryptographic evidence of an operator split-view or equivocation attempt.
+/// Candidate conflict evidence indicating two conflicting anchor records claim to spend the same continuation UTXO.
+///
+/// NOTE: This proof compares record fields. Full on-chain transaction verification with a Bitcoin node
+/// is required to verify that both conflicting transactions are confirmed on-chain.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CatenaEquivocationProof {
     pub chain_index: u64,
@@ -102,9 +105,9 @@ pub fn verify_catena_links(anchors: &[BitcoinAnchor]) -> Result<bool, Transparen
             "genesis anchor cannot have a predecessor UTXO".into(),
         ));
     }
-    if genesis.continuation_vout.is_none() {
+    if genesis.continuation_vout.is_none() && anchors.len() > 1 {
         return Err(TransparencyError::InvalidCatenaChain(
-            "genesis anchor is missing continuation_vout".into(),
+            "genesis anchor is missing continuation_vout for chained successors".into(),
         ));
     }
     if !genesis.verified || genesis.confirmations == 0 {
@@ -145,7 +148,7 @@ pub fn verify_catena_links(anchors: &[BitcoinAnchor]) -> Result<bool, Transparen
             )));
         }
 
-        if curr.continuation_vout.is_none() {
+        if i + 2 < anchors.len() && curr.continuation_vout.is_none() {
             return Err(TransparencyError::InvalidCatenaChain(format!(
                 "anchor at step {} is missing continuation_vout",
                 i + 1
@@ -196,7 +199,8 @@ pub fn verify_catena_commitments(
     Ok(true)
 }
 
-/// Detect whether two anchors represent an equivocation attack (two conflicting transactions spending the same continuation UTXO).
+/// Detect whether two anchors represent a candidate continuation conflict or equivocation attempt
+/// (two conflicting transactions claiming to spend the same predecessor continuation UTXO).
 pub fn detect_catena_equivocation(
     a1: &BitcoinAnchor,
     a2: &BitcoinAnchor,
@@ -216,7 +220,7 @@ pub fn detect_catena_equivocation(
             first_anchor: a1.clone(),
             second_anchor: a2.clone(),
             evidence: format!(
-                "Double-spend detected on continuation UTXO {p_tx1}:{p_vout1}: tx1={} (commitment={}) vs tx2={} (commitment={})",
+                "Candidate double-spend detected on continuation UTXO {p_tx1}:{p_vout1}: tx1={} (commitment={}) vs tx2={} (commitment={})",
                 a1.txid, a1.commitment, a2.txid, a2.commitment
             ),
         });
@@ -418,7 +422,7 @@ mod tests {
         assert_eq!(proof.chain_index, 1);
         assert_eq!(proof.spent_txid, a0.txid);
         assert_eq!(proof.spent_vout, 1);
-        assert!(proof.evidence.contains("Double-spend detected"));
+        assert!(proof.evidence.contains("Candidate double-spend detected"));
     }
 
     #[test]

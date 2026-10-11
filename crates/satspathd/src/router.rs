@@ -88,6 +88,7 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
         || path == "/v1/claim"
         || path == "/v1/dns/resolve"
         || path == "/v1/transparency/verify/inclusion"
+        || path == "/v1/transparency/verify/catena"
         || path == "/v1/profile/recover"
         || path == "/v2/resolve";
 

@@ -395,26 +395,56 @@ impl RegtestAnchorClient {
                 )));
             }
 
-            let commitment = tx["vout"]
-                .as_array()
-                .and_then(|vouts| {
-                    vouts.iter().find_map(|vout| {
-                        let hex = vout["scriptPubKey"]["hex"].as_str()?;
-                        let stripped = hex.strip_prefix("6a20")?;
-                        (stripped.len() == 64).then(|| stripped.to_string())
-                    })
-                })
-                .ok_or_else(|| {
-                    crate::SatsPathError::ValidationError(format!(
-                        "missing valid Catena OP_RETURN commitment (6a20 + 32-byte hash) in tx {curr_txid}"
-                    ))
-                })?;
+            let vouts = tx["vout"].as_array().ok_or_else(|| {
+                crate::SatsPathError::ValidationError(format!("missing vout in tx {curr_txid}"))
+            })?;
+            let vout_0 = vouts.first().ok_or_else(|| {
+                crate::SatsPathError::ValidationError(format!("empty vout in tx {curr_txid}"))
+            })?;
+            let hex_0 = vout_0["scriptPubKey"]["hex"].as_str().unwrap_or("");
+            let stripped = hex_0.strip_prefix("6a20").ok_or_else(|| {
+                crate::SatsPathError::ValidationError(format!(
+                    "tx {curr_txid} vout[0] is not a Catena OP_RETURN commitment starting with 6a20"
+                ))
+            })?;
+            if stripped.len() != 64 {
+                return Err(crate::SatsPathError::ValidationError(format!(
+                    "tx {curr_txid} vout[0] commitment payload is not 32 bytes (64 hex characters)"
+                )));
+            }
+            let commitment = stripped.to_string();
 
-            let continuation_vout =
-                successor_continuation_vout.or_else(|| find_continuation_vout(&tx));
+            let op_return_count = vouts
+                .iter()
+                .filter(|out| {
+                    out["scriptPubKey"]["hex"]
+                        .as_str()
+                        .map(|h| h.starts_with("6a"))
+                        .unwrap_or(false)
+                })
+                .count();
+            if op_return_count > 1 {
+                return Err(crate::SatsPathError::ValidationError(format!(
+                    "tx {curr_txid} contains multiple OP_RETURN outputs ({op_return_count})"
+                )));
+            }
+
+            let continuation_vout = successor_continuation_vout;
             let block_hash = tx["blockhash"].as_str().map(str::to_owned);
 
             if curr_txid == genesis_txid {
+                let genesis_continuation_vout = continuation_vout.or_else(|| {
+                    if chain.is_empty() {
+                        find_continuation_vout(&tx)
+                    } else {
+                        None
+                    }
+                });
+                if chain.is_empty() && genesis_continuation_vout.is_none() {
+                    return Err(crate::SatsPathError::ValidationError(format!(
+                        "Genesis tx {curr_txid} does not contain a valid 1000-sat continuation UTXO"
+                    )));
+                }
                 chain.push(BitcoinAnchor {
                     network: BitcoinNetwork::Regtest,
                     txid: curr_txid,
@@ -425,7 +455,7 @@ impl RegtestAnchorClient {
                     verified: true,
                     prev_txid: None,
                     prev_vout: None,
-                    continuation_vout,
+                    continuation_vout: genesis_continuation_vout,
                     chain_index: Some(0),
                 });
                 break;

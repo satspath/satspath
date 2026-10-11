@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use satspath_core::{MerkleConsistencyProof, TransactionalTransparencyStore, TransparencyLog};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::AppState;
 use crate::http::write_owner_only_file;
@@ -70,6 +70,12 @@ pub(crate) fn consistency_from_query(
     Ok(transparency_log(state)?.consistency(from, to)?)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingCatenaAnchor {
+    checkpoint_hash: String,
+    anchor: satspath_core::TransparencyBitcoinAnchor,
+}
+
 pub(crate) async fn anchor_latest_checkpoint(
     state: &AppState,
 ) -> Result<satspath_core::TransparencyBitcoinAnchor> {
@@ -85,6 +91,33 @@ pub(crate) async fn anchor_latest_checkpoint(
     }
     let checkpoint_hash = checkpoint.checkpoint_hash()?;
     let client = satspath_core::transparency::RegtestAnchorClient::from_env()?;
+
+    // Crash resilience: check if a pending anchor was broadcast before an uncommitted shutdown
+    let pending_file = state.home.join("catena_pending_anchor.json");
+    if pending_file.exists() {
+        if let Ok(bytes) = fs::read(&pending_file) {
+            if let Ok(pending) = serde_json::from_slice::<PendingCatenaAnchor>(&bytes) {
+                if pending.checkpoint_hash == checkpoint_hash {
+                    if let Ok(verified) = client
+                        .verify_anchor(&pending.anchor.txid, &pending.anchor.commitment)
+                        .await
+                    {
+                        if verified.verified {
+                            let operator = load_or_create_transparency_operator(&state.home)?;
+                            let mut anchored = checkpoint.clone();
+                            anchored.bitcoin_anchor = Some(pending.anchor.clone());
+                            anchored.sign(&operator)?;
+                            let _mutation_guard = state.mutation_lock.lock().await;
+                            TransactionalTransparencyStore::open(&state.home)?
+                                .replace_latest_checkpoint(&checkpoint_hash, &anchored)?;
+                            let _ = fs::remove_file(&pending_file);
+                            return Ok(pending.anchor);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Search for a predecessor anchor that has a continuation output for Catena chaining
     let prev_anchor = log
@@ -103,6 +136,16 @@ pub(crate) async fn anchor_latest_checkpoint(
     if !anchor.verified {
         anyhow::bail!("regtest anchor could not be verified after confirmation");
     }
+
+    // Persist pending record before store commit so crashes can reconcile confirmed anchor
+    let pending = PendingCatenaAnchor {
+        checkpoint_hash: checkpoint_hash.clone(),
+        anchor: anchor.clone(),
+    };
+    if let Ok(data) = serde_json::to_vec(&pending) {
+        let _ = write_owner_only_file(&pending_file, &data);
+    }
+
     let operator = load_or_create_transparency_operator(&state.home)?;
     let mut anchored = checkpoint;
     anchored.bitcoin_anchor = Some(anchor.clone());
@@ -111,6 +154,7 @@ pub(crate) async fn anchor_latest_checkpoint(
     let _mutation_guard = state.mutation_lock.lock().await;
     TransactionalTransparencyStore::open(&state.home)?
         .replace_latest_checkpoint(&checkpoint_hash, &anchored)?;
+    let _ = fs::remove_file(&pending_file);
     Ok(anchor)
 }
 
