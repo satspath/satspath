@@ -395,6 +395,9 @@ pub(crate) fn recover_profile_key(
         }
         client_time
     } else {
+        if body.event_signature.is_some() {
+            anyhow::bail!("event_created_at is required when providing a remote event_signature");
+        }
         current_time
     };
 

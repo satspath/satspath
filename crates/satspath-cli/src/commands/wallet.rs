@@ -20,7 +20,9 @@ use satspath_core::crypto::{
     fingerprint_pubkey, generate_identity_keypair, generate_nonce, sign_profile,
     verify_signed_profile,
 };
-use satspath_core::privacy::{mask_address, mask_identifier, mask_pubkey};
+use satspath_core::privacy::{
+    canonical_identifier, mask_address, mask_identifier, mask_pubkey, validate_ascii_identifier,
+};
 use satspath_core::registry::Registry;
 use satspath_core::validation::{
     assert_no_private_material, validate_bitcoin_address, validate_compressed_pubkey,
@@ -417,7 +419,6 @@ pub fn cmd_wallet_recover(
     account_index: u32,
     proof_file: Option<&str>,
 ) -> Result<()> {
-    ensure_dir()?;
     if seed_hex.is_none() && proof_file.is_none() {
         anyhow::bail!(
             "Sovereign recovery requires either deterministic seed derivation (--seed-hex) \
@@ -425,6 +426,7 @@ pub fn cmd_wallet_recover(
              Email and SMS recovery are strictly rejected in the SatsPath threat model."
         );
     }
+    ensure_dir()?;
 
     if let Some(seed_str) = seed_hex {
         let seed_bytes = zeroize::Zeroizing::new(
@@ -439,9 +441,15 @@ pub fn cmd_wallet_recover(
         let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &derived_secret);
         let pubkey_hex = hex::encode(pubkey.serialize());
 
-        let target_alias = alias
-            .map(str::to_string)
-            .or_else(|| load_wallet().ok().and_then(|w| w.alias));
+        let existing_wallet = load_wallet()?;
+        let mut confirmed = false;
+
+        let target_alias = if let Some(a) = alias {
+            validate_ascii_identifier(a)?;
+            Some(canonical_identifier(a))
+        } else {
+            existing_wallet.alias.clone()
+        };
 
         if let Some(target) = &target_alias {
             let reg = open_registry()?;
@@ -452,6 +460,7 @@ pub fn cmd_wallet_recover(
                             "derived key does not match the registered identity key for '{target}'; nothing was changed"
                         );
                     }
+                    confirmed = true;
                 }
                 Err(satspath_core::SatsPathError::AliasNotFound(_)) => {
                     // Alias not yet in local registry; key derivation can proceed.
@@ -460,13 +469,23 @@ pub fn cmd_wallet_recover(
             }
         }
 
+        if !confirmed {
+            if let Some(current) = &existing_wallet.identity_pubkey {
+                if current != &pubkey_hex {
+                    anyhow::bail!(
+                        "derived key does not match the existing wallet identity and no registered profile confirms it; nothing was changed"
+                    );
+                }
+            }
+        }
+
         keystore::save_identity_key(&satspath_dir(), &derived_secret)?;
 
-        let mut state = load_wallet()?;
+        let mut state = existing_wallet;
         state.identity_pubkey = Some(pubkey_hex.clone());
         state.updated_at = Some(now());
-        if let Some(a) = alias {
-            state.alias = Some(a.to_string());
+        if let Some(a) = target_alias {
+            state.alias = Some(a);
         }
         save_wallet(&state)?;
 
@@ -491,10 +510,15 @@ pub fn cmd_wallet_recover(
             .map_err(|e| anyhow::anyhow!("invalid KeyRecoveryProof JSON: {e}"))?;
 
         let mut registry = open_registry()?;
-        let target_alias = alias
-            .map(str::to_string)
-            .or_else(|| load_wallet().ok().and_then(|w| w.alias))
-            .ok_or_else(|| anyhow::anyhow!("alias must be specified with --alias"))?;
+        let target_alias = if let Some(a) = alias {
+            validate_ascii_identifier(a)?;
+            canonical_identifier(a)
+        } else {
+            load_wallet()
+                .ok()
+                .and_then(|w| w.alias)
+                .ok_or_else(|| anyhow::anyhow!("alias must be specified with --alias"))?
+        };
 
         let existing = registry
             .resolve_alias(&target_alias)
@@ -520,7 +544,11 @@ pub fn cmd_wallet_recover(
         new_profile.identity_pubkey = new_pubkey.clone();
         new_profile.sequence = Some(proof.sequence);
         new_profile.recovery = Some(proof.clone());
-        new_profile.updated_at = now();
+        let t = now();
+        new_profile.updated_at = t;
+        new_profile.expires_at = Some(t + 30 * 24 * 3600);
+        new_profile.nonce = Some(generate_nonce());
+        new_profile.rotation = None;
 
         // If the new identity key is present in local keystore, sign the profile.
         if let Ok(new_secret) = keystore::load_identity_key(&satspath_dir(), &new_pubkey) {

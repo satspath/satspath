@@ -14,9 +14,10 @@ SatsPath adheres to the Bitcoin-grade sovereign security model:
 
 ### 1. Deterministic Seed-Based Derivation (Local Sovereign Recovery)
 
-Users with an existing BIP-39 mnemonic or wallet master seed can deterministically derive their SatsPath identity key:
+Users with a dedicated SatsPath identity seed can deterministically derive their SatsPath identity key. Convert any BIP-39 mnemonic outside SatsPath, and never provide a wallet master seed:
 - **Derivation Algorithm:** HMAC-SHA512
 - **Domain Separator:** `b"SatsPath Identity Key m/9737'/0'"`
+- **Derivation Note:** This is a non-standard flat HMAC namespace, not BIP-32 child-key derivation.
 - **Inputs:** `seed_bytes` (16..=64 bytes per BIP-32 bounds) + `account_index` (big-endian `u32`)
 
 ```text
@@ -24,9 +25,9 @@ HMAC-SHA512(key = "SatsPath Identity Key m/9737'/0'", data = seed || account_ind
 Candidate scalar = first 32 bytes (must be valid secp256k1 scalar)
 ```
 
-**Key Isolation Invariant:** This derivation is strictly isolated from Bitcoin spending keys (e.g., `m/84'/0'/0'` or `m/86'/0'/0'`). The identity key is purely a `secp256k1` Schnorr identity signing key; it never signs transactions, touches UTXOs, or exposes wallet funds. Seed bytes are zeroized immediately upon derivation.
+**Key Isolation Invariant:** This derivation is strictly isolated from Bitcoin spending keys (e.g., `m/84'/0'/0'` or `m/86'/0'/0'`). The identity key is purely a `secp256k1` Schnorr identity signing key; it never signs transactions, touches UTXOs, or exposes wallet funds. The decoded seed buffer is zeroized when the recovery command releases it. Input strings and command-line arguments are not zeroized.
 
-**Seed Derivation Compatibility Boundary:** Deterministic seed recovery applies to identities initialized or derived from a root master seed. Standalone randomly generated identity keypairs created without a seed (e.g. ad-hoc random keys) cannot be reconstructed deterministically; such identities rely on Tier 2 (pre-committed threshold guardian recovery) for recovery.
+**Seed Derivation Compatibility Boundary:** Deterministic seed recovery applies to identities initialized or derived from a root seed. Standalone randomly generated identity keypairs created without a seed (e.g. ad-hoc random keys) cannot be reconstructed deterministically; such identities rely on Tier 2 (pre-committed threshold guardian recovery) for recovery.
 
 ### 2. M-of-N Threshold Guardian Recovery (Social / Multi-Device Recovery)
 
@@ -133,9 +134,12 @@ Payload:
     "recovered_at": 1700000000
   },
   "signed_profile": { ... },
+  "event_created_at": 1700000005,
   "event_signature": "..."
 }
 ```
+
+> **Note on Remote Signing:** When the new private key is held off-daemon (e.g., in a cold signer), `event_signature` MUST be provided alongside `event_created_at`. The daemon enforces that `event_created_at` matches the timestamp covered by the client's signature within a ±300s window of daemon server time; requests omitting `event_created_at` while supplying `event_signature` are rejected immediately.
 
 Response:
 ```json

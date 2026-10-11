@@ -851,7 +851,18 @@ mod tests {
             "expected InvalidEventSignature, got: {err:?}"
         );
 
-        // 2. Submit with matching created_at timestamp -> must succeed
+        // 2. Submit with event_signature but missing event_created_at -> must fail immediately
+        let missing_time_request = crate::types::ProfileRecoverRequest {
+            alias: "bob@example.com".into(),
+            proof: proof.clone(),
+            signed_profile: signed_recovered.clone(),
+            event_created_at: None,
+            event_signature: Some(valid_remote_sig.clone()),
+        };
+        let err = recover_profile_key(&state, missing_time_request).unwrap_err();
+        assert!(err.to_string().contains("event_created_at is required"));
+
+        // 3. Submit with matching created_at timestamp -> must succeed
         let good_request = crate::types::ProfileRecoverRequest {
             alias: "bob@example.com".into(),
             proof,

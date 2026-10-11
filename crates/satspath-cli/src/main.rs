@@ -636,7 +636,7 @@ async fn main() -> Result<()> {
                 let seed_hex = if args.seed_stdin {
                     use std::io::IsTerminal;
                     let input = if std::io::stdin().is_terminal() {
-                        rpassword::prompt_password("Enter master seed hex: ")?
+                        rpassword::prompt_password("Enter dedicated identity seed hex: ")?
                     } else {
                         let mut line = String::new();
                         std::io::stdin().read_line(&mut line)?;
