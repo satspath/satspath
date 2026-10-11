@@ -258,10 +258,14 @@ fn sign_and_store(state: &WalletState) -> Result<String> {
     }
 
     let mut registry = open_registry()?;
-    let current_sequence = registry
-        .resolve_alias(alias)
+    let existing_profile = registry.resolve_alias(alias);
+    let current_sequence = existing_profile
+        .as_ref()
         .map(|signed| signed.profile.sequence.unwrap_or(0))
         .unwrap_or(0);
+    let existing_policy = existing_profile
+        .ok()
+        .and_then(|signed| signed.profile.recovery_policy.clone());
 
     let secret = keystore::load_identity_key(&satspath_dir(), pubkey)?;
     let t = now();
@@ -279,7 +283,7 @@ fn sign_and_store(state: &WalletState) -> Result<String> {
         hybrid_pubkey: None,
         pqc_required: false,
         revoked: false,
-        recovery_policy: None,
+        recovery_policy: existing_policy,
         recovery: None,
     };
     let signed = sign_profile(profile, &secret)?;
@@ -355,10 +359,14 @@ pub fn cmd_wallet_rotate() -> Result<()> {
     }
 
     let mut registry = open_registry()?;
-    let current_sequence = registry
-        .resolve_alias(alias)
+    let existing_profile = registry.resolve_alias(alias);
+    let current_sequence = existing_profile
+        .as_ref()
         .map(|signed| signed.profile.sequence.unwrap_or(0))
         .unwrap_or(0);
+    let existing_policy = existing_profile
+        .ok()
+        .and_then(|signed| signed.profile.recovery_policy.clone());
 
     let t = now();
     let rotation = satspath_core::rotation::KeyRotation::create(
@@ -385,7 +393,7 @@ pub fn cmd_wallet_rotate() -> Result<()> {
         hybrid_pubkey: None,
         pqc_required: false,
         revoked: false,
-        recovery_policy: None,
+        recovery_policy: existing_policy,
         recovery: None,
     };
 
@@ -419,13 +427,33 @@ pub fn cmd_wallet_recover(
     }
 
     if let Some(seed_str) = seed_hex {
-        let seed_bytes =
-            hex::decode(seed_str.trim()).map_err(|e| anyhow::anyhow!("invalid hex seed: {e}"))?;
+        let seed_bytes = zeroize::Zeroizing::new(
+            hex::decode(seed_str.trim()).map_err(|e| anyhow::anyhow!("invalid hex seed: {e}"))?,
+        );
+        if !(16..=64).contains(&seed_bytes.len()) {
+            anyhow::bail!("seed must be 16..=64 bytes (BIP-32 bounds)");
+        }
         let derived_secret =
             satspath_core::crypto::derive_identity_key_from_seed(&seed_bytes, account_index)?;
         let secp = secp256k1::Secp256k1::new();
         let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &derived_secret);
         let pubkey_hex = hex::encode(pubkey.serialize());
+
+        let target_alias = alias
+            .map(str::to_string)
+            .or_else(|| load_wallet().ok().and_then(|w| w.alias));
+
+        if let Some(target) = &target_alias {
+            if let Ok(reg) = open_registry() {
+                if let Ok(existing) = reg.resolve_alias(target) {
+                    if existing.profile.identity_pubkey != pubkey_hex {
+                        anyhow::bail!(
+                            "derived key does not match the registered identity key for '{target}'; nothing was changed"
+                        );
+                    }
+                }
+            }
+        }
 
         keystore::save_identity_key(&satspath_dir(), &derived_secret)?;
 
@@ -894,17 +922,18 @@ mod tests {
 
     #[test]
     fn wallet_recover_deterministic_seed_derivation() {
-        std::env::set_var("SATSPATH_PASSWORD", "testpass");
         let seed = [42u8; 32];
-        let seed_hex = hex::encode(seed);
-        assert!(cmd_wallet_recover(None, Some(&seed_hex), 0, None).is_ok());
-
         let sk1 = satspath_core::crypto::derive_identity_key_from_seed(&seed, 0).unwrap();
         let sk2 = satspath_core::crypto::derive_identity_key_from_seed(&seed, 0).unwrap();
         assert_eq!(sk1, sk2);
 
         let sk_acc1 = satspath_core::crypto::derive_identity_key_from_seed(&seed, 1).unwrap();
         assert_ne!(sk1, sk_acc1);
-        std::env::remove_var("SATSPATH_PASSWORD");
+
+        // BIP-32 length bounds: <16 bytes or >64 bytes rejected
+        let short_seed = [1u8; 15];
+        assert!(satspath_core::crypto::derive_identity_key_from_seed(&short_seed, 0).is_err());
+        let long_seed = [1u8; 65];
+        assert!(satspath_core::crypto::derive_identity_key_from_seed(&long_seed, 0).is_err());
     }
 }

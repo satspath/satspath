@@ -1,8 +1,8 @@
 use satspath_core::crypto::{generate_identity_keypair, sign_profile};
 use satspath_core::transparency::{
     profile_hash, verify_checkpoint, verify_checkpoint_transition, verify_consistency_proof,
-    verify_identifier_history, verify_inclusion_proof, CheckpointStore, NameAction, NameEvent,
-    PinnedCheckpoint, TransparencyError, TransparencyLog,
+    verify_event_transition, verify_identifier_history, verify_inclusion_proof, CheckpointStore,
+    NameAction, NameEvent, PinnedCheckpoint, TransparencyError, TransparencyLog,
 };
 use satspath_core::{KeyRotation, PaymentMethod, PaymentProfile, SatsPathError};
 
@@ -314,8 +314,7 @@ fn recovery_without_policy_fails_with_recovery_disabled() {
 #[test]
 fn recovery_with_valid_policy_and_proof_succeeds() {
     use satspath_core::recovery::{
-        recovery_message, sign_guardian_authorization, KeyRecoveryProof, RecoveryPolicy,
-        RECOVERY_ACCEPTANCE_DOMAIN,
+        sign_guardian_authorization, KeyRecoveryProof, RecoveryPolicy,
     };
 
     let key = generate_identity_keypair();
@@ -365,28 +364,17 @@ fn recovery_with_valid_policy_and_proof_succeeds() {
         &g2.secret_key,
     );
 
-    let mut proof = KeyRecoveryProof::create(
+    let proof = KeyRecoveryProof::create(
         id_hash.clone(),
         prev_pk.clone(),
         new_pk.clone(),
         &new_key.secret_key,
         prev_event_hash.clone(),
         1,
+        now_ts,
         vec![s1, s2],
     )
     .unwrap();
-    proof.recovered_at = now_ts;
-    let accept_msg = recovery_message(
-        RECOVERY_ACCEPTANCE_DOMAIN,
-        &proof.identifier_hash,
-        &proof.previous_pubkey,
-        &proof.new_pubkey,
-        &proof.previous_event_hash,
-        proof.sequence,
-        proof.recovered_at,
-    );
-    proof.acceptance_signature =
-        satspath_core::crypto::sign_message(&accept_msg, &new_key.secret_key);
 
     let mut rec_profile = profile("alice@example.com", &new_key, 1);
     rec_profile.profile.identity_pubkey = new_pk.clone();
@@ -394,7 +382,7 @@ fn recovery_with_valid_policy_and_proof_succeeds() {
     rec_profile.profile.recovery_policy = Some(policy.clone());
     let signed_rec = sign_profile(rec_profile.profile, &new_key.secret_key).unwrap();
 
-    let rec_event = NameEvent {
+    let mut rec_event = NameEvent {
         version: 1,
         identifier_hash: id_hash,
         action: NameAction::RecoverKey,
@@ -406,10 +394,11 @@ fn recovery_with_valid_policy_and_proof_succeeds() {
         identifier_attestation_hash: None,
         removed_method_hashes: Vec::new(),
         rotation: None,
-        recovery_policy: Some(policy),
-        recovery: Some(proof.clone()),
-        owner_signature: proof.acceptance_signature,
+        recovery_policy: Some(policy.clone()),
+        recovery: Some(proof),
+        owner_signature: String::new(),
     };
+    rec_event.sign(&new_key.secret_key).unwrap();
 
     assert!(verify_identifier_history(&[register.clone(), rec_event.clone()]).is_ok());
 
@@ -417,4 +406,80 @@ fn recovery_with_valid_policy_and_proof_succeeds() {
     let mut log = TransparencyLog::open(dir.path()).unwrap();
     log.append(register, &signed_reg).unwrap();
     assert!(log.append(rec_event, &signed_rec).is_ok());
+}
+
+#[test]
+fn recovery_cannot_supply_its_own_policy_if_none_was_precommitted() {
+    use satspath_core::recovery::{sign_guardian_authorization, KeyRecoveryProof, RecoveryPolicy};
+
+    let key = generate_identity_keypair();
+    let signed_reg = profile("alice@example.com", &key, 0);
+    let register = event(&signed_reg, NameAction::Register, 0, None, &key.secret_key);
+
+    let g1 = generate_identity_keypair();
+    let attacker_policy =
+        RecoveryPolicy::new(1, vec![hex::encode(g1.public_key.serialize())]).unwrap();
+
+    let new_key = generate_identity_keypair();
+    let id_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+    let prev_pk = hex::encode(key.public_key.serialize());
+    let new_pk = hex::encode(new_key.public_key.serialize());
+    let prev_event_hash = register.event_hash().unwrap();
+    let now_ts = 1_700_000_100;
+
+    let s1 = sign_guardian_authorization(
+        &id_hash,
+        &prev_pk,
+        &new_pk,
+        &prev_event_hash,
+        1,
+        now_ts,
+        &g1.secret_key,
+    );
+    let proof = KeyRecoveryProof::create(
+        id_hash.clone(),
+        prev_pk,
+        new_pk.clone(),
+        &new_key.secret_key,
+        prev_event_hash.clone(),
+        1,
+        now_ts,
+        vec![s1],
+    )
+    .unwrap();
+
+    let mut rec_profile = profile("alice@example.com", &new_key, 1);
+    rec_profile.profile.identity_pubkey = new_pk.clone();
+    rec_profile.profile.recovery = Some(proof.clone());
+    rec_profile.profile.recovery_policy = Some(attacker_policy.clone());
+    let signed_rec = sign_profile(rec_profile.profile, &new_key.secret_key).unwrap();
+
+    let mut rec_event = NameEvent {
+        version: 1,
+        identifier_hash: id_hash,
+        action: NameAction::RecoverKey,
+        identity_pubkey: new_pk,
+        profile_hash: profile_hash(&signed_rec).unwrap(),
+        sequence: 1,
+        previous_event_hash: Some(prev_event_hash),
+        created_at: now_ts,
+        identifier_attestation_hash: None,
+        removed_method_hashes: Vec::new(),
+        rotation: None,
+        recovery_policy: Some(attacker_policy),
+        recovery: Some(proof),
+        owner_signature: String::new(),
+    };
+    rec_event.sign(&new_key.secret_key).unwrap();
+
+    // Must be rejected with RecoveryDisabled because genesis had no pre-committed policy
+    assert!(matches!(
+        verify_identifier_history(&[register.clone(), rec_event.clone()]).unwrap_err(),
+        SatsPathError::Transparency(TransparencyError::RecoveryDisabled)
+    ));
+
+    assert!(matches!(
+        verify_event_transition(Some(&register), &rec_event).unwrap_err(),
+        SatsPathError::Transparency(TransparencyError::RecoveryDisabled)
+    ));
 }

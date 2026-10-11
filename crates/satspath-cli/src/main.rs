@@ -287,9 +287,12 @@ struct WalletRecoverArgs {
     /// Alias to recover (e.g. alice@example.com)
     #[arg(long)]
     alias: Option<String>,
-    /// Hex-encoded seed for deterministic identity derivation
+    /// Hex-encoded seed for deterministic identity derivation (warning: visible in process list; prefer --seed-stdin)
     #[arg(long)]
     seed_hex: Option<String>,
+    /// Read hex-encoded seed securely from stdin
+    #[arg(long)]
+    seed_stdin: bool,
     /// Account index for deterministic derivation (default 0)
     #[arg(long, default_value_t = 0)]
     account_index: u32,
@@ -629,12 +632,21 @@ async fn main() -> Result<()> {
             }
             WalletCommand::Show { debug } => commands::cmd_wallet_show(debug)?,
             WalletCommand::Publish { alias } => commands::cmd_wallet_publish(alias.as_deref())?,
-            WalletCommand::Recover(args) => commands::cmd_wallet_recover(
-                args.alias.as_deref(),
-                args.seed_hex.as_deref(),
-                args.account_index,
-                args.proof_file.as_deref(),
-            )?,
+            WalletCommand::Recover(args) => {
+                let seed_hex = if args.seed_stdin {
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line)?;
+                    Some(line.trim().to_string())
+                } else {
+                    args.seed_hex
+                };
+                commands::cmd_wallet_recover(
+                    args.alias.as_deref(),
+                    seed_hex.as_deref(),
+                    args.account_index,
+                    args.proof_file.as_deref(),
+                )?
+            }
             WalletCommand::Receive {
                 alias,
                 amount_sats,

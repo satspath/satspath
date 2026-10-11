@@ -99,6 +99,7 @@ pub struct KeyRecoveryProof {
 
 impl KeyRecoveryProof {
     /// Construct a new KeyRecoveryProof, signing acceptance with the new identity secret key.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         identifier_hash: String,
         previous_pubkey: String,
@@ -106,9 +107,9 @@ impl KeyRecoveryProof {
         new_secret_key: &secp256k1::SecretKey,
         previous_event_hash: String,
         sequence: u64,
+        recovered_at: i64,
         guardian_signatures: Vec<GuardianSignature>,
     ) -> Result<Self> {
-        let recovered_at = chrono::Utc::now().timestamp();
         let acceptance_message = recovery_message(
             RECOVERY_ACCEPTANCE_DOMAIN,
             &identifier_hash,
@@ -250,6 +251,7 @@ pub fn recover_identity_key(
     new_secret_key: &secp256k1::SecretKey,
     previous_event_hash: &str,
     sequence: u64,
+    recovered_at: i64,
     guardian_signatures: Vec<GuardianSignature>,
 ) -> Result<SignedPaymentProfile> {
     let next_sequence = profile.profile.sequence.unwrap_or(0).saturating_add(1);
@@ -269,6 +271,7 @@ pub fn recover_identity_key(
         new_secret_key,
         previous_event_hash.to_owned(),
         sequence,
+        recovered_at,
         guardian_signatures,
     )?;
 
@@ -410,29 +413,17 @@ mod tests {
             &g2.secret_key,
         );
 
-        let mut proof = KeyRecoveryProof::create(
+        let proof = KeyRecoveryProof::create(
             ident_hash,
             old_pk,
             new_pk.clone(),
             &id_new.secret_key,
             prev_event_hash.clone(),
             seq,
+            now,
             vec![sig1, sig2],
         )
         .unwrap();
-        // Fix recovered_at for testing exact match with guardian signature timestamp
-        proof.recovered_at = now;
-        // Re-sign acceptance with the matched timestamp
-        let accept_msg = recovery_message(
-            RECOVERY_ACCEPTANCE_DOMAIN,
-            &proof.identifier_hash,
-            &proof.previous_pubkey,
-            &proof.new_pubkey,
-            &proof.previous_event_hash,
-            proof.sequence,
-            proof.recovered_at,
-        );
-        proof.acceptance_signature = sign_message(&accept_msg, &id_new.secret_key);
 
         assert!(proof.verify(&policy).unwrap());
 
@@ -443,6 +434,7 @@ mod tests {
             &id_new.secret_key,
             &prev_event_hash,
             seq,
+            now,
             proof.guardian_signatures.clone(),
         )
         .unwrap();
@@ -481,31 +473,31 @@ mod tests {
         );
 
         // Insufficient: only 1 signature when 2 required
-        let mut proof_insufficient = KeyRecoveryProof::create(
+        let proof_insufficient = KeyRecoveryProof::create(
             ident_hash.clone(),
             old_pk.clone(),
             new_pk.clone(),
             &id_new.secret_key,
             prev_event_hash.clone(),
             seq,
+            now,
             vec![sig1.clone()],
         )
         .unwrap();
-        proof_insufficient.recovered_at = now;
         assert!(!proof_insufficient.verify(&policy).unwrap());
 
         // Duplicate signature from g1 should not count as 2
-        let mut proof_duplicate = KeyRecoveryProof::create(
+        let proof_duplicate = KeyRecoveryProof::create(
             ident_hash.clone(),
             old_pk.clone(),
             new_pk.clone(),
             &id_new.secret_key,
             prev_event_hash.clone(),
             seq,
+            now,
             vec![sig1.clone(), sig1.clone()],
         )
         .unwrap();
-        proof_duplicate.recovered_at = now;
         assert!(!proof_duplicate.verify(&policy).unwrap());
 
         // Unauthorized outsider signature
@@ -518,17 +510,17 @@ mod tests {
             now,
             &outsider.secret_key,
         );
-        let mut proof_outsider = KeyRecoveryProof::create(
+        let proof_outsider = KeyRecoveryProof::create(
             ident_hash,
             old_pk,
             new_pk,
             &id_new.secret_key,
             prev_event_hash,
             seq,
+            now,
             vec![sig1, sig_outsider],
         )
         .unwrap();
-        proof_outsider.recovered_at = now;
         assert!(!proof_outsider.verify(&policy).unwrap());
     }
 }

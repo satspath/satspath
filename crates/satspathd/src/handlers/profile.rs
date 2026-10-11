@@ -214,7 +214,9 @@ pub(crate) fn sign_and_store(
         hybrid_pubkey: None,
         pqc_required: false,
         revoked: false,
-        recovery_policy: None,
+        recovery_policy: existing
+            .as_ref()
+            .and_then(|old| old.profile.recovery_policy.clone()),
         recovery: None,
     };
     let signed = sign_profile(profile, &secret)?;
@@ -386,7 +388,7 @@ pub(crate) fn recover_profile_key(
         anyhow::bail!("proof previous_event_hash mismatch");
     }
 
-    let event = NameEvent {
+    let mut event = NameEvent {
         version: 1,
         identifier_hash,
         action: NameAction::RecoverKey,
@@ -400,8 +402,18 @@ pub(crate) fn recover_profile_key(
         rotation: None,
         recovery_policy: signed.profile.recovery_policy.clone(),
         recovery: Some(proof.clone()),
-        owner_signature: proof.acceptance_signature.clone(),
+        owner_signature: String::new(),
     };
+
+    if let Ok(new_secret) = load_identity_key(&state.home, &signed.profile.identity_pubkey) {
+        event.sign(&new_secret)?;
+    } else if let Some(sig) = body.event_signature {
+        event.owner_signature = sig;
+    } else {
+        anyhow::bail!(
+            "event_signature is required when new identity private key is not present in local keystore"
+        );
+    }
 
     let candidate = log.prepare_append(event.clone(), &signed)?;
     let operator = load_or_create_transparency_operator(&state.home)?;
@@ -409,7 +421,9 @@ pub(crate) fn recover_profile_key(
     store.commit_profile_event_checkpoint(&alias, &signed, &event, &checkpoint)?;
 
     let mut wallet = load_wallet(&state.home)?;
-    if wallet.alias.as_deref() == Some(&alias) {
+    if wallet.alias.as_deref() == Some(&alias)
+        && load_identity_key(&state.home, &signed.profile.identity_pubkey).is_ok()
+    {
         wallet.identity_pubkey = Some(signed.profile.identity_pubkey.clone());
         wallet.updated_at = Some(now());
         save_wallet(&state.home, &wallet)?;

@@ -141,7 +141,7 @@ Read APIs cover status, paginated events/checkpoints, identifier/event/checkpoin
 - First contact is TOFU unless the namespace-to-key binding is independently verified out-of-band or confirmed through a trusted identity anchor. Witness quorums improve consistency and split-view detection but do not by themselves authenticate the initial binding.
 - A compromised verifier can attest a false binding.
 - A compromised current key can update, revoke or authorize rotation; transparency makes unauthorized actions publicly detectable and attributable, but cannot undo valid cryptographic signatures.
-- A lost key has no recovery in V1. Email recovery is deliberately avoided because it would reduce security to the email provider.
+- A lost key cannot be recovered via email or SMS (strictly rejected to preserve non-custodial sovereignty). Recovery is supported only via deterministic seed derivation or pre-committed M-of-N cryptographic guardian threshold proof (subject to guardian collusion limits; if no policy was pre-committed, recovery is fail-closed disabled). See [Key Recovery](key_recovery.md).
 - A malicious operator can attempt split views; client pinning and $K$-of-$N$ witness quorums detect local rollback and equivocation. Optional Nostr checkpoint gossip detects attributable same-size forks once two trusted observers' signed views reach a common monitor. Relay censorship/eclipsing or forks at different sizes remain possible limitations.
 - Bitcoin regtest anchoring provides auditable public evidence; independent OP_RETURNs do not provide Catena's single-history UTXO continuation property.
 - Current-state non-inclusion proofs (`StateMap`) are bound to checkpoints; full audit of sparse Merkle implementation is pending external cryptographic review.

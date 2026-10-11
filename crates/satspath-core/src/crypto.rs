@@ -31,13 +31,14 @@ pub fn generate_identity_keypair() -> IdentityKeypair {
 /// to ensure reproducible recovery across wallets (e.g. from BIP-39 seed phrase)
 /// without exposing wallet spending keys or risking loss of alias control.
 pub fn derive_identity_key_from_seed(seed: &[u8], account_index: u32) -> Result<SecretKey> {
-    if seed.is_empty() {
+    if !(16..=64).contains(&seed.len()) {
         return Err(SatsPathError::ValidationError(
-            "Seed cannot be empty".into(),
+            "Seed must be between 16 and 64 bytes (BIP-32 bounds)".into(),
         ));
     }
     use hmac::{Hmac, Mac};
     use sha2::Sha512;
+    use zeroize::Zeroize;
     type HmacSha512 = Hmac<Sha512>;
 
     let mut mac = HmacSha512::new_from_slice(b"SatsPath Identity Key m/9737'/0'")
@@ -49,8 +50,10 @@ pub fn derive_identity_key_from_seed(seed: &[u8], account_index: u32) -> Result<
     let mut candidate = [0u8; 32];
     candidate.copy_from_slice(&result[..32]);
 
-    SecretKey::from_slice(&candidate)
-        .map_err(|e| SatsPathError::CryptoError(format!("Derived scalar invalid: {e}")))
+    let sk = SecretKey::from_slice(&candidate)
+        .map_err(|e| SatsPathError::CryptoError(format!("Derived scalar invalid: {e}")));
+    candidate.zeroize();
+    sk
 }
 
 /// Produce a deterministic canonical JSON serialization of a PaymentProfile.

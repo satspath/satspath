@@ -207,7 +207,7 @@ mod tests {
         quote::{pay_response, quote_response},
         resolve::resolve_v2_envelope,
         send::send_response,
-        wallet::{load_or_create_identity, save_wallet},
+        wallet::{load_or_create_identity, save_identity_key, save_wallet},
     };
     use crate::rate_limit;
     use crate::server::{audit_binding_security, serve_server};
@@ -563,10 +563,8 @@ mod tests {
 
     #[test]
     fn key_recovery_with_guardian_threshold_succeeds_and_updates_transparency_log() {
-        use satspath_core::crypto::sign_message;
         use satspath_core::recovery::{
-            recovery_message, sign_guardian_authorization, KeyRecoveryProof, RecoveryPolicy,
-            RECOVERY_ACCEPTANCE_DOMAIN,
+            sign_guardian_authorization, KeyRecoveryProof, RecoveryPolicy,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -668,27 +666,17 @@ mod tests {
             &g2.secret_key,
         );
 
-        let mut proof = KeyRecoveryProof::create(
+        let proof = KeyRecoveryProof::create(
             id_hash,
             pubkey_hex,
             new_pk_hex.clone(),
             &new_key.secret_key,
             prev_hash,
             1,
+            now_ts,
             vec![sig1, sig2],
         )
         .unwrap();
-        proof.recovered_at = now_ts;
-        let accept_msg = recovery_message(
-            RECOVERY_ACCEPTANCE_DOMAIN,
-            &proof.identifier_hash,
-            &proof.previous_pubkey,
-            &proof.new_pubkey,
-            &proof.previous_event_hash,
-            proof.sequence,
-            proof.recovered_at,
-        );
-        proof.acceptance_signature = sign_message(&accept_msg, &new_key.secret_key);
 
         let mut recovered_profile = signed_initial.profile.clone();
         recovered_profile.identity_pubkey = new_pk_hex.clone();
@@ -696,11 +684,14 @@ mod tests {
         recovered_profile.recovery = Some(proof.clone());
         let signed_recovered = sign_profile(recovered_profile, &new_key.secret_key).unwrap();
 
+        save_identity_key(dir.path(), &new_key.secret_key).unwrap();
+
         let state = test_state(dir.path());
         let request = crate::types::ProfileRecoverRequest {
             alias: "alice@example.com".into(),
             proof,
             signed_profile: signed_recovered,
+            event_signature: None,
         };
         let response = recover_profile_key(&state, request).unwrap();
         assert_eq!(response.alias, "alice@example.com");

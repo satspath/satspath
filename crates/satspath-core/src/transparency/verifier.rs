@@ -217,10 +217,6 @@ pub fn verify_identifier_history(events: &[NameEvent]) -> Result<()> {
         if revoked {
             return Err(TransparencyError::IdentifierRevoked.into());
         }
-        if let Some(policy) = &event.recovery_policy {
-            policy.validate()?;
-            active_recovery_policy = Some(policy.clone());
-        }
         let signing_key = if event.action == NameAction::RecoverKey {
             let policy = active_recovery_policy
                 .as_ref()
@@ -267,26 +263,16 @@ pub fn verify_identifier_history(events: &[NameEvent]) -> Result<()> {
             }
             authorized_key.clone()
         };
-        let is_valid_sig = if event.action == NameAction::RecoverKey {
-            if let Some(recovery) = event.recovery.as_ref() {
-                event.owner_signature == recovery.acceptance_signature
-                    || verify_message_signature(
-                        &event.signing_message()?,
-                        &event.owner_signature,
-                        &signing_key,
-                    )?
-            } else {
-                false
-            }
-        } else {
-            verify_message_signature(
-                &event.signing_message()?,
-                &event.owner_signature,
-                &signing_key,
-            )?
-        };
-        if !is_valid_sig {
+        if !verify_message_signature(
+            &event.signing_message()?,
+            &event.owner_signature,
+            &signing_key,
+        )? {
             return Err(TransparencyError::InvalidEventSignature.into());
+        }
+        if let Some(policy) = &event.recovery_policy {
+            policy.validate()?;
+            active_recovery_policy = Some(policy.clone());
         }
         if event.action == NameAction::RotateKey || event.action == NameAction::RecoverKey {
             authorized_key = event.identity_pubkey.clone();
@@ -345,7 +331,6 @@ pub fn verify_event_transition(head: Option<&NameEvent>, proposed: &NameEvent) -
                 let policy = head_event
                     .recovery_policy
                     .as_ref()
-                    .or(proposed.recovery_policy.as_ref())
                     .ok_or(TransparencyError::RecoveryDisabled)?;
                 let recovery = proposed.recovery.as_ref().ok_or_else(|| {
                     TransparencyError::InvalidRecovery("missing recovery proof".into())
@@ -391,27 +376,16 @@ pub fn verify_event_transition(head: Option<&NameEvent>, proposed: &NameEvent) -
                 head_event.identity_pubkey.clone()
             };
 
-            let is_valid_sig = if proposed.action == NameAction::RecoverKey {
-                if let Some(recovery) = proposed.recovery.as_ref() {
-                    proposed.owner_signature == recovery.acceptance_signature
-                        || verify_message_signature(
-                            &proposed.signing_message()?,
-                            &proposed.owner_signature,
-                            &signing_key,
-                        )?
-                } else {
-                    false
-                }
-            } else {
-                verify_message_signature(
-                    &proposed.signing_message()?,
-                    &proposed.owner_signature,
-                    &signing_key,
-                )?
-            };
-
-            if !is_valid_sig {
+            if !verify_message_signature(
+                &proposed.signing_message()?,
+                &proposed.owner_signature,
+                &signing_key,
+            )? {
                 return Err(TransparencyError::InvalidEventSignature.into());
+            }
+
+            if let Some(policy) = &proposed.recovery_policy {
+                policy.validate()?;
             }
         }
     }
