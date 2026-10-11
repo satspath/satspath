@@ -124,7 +124,8 @@ pub async fn cmd_register(
          profile. Back up {} securely.",
         key_path.display()
     );
-    println!("   Randomly generated keys require a pre-committed guardian recovery policy for sovereign recovery. See docs/key_recovery.md for details.");
+    println!("   This randomly generated key cannot be re-derived from a seed, and no guardian recovery policy is committed for it.");
+    println!("   Guardian recovery requires committing a RecoveryPolicy via the daemon (PUT /v1/profile) before key loss. See docs/key_recovery.md.");
     println!();
     println!(
         "Prove ownership of a method:  satspath prove {} --method-index 0",

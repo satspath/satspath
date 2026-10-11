@@ -370,6 +370,9 @@ pub(crate) fn recover_profile_key(
     if signed.profile.rotation.is_some() {
         anyhow::bail!("recovery profile must not contain a key rotation");
     }
+    if signed.profile.recovery_policy.is_none() {
+        anyhow::bail!("recovered profile must carry a recovery_policy; policies cannot be removed");
+    }
     satspath_core::validation::validate_public_profile(&signed.profile)?;
 
     let store = TransactionalTransparencyStore::open(&state.home)?;

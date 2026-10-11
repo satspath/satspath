@@ -139,7 +139,7 @@ Payload:
 }
 ```
 
-> **Note on Remote Signing:** When the new private key is held off-daemon (e.g., in a cold signer), `event_signature` MUST be provided alongside `event_created_at`. The daemon enforces that `event_created_at` matches the timestamp covered by the client's signature within a ±300s window of daemon server time; requests omitting `event_created_at` while supplying `event_signature` are rejected immediately.
+> **Note on Remote Signing:** When the new private key is held off-daemon (e.g., in a cold signer), `event_signature` MUST be provided alongside `event_created_at`. `event_created_at` must be within ±300 s of daemon server time, and it is used verbatim as the event's `created_at`, so the client signature must cover exactly that value. Requests omitting `event_created_at` while supplying `event_signature` are rejected immediately.
 
 Response:
 ```json
