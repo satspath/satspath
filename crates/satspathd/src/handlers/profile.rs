@@ -434,14 +434,15 @@ pub(crate) fn recover_profile_key(
     let checkpoint = candidate.prepare_checkpoint(&operator)?;
     store.commit_profile_event_checkpoint(&alias, &signed, &event, &checkpoint)?;
 
-    if let Ok(mut wallet) = load_wallet(&state.home) {
-        if wallet.alias.as_deref() == Some(&alias)
-            && load_identity_key(&state.home, &signed.profile.identity_pubkey).is_ok()
-        {
-            wallet.identity_pubkey = Some(signed.profile.identity_pubkey.clone());
-            wallet.updated_at = Some(now());
-            let _ = save_wallet(&state.home, &wallet);
-        }
+    let mut wallet = load_wallet(&state.home)
+        .map_err(|e| anyhow::anyhow!("recovery committed but wallet could not be loaded: {e}"))?;
+    if wallet.alias.as_deref() == Some(&alias)
+        && load_identity_key(&state.home, &signed.profile.identity_pubkey).is_ok()
+    {
+        wallet.identity_pubkey = Some(signed.profile.identity_pubkey.clone());
+        wallet.updated_at = Some(now());
+        save_wallet(&state.home, &wallet)
+            .map_err(|e| anyhow::anyhow!("recovery committed but wallet update failed: {e}"))?;
     }
 
     Ok(KeyRecoveryResponse {

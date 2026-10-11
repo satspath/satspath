@@ -6,7 +6,7 @@ SatsPath adheres to the Bitcoin-grade sovereign security model:
 1. **Strict Rejection of Email / SMS / Phone Recovery:**
    Identity keys in SatsPath control sovereign payment profiles, routing preferences, and recipient ownership. Delegating key recovery to email verification or SMS codes introduces custodian risk, SIM-swapping vulnerability, and third-party censorship vectors. Neither the SatsPath daemon nor any third-party infrastructure may unilaterally reset or replace an identity key.
 2. **Fail-Closed Guarantee:**
-   If a user has not pre-committed a `RecoveryPolicy` into their transparency log history, recovery is permanently disabled (`TransparencyError::RecoveryDisabled`). No default or backdoor recovery exists.
+   Until an owner-signed event commits a `RecoveryPolicy` into the identifier's transparency log history, guardian recovery is disabled (`TransparencyError::RecoveryDisabled`). A `RecoverKey` event cannot supply the policy that authorizes it. Once committed, a policy can be replaced by a later owner-signed event but cannot currently be removed. No default or backdoor recovery exists.
 
 ---
 
