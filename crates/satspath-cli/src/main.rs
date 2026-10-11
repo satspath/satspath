@@ -634,9 +634,15 @@ async fn main() -> Result<()> {
             WalletCommand::Publish { alias } => commands::cmd_wallet_publish(alias.as_deref())?,
             WalletCommand::Recover(args) => {
                 let seed_hex = if args.seed_stdin {
-                    let mut line = String::new();
-                    std::io::stdin().read_line(&mut line)?;
-                    Some(line.trim().to_string())
+                    use std::io::IsTerminal;
+                    let input = if std::io::stdin().is_terminal() {
+                        rpassword::prompt_password("Enter master seed hex: ")?
+                    } else {
+                        let mut line = String::new();
+                        std::io::stdin().read_line(&mut line)?;
+                        line
+                    };
+                    Some(input.trim().to_string())
                 } else {
                     args.seed_hex
                 };

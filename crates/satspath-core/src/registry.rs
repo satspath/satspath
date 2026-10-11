@@ -119,27 +119,54 @@ impl Registry {
             .or_else(|| self.data.profiles.get(&alias))
         {
             if signed.profile.identity_pubkey != existing.profile.identity_pubkey {
-                let rotation = signed
-                    .profile
-                    .rotation
-                    .as_ref()
-                    .ok_or(SatsPathError::UnauthorizedKeyReplacement)?;
-                if rotation.previous_pubkey != existing.profile.identity_pubkey
-                    || rotation.new_pubkey != signed.profile.identity_pubkey
-                    || rotation.identifier_hash != identifier_hash(&alias)
-                    || rotation.sequence != signed.profile.sequence.unwrap_or(0)
-                    || rotation.sequence != existing.profile.sequence.unwrap_or(0).saturating_add(1)
-                    || rotation.previous_event_hash.is_empty()
-                    || !rotation.verify()?
-                {
-                    return Err(SatsPathError::InvalidRotation(
-                        "rotation must be authorized by the old key and accepted by the new key"
-                            .into(),
-                    ));
+                if let Some(recovery) = &signed.profile.recovery {
+                    let policy = existing.profile.recovery_policy.as_ref().ok_or(
+                        SatsPathError::Transparency(
+                            crate::transparency::TransparencyError::RecoveryDisabled,
+                        ),
+                    )?;
+                    if recovery.previous_pubkey != existing.profile.identity_pubkey
+                        || recovery.new_pubkey != signed.profile.identity_pubkey
+                        || recovery.identifier_hash != identifier_hash(&alias)
+                        || recovery.sequence != signed.profile.sequence.unwrap_or(0)
+                        || recovery.sequence
+                            != existing.profile.sequence.unwrap_or(0).saturating_add(1)
+                        || !recovery.verify(policy)?
+                    {
+                        return Err(SatsPathError::Transparency(
+                            crate::transparency::TransparencyError::InvalidRecovery(
+                                "recovery proof must match identifier, keys, sequence and be authorized by guardians"
+                                    .into(),
+                            ),
+                        ));
+                    }
+                } else if let Some(rotation) = &signed.profile.rotation {
+                    if rotation.previous_pubkey != existing.profile.identity_pubkey
+                        || rotation.new_pubkey != signed.profile.identity_pubkey
+                        || rotation.identifier_hash != identifier_hash(&alias)
+                        || rotation.sequence != signed.profile.sequence.unwrap_or(0)
+                        || rotation.sequence
+                            != existing.profile.sequence.unwrap_or(0).saturating_add(1)
+                        || rotation.previous_event_hash.is_empty()
+                        || !rotation.verify()?
+                    {
+                        return Err(SatsPathError::InvalidRotation(
+                            "rotation must be authorized by the old key and accepted by the new key"
+                                .into(),
+                        ));
+                    }
+                } else {
+                    return Err(SatsPathError::UnauthorizedKeyReplacement);
                 }
             } else if signed.profile.rotation.is_some() {
                 return Err(SatsPathError::InvalidRotation(
                     "rotation proof supplied without an identity key change".into(),
+                ));
+            } else if signed.profile.recovery.is_some() {
+                return Err(SatsPathError::Transparency(
+                    crate::transparency::TransparencyError::InvalidRecovery(
+                        "recovery proof supplied without an identity key change".into(),
+                    ),
                 ));
             }
             if signed.profile.updated_at < existing.profile.updated_at {

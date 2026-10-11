@@ -45,10 +45,11 @@ pub fn derive_identity_key_from_seed(seed: &[u8], account_index: u32) -> Result<
         .map_err(|e| SatsPathError::CryptoError(e.to_string()))?;
     mac.update(seed);
     mac.update(&account_index.to_be_bytes());
-    let result = mac.finalize().into_bytes();
+    let mut result = mac.finalize().into_bytes();
 
     let mut candidate = [0u8; 32];
     candidate.copy_from_slice(&result[..32]);
+    result.as_mut_slice().zeroize();
 
     let sk = SecretKey::from_slice(&candidate)
         .map_err(|e| SatsPathError::CryptoError(format!("Derived scalar invalid: {e}")));

@@ -388,6 +388,16 @@ pub(crate) fn recover_profile_key(
         anyhow::bail!("proof previous_event_hash mismatch");
     }
 
+    let current_time = now();
+    let created_at = if let Some(client_time) = body.event_created_at {
+        if (client_time - current_time).abs() > 300 {
+            anyhow::bail!("client event timestamp out of allowable window (+/- 300s)");
+        }
+        client_time
+    } else {
+        current_time
+    };
+
     let mut event = NameEvent {
         version: 1,
         identifier_hash,
@@ -396,7 +406,7 @@ pub(crate) fn recover_profile_key(
         profile_hash: satspath_core::transparency::profile_hash(&signed)?,
         sequence,
         previous_event_hash: Some(previous_event_hash),
-        created_at: now(),
+        created_at,
         identifier_attestation_hash: None,
         removed_method_hashes: Vec::new(),
         rotation: None,

@@ -137,6 +137,8 @@ pub(crate) struct ProfileRecoverRequest {
     pub(crate) proof: satspath_core::recovery::KeyRecoveryProof,
     pub(crate) signed_profile: satspath_core::SignedPaymentProfile,
     #[serde(default)]
+    pub(crate) event_created_at: Option<i64>,
+    #[serde(default)]
     pub(crate) event_signature: Option<String>,
 }
 

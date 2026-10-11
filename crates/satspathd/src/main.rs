@@ -691,6 +691,7 @@ mod tests {
             alias: "alice@example.com".into(),
             proof,
             signed_profile: signed_recovered,
+            event_created_at: None,
             event_signature: None,
         };
         let response = recover_profile_key(&state, request).unwrap();
@@ -701,6 +702,166 @@ mod tests {
         let current_profile = updated_store.profile("alice@example.com").unwrap().unwrap();
         assert_eq!(current_profile.profile.identity_pubkey, new_pk_hex);
         assert_eq!(current_profile.profile.sequence, Some(1));
+    }
+
+    #[test]
+    fn key_recovery_remote_event_signature_with_mismatched_timestamp_is_rejected() {
+        use satspath_core::recovery::{
+            sign_guardian_authorization, KeyRecoveryProof, RecoveryPolicy,
+        };
+        use satspath_core::transparency::{NameAction, NameEvent, TransparencyError};
+        use satspath_core::SatsPathError;
+
+        let dir = tempfile::tempdir().unwrap();
+        let key = generate_identity_keypair();
+        let pubkey_hex = hex::encode(key.public_key.serialize());
+
+        let g1 = generate_identity_keypair();
+        let g2 = generate_identity_keypair();
+        let g1_pk = hex::encode(g1.public_key.serialize());
+        let g2_pk = hex::encode(g2.public_key.serialize());
+
+        let policy = RecoveryPolicy::new(1, vec![g1_pk.clone(), g2_pk.clone()]).unwrap();
+        let initial_profile = PaymentProfile {
+            sequence: Some(0),
+            alias: "bob@example.com".into(),
+            identity_pubkey: pubkey_hex.clone(),
+            methods: vec![],
+            updated_at: 1_700_000_000,
+            expires_at: None,
+            preferences: vec![],
+            nonce: None,
+            rotation: None,
+            method_verifications: vec![],
+            hybrid_pubkey: None,
+            pqc_required: false,
+            revoked: false,
+            recovery_policy: Some(policy.clone()),
+            recovery: None,
+        };
+        let signed_initial = sign_profile(initial_profile, &key.secret_key).unwrap();
+
+        let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
+        let log = store.load_log().unwrap();
+        let genesis_event = NameEvent {
+            version: 1,
+            identifier_hash: satspath_core::privacy::identifier_hash("bob@example.com"),
+            action: NameAction::Register,
+            identity_pubkey: pubkey_hex.clone(),
+            profile_hash: satspath_core::transparency::profile_hash(&signed_initial).unwrap(),
+            sequence: 0,
+            previous_event_hash: None,
+            created_at: 1_700_000_000,
+            identifier_attestation_hash: None,
+            removed_method_hashes: Vec::new(),
+            rotation: None,
+            recovery_policy: Some(policy),
+            recovery: None,
+            owner_signature: String::new(),
+        };
+        let mut signed_genesis = genesis_event;
+        signed_genesis.sign(&key.secret_key).unwrap();
+
+        let candidate = log
+            .prepare_append(signed_genesis.clone(), &signed_initial)
+            .unwrap();
+        let operator =
+            crate::handlers::transparency::load_or_create_transparency_operator(dir.path())
+                .unwrap();
+        let cp = candidate.prepare_checkpoint(&operator).unwrap();
+        store
+            .commit_profile_event_checkpoint(
+                "bob@example.com",
+                &signed_initial,
+                &signed_genesis,
+                &cp,
+            )
+            .unwrap();
+
+        let new_key = generate_identity_keypair();
+        let new_pk_hex = hex::encode(new_key.public_key.serialize());
+        let sig1 = sign_guardian_authorization(
+            &satspath_core::privacy::identifier_hash("bob@example.com"),
+            &pubkey_hex,
+            &new_pk_hex,
+            &signed_genesis.event_hash().unwrap(),
+            1,
+            1_700_000_100,
+            &g1.secret_key,
+        );
+
+        let proof = KeyRecoveryProof::create(
+            satspath_core::privacy::identifier_hash("bob@example.com"),
+            pubkey_hex,
+            new_pk_hex.clone(),
+            &new_key.secret_key,
+            signed_genesis.event_hash().unwrap(),
+            1,
+            1_700_000_100,
+            vec![sig1],
+        )
+        .unwrap();
+
+        let mut recovered_profile = signed_initial.profile.clone();
+        recovered_profile.identity_pubkey = new_pk_hex.clone();
+        recovered_profile.sequence = Some(1);
+        recovered_profile.recovery = Some(proof.clone());
+        let signed_recovered = sign_profile(recovered_profile, &new_key.secret_key).unwrap();
+
+        // Sign the event remotely with signed_time
+        let signed_time = chrono::Utc::now().timestamp();
+        let mut remote_event = NameEvent {
+            version: 1,
+            identifier_hash: satspath_core::privacy::identifier_hash("bob@example.com"),
+            action: NameAction::RecoverKey,
+            identity_pubkey: new_pk_hex.clone(),
+            profile_hash: satspath_core::transparency::profile_hash(&signed_recovered).unwrap(),
+            sequence: 1,
+            previous_event_hash: Some(signed_genesis.event_hash().unwrap()),
+            created_at: signed_time,
+            identifier_attestation_hash: None,
+            removed_method_hashes: Vec::new(),
+            rotation: None,
+            recovery_policy: signed_recovered.profile.recovery_policy.clone(),
+            recovery: Some(proof.clone()),
+            owner_signature: String::new(),
+        };
+        remote_event.sign(&new_key.secret_key).unwrap();
+        let valid_remote_sig = remote_event.owner_signature.clone();
+
+        let state = test_state(dir.path());
+
+        // 1. Submit with mismatched created_at timestamp -> must fail with InvalidEventSignature
+        let bad_request = crate::types::ProfileRecoverRequest {
+            alias: "bob@example.com".into(),
+            proof: proof.clone(),
+            signed_profile: signed_recovered.clone(),
+            event_created_at: Some(signed_time + 10),
+            event_signature: Some(valid_remote_sig.clone()),
+        };
+        let err = recover_profile_key(&state, bad_request).unwrap_err();
+        let is_invalid_sig = err.downcast_ref::<SatsPathError>().is_some_and(|e| {
+            matches!(
+                e,
+                SatsPathError::Transparency(TransparencyError::InvalidEventSignature)
+            )
+        });
+        assert!(
+            is_invalid_sig,
+            "expected InvalidEventSignature, got: {err:?}"
+        );
+
+        // 2. Submit with matching created_at timestamp -> must succeed
+        let good_request = crate::types::ProfileRecoverRequest {
+            alias: "bob@example.com".into(),
+            proof,
+            signed_profile: signed_recovered,
+            event_created_at: Some(signed_time),
+            event_signature: Some(valid_remote_sig),
+        };
+        let response = recover_profile_key(&state, good_request).unwrap();
+        assert_eq!(response.alias, "bob@example.com");
+        assert_eq!(response.sequence, 1);
     }
 
     #[test]

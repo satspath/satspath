@@ -96,10 +96,13 @@ When an identifier transition occurs via `RecoverKey`:
 
 ### CLI Commands
 ```bash
-# Recover from deterministic seed via stdin (recommended to prevent argv / shell history exposure)
-echo "<HEX_SEED>" | satspath wallet recover --seed-stdin --account-index 0 --alias alice@example.com
+# Recover from deterministic seed via interactive prompt without terminal echo (recommended to avoid argv and shell history exposure)
+satspath wallet recover --seed-stdin --account-index 0 --alias alice@example.com
 
-# Recover from deterministic seed via flag
+# Recover from deterministic seed piped from secure source or password manager
+cat /path/to/seed.txt | satspath wallet recover --seed-stdin --account-index 0 --alias alice@example.com
+
+# Recover from deterministic seed via flag (caution: visible in process list and shell history)
 satspath wallet recover --seed-hex <HEX_SEED> --account-index 0 --alias alice@example.com
 
 # Recover via guardian proof file

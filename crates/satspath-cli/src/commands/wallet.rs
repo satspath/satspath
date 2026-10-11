@@ -525,6 +525,9 @@ pub fn cmd_wallet_recover(
         // If the new identity key is present in local keystore, sign the profile.
         if let Ok(new_secret) = keystore::load_identity_key(&satspath_dir(), &new_pubkey) {
             let signed = sign_profile(new_profile, &new_secret)?;
+            if !satspath_core::recovery::verify_key_recovery(existing, &signed)? {
+                anyhow::bail!("recovery proof is not bound to this identifier, key, or sequence");
+            }
             registry.update_profile(signed)?;
             let mut state = load_wallet()?;
             state.identity_pubkey = Some(new_pubkey.clone());
