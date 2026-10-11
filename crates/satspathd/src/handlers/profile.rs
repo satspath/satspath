@@ -391,7 +391,7 @@ pub(crate) fn recover_profile_key(
 
     let current_time = now();
     let created_at = if let Some(client_time) = body.event_created_at {
-        if (client_time - current_time).abs() > 300 {
+        if client_time.abs_diff(current_time) > 300 {
             anyhow::bail!("client event timestamp out of allowable window (+/- 300s)");
         }
         client_time
