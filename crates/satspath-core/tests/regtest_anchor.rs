@@ -14,3 +14,95 @@ async fn checkpoint_op_return_round_trip_on_bitcoin_core_regtest() {
     assert!(fetched.verified);
     assert_eq!(fetched.commitment, receipt.commitment);
 }
+
+#[tokio::test]
+#[ignore = "requires an explicitly configured Bitcoin Core regtest node"]
+async fn catena_chain_anchoring_and_backward_verification_on_regtest() {
+    let client = satspath_core::transparency::RegtestAnchorClient::from_env().unwrap();
+
+    let cp0 = "00".repeat(32);
+    let cp1 = "11".repeat(32);
+    let cp2 = "22".repeat(32);
+
+    // 1. Create Catena Genesis anchor
+    let a0 = client.anchor_catena_genesis(&cp0).await.unwrap();
+    assert_eq!(a0.chain_index, Some(0));
+    assert!(a0.prev_txid.is_none());
+    assert!(a0.prev_vout.is_none());
+    assert!(a0.continuation_vout.is_some());
+    assert!(a0.confirmations > 0);
+    assert!(a0.verified);
+
+    // 2. Create Catena step 1 anchor spending genesis continuation UTXO
+    let a1 = client.anchor_catena_next(&cp1, &a0).await.unwrap();
+    assert_eq!(a1.chain_index, Some(1));
+    assert_eq!(a1.prev_txid, Some(a0.txid.clone()));
+    assert_eq!(a1.prev_vout, a0.continuation_vout);
+    assert!(a1.continuation_vout.is_some());
+    assert!(a1.confirmations > 0);
+    assert!(a1.verified);
+
+    // 3. Create Catena step 2 anchor spending step 1 continuation UTXO
+    let a2 = client.anchor_catena_next(&cp2, &a1).await.unwrap();
+    assert_eq!(a2.chain_index, Some(2));
+    assert_eq!(a2.prev_txid, Some(a1.txid.clone()));
+    assert_eq!(a2.prev_vout, a1.continuation_vout);
+    assert!(a2.continuation_vout.is_some());
+    assert!(a2.confirmations > 0);
+    assert!(a2.verified);
+
+    // 4. Verify chain backwards via Bitcoin Core RPC
+    let verified_chain = client
+        .verify_catena_chain(&a2.txid, &a0.txid)
+        .await
+        .unwrap();
+    assert_eq!(verified_chain.len(), 3);
+    assert_eq!(verified_chain[0].txid, a0.txid);
+    assert_eq!(verified_chain[1].txid, a1.txid);
+    assert_eq!(verified_chain[2].txid, a2.txid);
+
+    // 5. Verify chain pure links in-memory
+    assert!(satspath_core::transparency::verify_catena_links(&verified_chain).unwrap());
+}
+
+#[tokio::test]
+#[ignore = "requires an explicitly configured Bitcoin Core regtest node"]
+async fn catena_double_spend_equivocation_rejected_by_bitcoin_core() {
+    let client = satspath_core::transparency::RegtestAnchorClient::from_env().unwrap();
+
+    let cp_genesis = "aa".repeat(32);
+    let cp_branch1 = "bb".repeat(32);
+    let cp_branch2 = "cc".repeat(32);
+
+    // 1. Create Genesis
+    let genesis = client.anchor_catena_genesis(&cp_genesis).await.unwrap();
+
+    // 2. Spend continuation UTXO to branch 1 (confirmed)
+    let branch1 = client
+        .anchor_catena_next(&cp_branch1, &genesis)
+        .await
+        .unwrap();
+    assert!(branch1.verified);
+
+    // 3. Attempt to equivocate by spending the SAME genesis continuation UTXO to branch 2
+    // Bitcoin Core must reject this transaction because genesis continuation UTXO is already spent!
+    let equivocation_attempt = client.anchor_catena_next(&cp_branch2, &genesis).await;
+    assert!(
+        equivocation_attempt.is_err(),
+        "Bitcoin Core must reject double-spending a continuation UTXO"
+    );
+
+    // 4. In-memory equivocation detector verification
+    // Construct hypothetical branch2 anchor to test detector
+    let mut branch2_hypothetical = branch1.clone();
+    branch2_hypothetical.txid = "ff".repeat(32);
+    branch2_hypothetical.commitment =
+        satspath_core::transparency::catena_commitment(&cp_branch2, 1).unwrap();
+
+    let equivocation_evidence =
+        satspath_core::transparency::detect_catena_equivocation(&branch1, &branch2_hypothetical);
+    assert!(equivocation_evidence.is_some());
+    let proof = equivocation_evidence.unwrap();
+    assert_eq!(proof.spent_txid, genesis.txid);
+    assert!(proof.evidence.contains("Double-spend detected"));
+}

@@ -81,7 +81,21 @@ pub(crate) async fn anchor_latest_checkpoint(
         .ok_or_else(|| anyhow::anyhow!("no checkpoint to anchor"))?;
     let checkpoint_hash = checkpoint.checkpoint_hash()?;
     let client = satspath_core::transparency::RegtestAnchorClient::from_env()?;
-    let anchor = client.anchor_checkpoint(&checkpoint_hash).await?;
+
+    // Search for a predecessor anchor that has a continuation output for Catena chaining
+    let prev_anchor = log
+        .checkpoints()
+        .iter()
+        .rev()
+        .filter_map(|c| c.bitcoin_anchor.as_ref())
+        .find(|a| a.continuation_vout.is_some())
+        .cloned();
+
+    let anchor = match prev_anchor {
+        Some(prev) => client.anchor_catena_next(&checkpoint_hash, &prev).await?,
+        None => client.anchor_catena_genesis(&checkpoint_hash).await?,
+    };
+
     if !anchor.verified {
         anyhow::bail!("regtest anchor could not be verified after confirmation");
     }
@@ -92,6 +106,19 @@ pub(crate) async fn anchor_latest_checkpoint(
     TransactionalTransparencyStore::open(&state.home)?
         .replace_latest_checkpoint(&checkpoint_hash, &anchored)?;
     Ok(anchor)
+}
+
+pub(crate) fn catena_chain(
+    state: &AppState,
+) -> Result<Vec<satspath_core::TransparencyBitcoinAnchor>> {
+    let log = transparency_log(state)?;
+    let anchors: Vec<_> = log
+        .checkpoints()
+        .iter()
+        .filter_map(|c| c.bitcoin_anchor.clone())
+        .filter(|a| a.chain_index.is_some())
+        .collect();
+    Ok(anchors)
 }
 
 pub(crate) fn namespace_descriptor(

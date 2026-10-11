@@ -1,6 +1,7 @@
 mod anchor;
 mod api;
 mod attestation;
+mod catena;
 mod checkpoint;
 #[cfg(feature = "std")]
 mod database;
@@ -31,6 +32,11 @@ pub use api::{
 pub use attestation::{
     verify_attestation_binding, IdentifierAttestation, IdentifierVerificationMethod,
     TrustedVerifier,
+};
+pub use catena::{
+    catena_commitment, detect_catena_equivocation, verify_catena_links, CatenaChainProof,
+    CatenaEquivocationProof, CatenaGenesis, CATENA_COMMITMENT_DOMAIN, CONTINUATION_BTC,
+    CONTINUATION_SATOSHIS,
 };
 pub use checkpoint::{
     CheckpointComparison, OperatorKeyRotation, PinnedCheckpoint, TransparencyCheckpoint,
@@ -119,4 +125,8 @@ pub enum TransparencyError {
     InvalidAttestation(String),
     #[error("invalid checkpoint gossip observation or evidence")]
     InvalidGossipObservation,
+    #[error("invalid Catena anchor chain: {0}")]
+    InvalidCatenaChain(String),
+    #[error("Catena equivocation detected: {0}")]
+    CatenaEquivocation(String),
 }
