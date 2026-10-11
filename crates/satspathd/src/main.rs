@@ -1552,4 +1552,86 @@ mod tests {
         .unwrap_err();
         assert!(mismatch_err.to_string().contains("does not match"));
     }
+
+    #[tokio::test]
+    async fn test_catena_endpoints() {
+        let config = rate_limit::RateLimiterConfig::default();
+        let (base_url, server, _handle) = start_test_daemon(config).await;
+        let client = reqwest::Client::new();
+
+        // 1. GET /v1/transparency/catena/chain on empty log
+        let res = client
+            .get(format!("{base_url}/v1/transparency/catena/chain"))
+            .header("Authorization", "Bearer test_token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
+        let chain_json: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(chain_json["chain_length"], 0);
+
+        // 2. POST /v1/transparency/verify/catena with valid sequence
+        let cp0 = "00".repeat(32);
+        let cp1 = "11".repeat(32);
+        let c0 = satspath_core::transparency::catena_commitment(&cp0, 0).unwrap();
+        let c1 = satspath_core::transparency::catena_commitment(&cp1, 1).unwrap();
+
+        let a0 = satspath_core::transparency::BitcoinAnchor {
+            network: satspath_core::BitcoinNetwork::Regtest,
+            txid: "aa".repeat(32),
+            block_hash: Some("00".repeat(32)),
+            block_height: None,
+            confirmations: 1,
+            commitment: c0,
+            verified: true,
+            prev_txid: None,
+            prev_vout: None,
+            continuation_vout: Some(1),
+            chain_index: Some(0),
+        };
+        let a1 = satspath_core::transparency::BitcoinAnchor {
+            network: satspath_core::BitcoinNetwork::Regtest,
+            txid: "bb".repeat(32),
+            block_hash: Some("00".repeat(32)),
+            block_height: None,
+            confirmations: 1,
+            commitment: c1,
+            verified: true,
+            prev_txid: Some(a0.txid.clone()),
+            prev_vout: Some(1),
+            continuation_vout: Some(1),
+            chain_index: Some(1),
+        };
+
+        let verify_payload = serde_json::json!({
+            "anchors": [a0, a1],
+            "checkpoint_hashes": [cp0, cp1]
+        });
+        let verify_res = client
+            .post(format!("{base_url}/v1/transparency/verify/catena"))
+            .json(&verify_payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(verify_res.status(), reqwest::StatusCode::OK);
+        let verify_body: serde_json::Value = verify_res.json().await.unwrap();
+        assert_eq!(verify_body["structurally_consistent"], true);
+        assert_eq!(verify_body["commitments_valid"], true);
+
+        // 3. POST /v1/transparency/verify/catena with non-canonical continuation_vout returns 400
+        let mut a0_bad = a0;
+        a0_bad.continuation_vout = Some(2);
+        let bad_payload = serde_json::json!({
+            "anchors": [a0_bad]
+        });
+        let bad_res = client
+            .post(format!("{base_url}/v1/transparency/verify/catena"))
+            .json(&bad_payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_res.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        server.unblock();
+    }
 }

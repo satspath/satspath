@@ -221,6 +221,12 @@ impl RegtestAnchorClient {
                     "could not locate 1000-sat continuation UTXO in decoded genesis tx".into(),
                 )
             })?;
+        if continuation_vout != super::catena::CATENA_CONTINUATION_VOUT {
+            return Err(crate::SatsPathError::ValidationError(format!(
+                "continuation_vout is {continuation_vout}, expected fixed index {}",
+                super::catena::CATENA_CONTINUATION_VOUT
+            )));
+        }
         let decoded_txid = decoded["txid"].as_str().ok_or_else(|| {
             crate::SatsPathError::NetworkError("missing txid in decoded genesis tx".into())
         })?;
@@ -240,25 +246,10 @@ impl RegtestAnchorClient {
         };
         on_pre_broadcast(&pre_anchor)?;
 
-        let txid = self
-            .rpc("sendrawtransaction", json!([signed_hex]))
-            .await?
-            .as_str()
-            .ok_or_else(|| crate::SatsPathError::NetworkError("missing anchor txid".into()))?
-            .to_owned();
+        let txid = self.broadcast_raw_transaction(signed_hex).await?;
 
         // Lock the continuation output persistently so wallet coin selection cannot accidentally spend it
-        let lock_res = self
-            .rpc(
-                "lockunspent",
-                json!([false, [{"txid": &txid, "vout": continuation_vout}], true]),
-            )
-            .await?;
-        if lock_res.as_bool() != Some(true) {
-            return Err(crate::SatsPathError::NetworkError(
-                "lockunspent failed to lock continuation output".into(),
-            ));
-        }
+        self.lock_continuation(&txid, continuation_vout).await?;
 
         let miner_address = self.rpc("getnewaddress", json!([])).await?;
         self.rpc("generatetoaddress", json!([1, miner_address]))
@@ -296,16 +287,14 @@ impl RegtestAnchorClient {
             .await
     }
 
-    /// Create, fund, sign, broadcast and mine the next Catena anchor transaction with a pre-broadcast hook.
-    pub async fn anchor_catena_next_with_hook<F>(
+    /// Create, fund, and sign the next Catena anchor transaction without broadcasting it.
+    ///
+    /// Returns the signed transaction hex and the unbroadcasted `BitcoinAnchor` candidate.
+    pub async fn create_signed_catena_next(
         &self,
         checkpoint_hash: &str,
         prev_anchor: &BitcoinAnchor,
-        on_pre_broadcast: F,
-    ) -> crate::Result<BitcoinAnchor>
-    where
-        F: FnOnce(&BitcoinAnchor) -> crate::Result<()>,
-    {
+    ) -> crate::Result<(String, BitcoinAnchor)> {
         let prev_continuation_vout = prev_anchor.continuation_vout.ok_or_else(|| {
             crate::SatsPathError::ValidationError(
                 "previous anchor is missing continuation_vout for chaining".into(),
@@ -388,6 +377,12 @@ impl RegtestAnchorClient {
                     "could not locate 1000-sat continuation UTXO in decoded chained tx".into(),
                 )
             })?;
+        if next_continuation_vout != super::catena::CATENA_CONTINUATION_VOUT {
+            return Err(crate::SatsPathError::ValidationError(format!(
+                "continuation_vout is {next_continuation_vout}, expected fixed index {}",
+                super::catena::CATENA_CONTINUATION_VOUT
+            )));
+        }
         let decoded_txid = decoded["txid"].as_str().ok_or_else(|| {
             crate::SatsPathError::NetworkError("missing txid in decoded chained tx".into())
         })?;
@@ -398,40 +393,55 @@ impl RegtestAnchorClient {
             block_hash: None,
             block_height: None,
             confirmations: 0,
-            commitment: commitment.clone(),
+            commitment,
             verified: false,
             prev_txid: Some(prev_anchor.txid.clone()),
             prev_vout: Some(prev_continuation_vout),
             continuation_vout: Some(next_continuation_vout),
             chain_index: Some(next_index),
         };
-        on_pre_broadcast(&pre_anchor)?;
 
+        Ok((signed_hex.to_string(), pre_anchor))
+    }
+
+    /// Broadcast a raw signed transaction to the Bitcoin network.
+    pub async fn broadcast_raw_transaction(&self, tx_hex: &str) -> crate::Result<String> {
         let txid = self
-            .rpc("sendrawtransaction", json!([signed_hex]))
+            .rpc("sendrawtransaction", json!([tx_hex]))
             .await?
             .as_str()
             .ok_or_else(|| crate::SatsPathError::NetworkError("missing anchor txid".into()))?
             .to_owned();
+        Ok(txid)
+    }
 
-        // Lock newly created continuation output persistently to protect it from wallet coin selection
-        let lock_res = self
-            .rpc(
-                "lockunspent",
-                json!([false, [{"txid": &txid, "vout": next_continuation_vout}], true]),
-            )
+    /// Create, fund, sign, broadcast and mine the next Catena anchor transaction with a pre-broadcast hook.
+    pub async fn anchor_catena_next_with_hook<F>(
+        &self,
+        checkpoint_hash: &str,
+        prev_anchor: &BitcoinAnchor,
+        on_pre_broadcast: F,
+    ) -> crate::Result<BitcoinAnchor>
+    where
+        F: FnOnce(&BitcoinAnchor) -> crate::Result<()>,
+    {
+        let (signed_hex, pre_anchor) = self
+            .create_signed_catena_next(checkpoint_hash, prev_anchor)
             .await?;
-        if lock_res.as_bool() != Some(true) {
-            return Err(crate::SatsPathError::NetworkError(
-                "lockunspent failed to lock chained continuation output".into(),
-            ));
-        }
+        on_pre_broadcast(&pre_anchor)?;
+
+        let txid = self.broadcast_raw_transaction(&signed_hex).await?;
+
+        let continuation_vout = pre_anchor.continuation_vout.ok_or_else(|| {
+            crate::SatsPathError::ValidationError("missing continuation_vout in pre-anchor".into())
+        })?;
+        self.lock_continuation(&txid, continuation_vout).await?;
 
         let miner_address = self.rpc("getnewaddress", json!([])).await?;
         self.rpc("generatetoaddress", json!([1, miner_address]))
             .await?;
 
-        let tx = self.rpc("getrawtransaction", json!([txid, true])).await?;
+        let tx = self.rpc("getrawtransaction", json!([&txid, true])).await?;
         let confirmations = tx["confirmations"].as_u64().unwrap_or(0) as u32;
         let block_hash = tx["blockhash"].as_str().map(str::to_owned);
 
@@ -441,12 +451,12 @@ impl RegtestAnchorClient {
             block_hash,
             block_height: None,
             confirmations,
-            commitment,
-            verified: confirmations > 0 && inputs_spent,
-            prev_txid: Some(prev_anchor.txid.clone()),
-            prev_vout: Some(prev_continuation_vout),
-            continuation_vout: Some(next_continuation_vout),
-            chain_index: Some(next_index),
+            commitment: pre_anchor.commitment,
+            verified: confirmations > 0,
+            prev_txid: pre_anchor.prev_txid,
+            prev_vout: pre_anchor.prev_vout,
+            continuation_vout: pre_anchor.continuation_vout,
+            chain_index: pre_anchor.chain_index,
         })
     }
 
@@ -458,6 +468,12 @@ impl RegtestAnchorClient {
         genesis_txid: &str,
         genesis_vout: u32,
     ) -> crate::Result<Vec<BitcoinAnchor>> {
+        if genesis_vout != super::catena::CATENA_CONTINUATION_VOUT {
+            return Err(crate::SatsPathError::ValidationError(format!(
+                "pinned genesis_vout is {genesis_vout}, expected fixed index {}",
+                super::catena::CATENA_CONTINUATION_VOUT
+            )));
+        }
         let mut chain = Vec::new();
         let mut curr_txid = latest_txid.to_string();
         let mut successor_continuation_vout: Option<u32> = None;
@@ -513,7 +529,23 @@ impl RegtestAnchorClient {
                 )));
             }
 
-            let continuation_vout = successor_continuation_vout;
+            // Verify continuation output exists at canonical index 1 with 1,000 sats
+            let cont_out = vouts
+                .get(super::catena::CATENA_CONTINUATION_VOUT as usize)
+                .ok_or_else(|| {
+                    crate::SatsPathError::ValidationError(format!(
+                        "tx {curr_txid} is missing continuation output at index {}",
+                        super::catena::CATENA_CONTINUATION_VOUT
+                    ))
+                })?;
+            let cont_sats = parse_sats(&cont_out["value"]).unwrap_or(0);
+            if cont_sats != CONTINUATION_SATOSHIS {
+                return Err(crate::SatsPathError::ValidationError(format!(
+                    "tx {curr_txid} continuation outpoint at index {} has {cont_sats} sats, expected {CONTINUATION_SATOSHIS}",
+                    super::catena::CATENA_CONTINUATION_VOUT
+                )));
+            }
+
             let block_hash = tx["blockhash"].as_str().map(str::to_owned);
 
             if curr_txid == genesis_txid {
@@ -569,6 +601,13 @@ impl RegtestAnchorClient {
                 ))
             })? as u32;
 
+            if vin_vout != super::catena::CATENA_CONTINUATION_VOUT {
+                return Err(crate::SatsPathError::ValidationError(format!(
+                    "tx {curr_txid} vin[0] spent vout {vin_vout}, expected fixed index {}",
+                    super::catena::CATENA_CONTINUATION_VOUT
+                )));
+            }
+
             let parent_tx = self
                 .rpc("getrawtransaction", json!([vin_txid, true]))
                 .await?;
@@ -619,7 +658,7 @@ impl RegtestAnchorClient {
                 verified: true,
                 prev_txid: Some(prev_txid.clone()),
                 prev_vout: Some(prev_vout),
-                continuation_vout,
+                continuation_vout: Some(super::catena::CATENA_CONTINUATION_VOUT),
                 chain_index: None,
             });
 

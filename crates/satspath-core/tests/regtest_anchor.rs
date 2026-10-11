@@ -96,16 +96,39 @@ async fn catena_double_spend_equivocation_rejected_by_bitcoin_core() {
     // 1. Create Genesis
     let genesis = client.anchor_catena_genesis(&cp_genesis).await.unwrap();
 
-    // 2. Spend continuation UTXO to branch 1 (confirmed)
-    let branch1 = client
-        .anchor_catena_next(&cp_branch1, &genesis)
+    // 2. Pre-sign both branch 1 and branch 2 while genesis continuation UTXO is still unspent
+    let (branch1_hex, branch1_pre) = client
+        .create_signed_catena_next(&cp_branch1, &genesis)
         .await
         .unwrap();
-    assert!(branch1.verified);
+    let (branch2_hex, branch2_pre) = client
+        .create_signed_catena_next(&cp_branch2, &genesis)
+        .await
+        .unwrap();
 
-    // 3. Attempt to equivocate by spending the SAME genesis continuation UTXO to branch 2
-    // Bitcoin Core must reject this transaction because genesis continuation UTXO is already spent!
-    let equivocation_attempt = client.anchor_catena_next(&cp_branch2, &genesis).await;
+    // 3. Broadcast and mine branch 1 (confirmed)
+    let branch1_txid = client
+        .broadcast_raw_transaction(&branch1_hex)
+        .await
+        .unwrap();
+    client.mine_blocks(1).await.unwrap();
+
+    let branch1_tx = client
+        .get_raw_transaction(&branch1_txid)
+        .await
+        .unwrap()
+        .expect("branch1 tx must be in blockchain");
+    assert!(branch1_tx["confirmations"].as_u64().unwrap_or(0) > 0);
+
+    // Verify genesis continuation UTXO is now spent
+    assert!(!client
+        .is_tx_out_unspent(&genesis.txid, genesis.continuation_vout.unwrap())
+        .await
+        .unwrap());
+
+    // 4. Attempt to equivocate by broadcasting branch 2 spending the SAME genesis continuation UTXO
+    // Bitcoin Core must reject this transaction via native consensus/mempool rules because genesis continuation UTXO is already spent!
+    let equivocation_attempt = client.broadcast_raw_transaction(&branch2_hex).await;
     assert!(
         equivocation_attempt.is_err(),
         "Bitcoin Core must reject double-spending a continuation UTXO"
@@ -115,20 +138,18 @@ async fn catena_double_spend_equivocation_rejected_by_bitcoin_core() {
         err_msg.contains("bad-txns-inputs-missingorspent")
             || err_msg.contains("txn-mempool-conflict")
             || err_msg.contains("Missing inputs")
-            || err_msg.contains("missing-inputs")
-            || err_msg.contains("did not fully sign"),
+            || err_msg.contains("missing-inputs"),
         "Bitcoin Core error must indicate input conflict or spent inputs: {err_msg}"
     );
 
-    // 4. In-memory equivocation detector verification
-    // Construct hypothetical branch2 anchor to test detector
-    let mut branch2_hypothetical = branch1.clone();
-    branch2_hypothetical.txid = "ff".repeat(32);
-    branch2_hypothetical.commitment =
-        satspath_core::transparency::catena_commitment(&cp_branch2, 1).unwrap();
+    // 5. In-memory equivocation detector verification
+    let mut branch1_anchor = branch1_pre;
+    branch1_anchor.txid = branch1_txid;
+    branch1_anchor.confirmations = branch1_tx["confirmations"].as_u64().unwrap_or(1) as u32;
+    branch1_anchor.verified = true;
 
     let equivocation_evidence =
-        satspath_core::transparency::detect_catena_equivocation(&branch1, &branch2_hypothetical);
+        satspath_core::transparency::detect_catena_equivocation(&branch1_anchor, &branch2_pre);
     assert!(equivocation_evidence.is_some());
     let proof = equivocation_evidence.unwrap();
     assert_eq!(proof.spent_txid, genesis.txid);

@@ -11,9 +11,9 @@ use crate::{Result, SignedPaymentProfile};
 
 use super::tree::inclusion_proof;
 use super::{
-    anchor_commitment, leaf_hash, merkle_root, verify_identifier_history, BitcoinAnchor,
-    MerkleConsistencyProof, MerkleInclusionProof, NameAction, NameEvent, TransparencyCheckpoint,
-    TransparencyError,
+    anchor_commitment, catena_commitment, leaf_hash, merkle_root, verify_identifier_history,
+    BitcoinAnchor, MerkleConsistencyProof, MerkleInclusionProof, NameAction, NameEvent,
+    TransparencyCheckpoint, TransparencyError,
 };
 
 const EVENTS_FILE: &str = "transparency-events-v1.jsonl";
@@ -359,10 +359,14 @@ impl TransparencyLog {
             .checkpoints
             .last_mut()
             .ok_or_else(|| TransparencyError::CorruptStore("no checkpoint to anchor".into()))?;
+        let expected_commitment = match anchor.chain_index {
+            Some(idx) => catena_commitment(&checkpoint.checkpoint_hash()?, idx)
+                .map_err(|e| crate::SatsPathError::SerializationError(e.to_string()))?,
+            None => anchor_commitment(&checkpoint.checkpoint_hash()?)
+                .map_err(|e| crate::SatsPathError::SerializationError(e.to_string()))?,
+        };
         if anchor.network != crate::BitcoinNetwork::Regtest
-            || anchor.commitment
-                != anchor_commitment(&checkpoint.checkpoint_hash()?)
-                    .map_err(|e| crate::SatsPathError::SerializationError(e.to_string()))?
+            || anchor.commitment != expected_commitment
         {
             return Err(TransparencyError::CorruptStore(
                 "anchor commitment or network mismatch".into(),
@@ -503,10 +507,14 @@ impl TransparencyLog {
                 _ => {}
             }
             if let Some(anchor) = &checkpoint.bitcoin_anchor {
+                let expected_commitment = match anchor.chain_index {
+                    Some(idx) => catena_commitment(&checkpoint.checkpoint_hash()?, idx)
+                        .map_err(|e| TransparencyError::CorruptCheckpointChain(e.to_string()))?,
+                    None => anchor_commitment(&checkpoint.checkpoint_hash()?)
+                        .map_err(|e| TransparencyError::CorruptCheckpointChain(e.to_string()))?,
+                };
                 if anchor.network != crate::BitcoinNetwork::Regtest
-                    || anchor.commitment
-                        != anchor_commitment(&checkpoint.checkpoint_hash()?)
-                            .map_err(|e| TransparencyError::CorruptCheckpointChain(e.to_string()))?
+                    || anchor.commitment != expected_commitment
                 {
                     return Err(TransparencyError::CorruptCheckpointChain(
                         "invalid anchor commitment or disallowed network".into(),

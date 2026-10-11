@@ -13,6 +13,10 @@ pub const CONTINUATION_SATOSHIS: u64 = 1000;
 /// Standard value of the continuation UTXO in BTC.
 pub const CONTINUATION_BTC: f64 = 0.00001000;
 
+/// Canonical continuation output index in Catena transactions.
+/// Output 0 is always OP_RETURN, output 1 is always the 1,000-sat continuation UTXO.
+pub const CATENA_CONTINUATION_VOUT: u32 = 1;
+
 /// Represents the public genesis of a Catena anchoring chain on Bitcoin.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CatenaGenesis {
@@ -105,10 +109,11 @@ pub fn verify_catena_links(anchors: &[BitcoinAnchor]) -> Result<bool, Transparen
             "genesis anchor cannot have a predecessor UTXO".into(),
         ));
     }
-    if genesis.continuation_vout.is_none() && anchors.len() > 1 {
-        return Err(TransparencyError::InvalidCatenaChain(
-            "genesis anchor is missing continuation_vout for chained successors".into(),
-        ));
+    if genesis.continuation_vout != Some(CATENA_CONTINUATION_VOUT) {
+        return Err(TransparencyError::InvalidCatenaChain(format!(
+            "genesis anchor continuation_vout is {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
+            genesis.continuation_vout
+        )));
     }
     if !genesis.verified || genesis.confirmations == 0 {
         return Err(TransparencyError::InvalidCatenaChain(
@@ -139,19 +144,19 @@ pub fn verify_catena_links(anchors: &[BitcoinAnchor]) -> Result<bool, Transparen
             )));
         }
 
-        if curr.prev_vout != prev.continuation_vout {
+        if curr.prev_vout != Some(CATENA_CONTINUATION_VOUT) {
             return Err(TransparencyError::InvalidCatenaChain(format!(
-                "anchor at step {} prev_vout ({:?}) does not match predecessor continuation_vout ({:?})",
+                "anchor at step {} prev_vout ({:?}) does not match fixed continuation_vout ({CATENA_CONTINUATION_VOUT})",
                 i + 1,
-                curr.prev_vout,
-                prev.continuation_vout
+                curr.prev_vout
             )));
         }
 
-        if i + 2 < anchors.len() && curr.continuation_vout.is_none() {
+        if curr.continuation_vout != Some(CATENA_CONTINUATION_VOUT) {
             return Err(TransparencyError::InvalidCatenaChain(format!(
-                "anchor at step {} is missing continuation_vout",
-                i + 1
+                "anchor at step {} continuation_vout is {:?}, expected Some({CATENA_CONTINUATION_VOUT})",
+                i + 1,
+                curr.continuation_vout
             )));
         }
 
@@ -478,5 +483,47 @@ mod tests {
         let mut bad_index_chain = chain.clone();
         bad_index_chain[1].chain_index = Some(5);
         assert!(verify_catena_commitments(&bad_index_chain, &[&cp0, &cp1, &cp2]).is_err());
+    }
+
+    #[test]
+    fn test_catena_verification_rejects_non_canonical_continuation_vout() {
+        let a0 = make_test_anchor(0x10, Some(0), None, None, Some(1), true, 1);
+        // Step 1 parent has continuation_vout 2 instead of canonical 1
+        let a1_bad_parent = make_test_anchor(
+            0x11,
+            Some(1),
+            Some(a0.txid.clone()),
+            Some(1),
+            Some(2),
+            true,
+            1,
+        );
+        let res = verify_catena_links(&[a0.clone(), a1_bad_parent]);
+        assert!(matches!(res, Err(TransparencyError::InvalidCatenaChain(_))));
+
+        // Step 2 attempts to spend prev_vout 2 instead of canonical 1
+        let a1 = make_test_anchor(
+            0x11,
+            Some(1),
+            Some(a0.txid.clone()),
+            Some(1),
+            Some(1),
+            true,
+            1,
+        );
+        let a2_bad_spend = make_test_anchor(
+            0x12,
+            Some(2),
+            Some(a1.txid.clone()),
+            Some(2),
+            Some(1),
+            true,
+            1,
+        );
+        let res2 = verify_catena_links(&[a0, a1, a2_bad_spend]);
+        assert!(matches!(
+            res2,
+            Err(TransparencyError::InvalidCatenaChain(_))
+        ));
     }
 }
