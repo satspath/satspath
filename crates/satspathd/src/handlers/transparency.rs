@@ -337,8 +337,13 @@ pub(crate) async fn anchor_latest_checkpoint(
     anchored.sign(&operator)?;
 
     let _mutation_guard = state.mutation_lock.lock().await;
-    TransactionalTransparencyStore::open(&state.home)?
-        .replace_latest_checkpoint(&checkpoint_hash, &anchored)?;
+    let store = TransactionalTransparencyStore::open(&state.home)?;
+    if store
+        .replace_latest_checkpoint(&checkpoint_hash, &anchored)
+        .is_err()
+    {
+        store.replace_checkpoint_by_hash(&checkpoint_hash, &anchored)?;
+    }
     let _ = fs::remove_file(&pending_file);
     Ok(anchor)
 }
