@@ -299,7 +299,7 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
                     "chain_length": chain.len(),
                     "genesis": chain.first(),
                     "latest": chain.last(),
-                    "anchors": chain,
+                    "anchors": paginated(&raw_url, &chain),
                 })
             }),
         ),

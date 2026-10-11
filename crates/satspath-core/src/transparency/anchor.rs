@@ -799,6 +799,21 @@ impl RegtestAnchorClient {
         }
     }
 
+    /// Retrieve in-wallet transaction if tracked by the Bitcoin Core wallet, returning None if unknown to the wallet.
+    pub async fn get_wallet_transaction(&self, txid: &str) -> crate::Result<Option<Value>> {
+        match self.rpc("gettransaction", json!([txid])).await {
+            Ok(tx) => Ok(Some(tx)),
+            Err(crate::SatsPathError::NetworkError(ref msg))
+                if msg.contains("Invalid or non-wallet transaction id")
+                    || msg.contains("code\":-5")
+                    || msg.contains("code: -5") =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Check if a specific outpoint is currently unspent on the blockchain (via gettxout).
     pub async fn is_tx_out_unspent(&self, txid: &str, vout: u32) -> crate::Result<bool> {
         let res = self.rpc("gettxout", json!([txid, vout])).await?;

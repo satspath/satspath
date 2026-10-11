@@ -359,6 +359,19 @@ impl TransparencyLog {
             .checkpoints
             .last()
             .ok_or_else(|| TransparencyError::CorruptStore("no checkpoint to anchor".into()))?;
+        if let Some(existing) = &last_checkpoint.bitcoin_anchor {
+            if !(existing.txid == anchor.txid
+                && existing.chain_index == anchor.chain_index
+                && existing.prev_txid == anchor.prev_txid
+                && existing.prev_vout == anchor.prev_vout
+                && existing.continuation_vout == anchor.continuation_vout)
+            {
+                return Err(TransparencyError::CorruptCheckpointChain(
+                    "latest checkpoint already carries a different Bitcoin anchor".into(),
+                )
+                .into());
+            }
+        }
         let expected_commitment = match anchor.chain_index {
             Some(idx) => catena_commitment(&last_checkpoint.checkpoint_hash()?, idx)
                 .map_err(|e| crate::SatsPathError::SerializationError(e.to_string()))?,

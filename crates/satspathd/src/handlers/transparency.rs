@@ -122,7 +122,14 @@ pub(crate) async fn anchor_latest_checkpoint(
                             .await
                             .unwrap_or(false)
                     }
-                    None => true, // Genesis was never broadcast, can safely discard
+                    None => match client.get_wallet_transaction(&pending.anchor.txid).await {
+                        Ok(None) => true,
+                        Ok(Some(wtx)) => {
+                            let confs = wtx["confirmations"].as_i64().unwrap_or(0);
+                            confs < 0
+                        }
+                        Err(_) => false,
+                    },
                 };
 
                 if can_discard {
@@ -134,7 +141,7 @@ pub(crate) async fn anchor_latest_checkpoint(
                     // Fall through to build and broadcast a fresh anchor
                 } else {
                     anyhow::bail!(
-                        "pending anchor {} was not found, but predecessor output is already spent",
+                        "pending anchor {} was not found via getrawtransaction, but wallet or predecessor indicates it may exist",
                         pending.anchor.txid
                     );
                 }

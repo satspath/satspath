@@ -1569,6 +1569,11 @@ mod tests {
         assert_eq!(res.status(), reqwest::StatusCode::OK);
         let chain_json: serde_json::Value = res.json().await.unwrap();
         assert_eq!(chain_json["chain_length"], 0);
+        assert_eq!(chain_json["anchors"]["total"], 0);
+        assert!(chain_json["anchors"]["items"]
+            .as_array()
+            .unwrap()
+            .is_empty());
 
         // 2. POST /v1/transparency/verify/catena with valid sequence
         let cp0 = "00".repeat(32);

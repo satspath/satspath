@@ -782,6 +782,21 @@ fn catena_anchor_rejects_out_of_order_attachments() {
     log.attach_latest_anchor(a0.clone(), &op_key.secret_key)
         .unwrap();
 
+    // Re-attaching identical anchor to cp0 succeeds idempotently
+    assert!(log
+        .attach_latest_anchor(a0.clone(), &op_key.secret_key)
+        .is_ok());
+
+    // Attempting to overwrite existing anchor with a different one fails closed
+    let mut conflicting_anchor = a0.clone();
+    conflicting_anchor.txid = "ff".repeat(32);
+    assert!(matches!(
+        log.attach_latest_anchor(conflicting_anchor, &op_key.secret_key),
+        Err(SatsPathError::Transparency(
+            TransparencyError::CorruptCheckpointChain(_)
+        ))
+    ));
+
     // Create Checkpoint 1
     let key2 = generate_identity_keypair();
     let signed_reg2 = profile("bob@example.com", &key2, 0);
