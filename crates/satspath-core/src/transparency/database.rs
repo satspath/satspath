@@ -388,6 +388,12 @@ impl TransactionalTransparencyStore {
             ))
         })?;
         let new_hash = checkpoint.checkpoint_hash()?;
+        if new_hash != target_hash {
+            return Err(TransparencyError::CorruptCheckpointChain(
+                "replacement may only change the Bitcoin receipt and signature".into(),
+            )
+            .into());
+        }
         let json = serde_json::to_string(checkpoint)?;
         transaction
             .execute(

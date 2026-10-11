@@ -93,7 +93,7 @@ pub(crate) async fn anchor_latest_checkpoint(
     let client = satspath_core::transparency::RegtestAnchorClient::from_env()?;
 
     // Find the latest Catena anchor by selecting the anchor with the maximum chain_index
-    let prev_anchor = log
+    let mut prev_anchor = log
         .checkpoints()
         .iter()
         .filter_map(|c| c.bitcoin_anchor.as_ref())
@@ -158,82 +158,115 @@ pub(crate) async fn anchor_latest_checkpoint(
                     );
                 };
 
-                // If unconfirmed, mine a block on regtest to confirm it
-                let mut confirmations = tx["confirmations"].as_u64().unwrap_or(0) as u32;
-                if confirmations == 0 {
-                    client.mine_blocks(1).await?;
-                    if let Some(updated_tx) =
-                        client.get_raw_transaction(&pending.anchor.txid).await?
-                    {
-                        tx = updated_tx;
-                        confirmations = tx["confirmations"].as_u64().unwrap_or(0) as u32;
+                // If the target checkpoint was already anchored with this txid, clear stale pending file and continue
+                if target_cp.bitcoin_anchor.as_ref().map(|a| a.txid.as_str())
+                    == Some(&pending.anchor.txid)
+                {
+                    let _ = fs::remove_file(&pending_file);
+                    if pending.checkpoint_hash == checkpoint_hash {
+                        return Ok(pending.anchor);
                     }
-                }
+                    prev_anchor = target_cp.bitcoin_anchor.clone();
+                } else {
+                    // If unconfirmed, mine a block on regtest to confirm it
+                    let mut confirmations = tx["confirmations"].as_u64().unwrap_or(0) as u32;
+                    if confirmations == 0 {
+                        client.mine_blocks(1).await?;
+                        if let Some(updated_tx) =
+                            client.get_raw_transaction(&pending.anchor.txid).await?
+                        {
+                            tx = updated_tx;
+                            confirmations = tx["confirmations"].as_u64().unwrap_or(0) as u32;
+                        }
+                    }
 
-                if confirmations == 0 {
-                    anyhow::bail!(
-                        "pending anchor {} is not yet confirmed on Bitcoin",
-                        pending.anchor.txid
-                    );
-                }
-
-                // Verify vout[0] has the expected commitment
-                let expected_script = format!("6a20{}", pending.anchor.commitment);
-                let vout_valid = tx["vout"]
-                    .as_array()
-                    .and_then(|vouts| vouts.first())
-                    .and_then(|v0| v0["scriptPubKey"]["hex"].as_str())
-                    == Some(&expected_script);
-                if !vout_valid {
-                    anyhow::bail!(
-                        "pending anchor {} vout[0] does not match commitment",
-                        pending.anchor.txid
-                    );
-                }
-
-                // Validate linkage against the recorded predecessor
-                if let Some(prev_txid) = &pending.anchor.prev_txid {
-                    let vin_spends_prev = tx["vin"]
-                        .as_array()
-                        .and_then(|vins| vins.first())
-                        .map(|vin| {
-                            vin["txid"].as_str() == Some(prev_txid)
-                                && vin["vout"].as_u64()
-                                    == pending.anchor.prev_vout.map(|v| v as u64)
-                        })
-                        .unwrap_or(false);
-                    if !vin_spends_prev {
+                    if confirmations == 0 {
                         anyhow::bail!(
-                            "pending anchor {} vin[0] does not spend predecessor outpoint ({}, {:?})",
-                            pending.anchor.txid,
-                            prev_txid,
-                            pending.anchor.prev_vout
+                            "pending anchor {} is not yet confirmed on Bitcoin",
+                            pending.anchor.txid
                         );
                     }
-                } else if pending.anchor.prev_vout.is_some()
-                    || pending.anchor.chain_index != Some(0)
-                {
-                    anyhow::bail!("pending anchor is not a valid genesis anchor");
-                }
 
-                let mut reconciled_anchor = pending.anchor;
-                reconciled_anchor.confirmations = confirmations;
-                reconciled_anchor.block_hash = tx["blockhash"].as_str().map(str::to_owned);
-                reconciled_anchor.verified = true;
+                    // Verify vout[0] has the expected commitment
+                    let expected_script = format!("6a20{}", pending.anchor.commitment);
+                    let vout_valid = tx["vout"]
+                        .as_array()
+                        .and_then(|vouts| vouts.first())
+                        .and_then(|v0| v0["scriptPubKey"]["hex"].as_str())
+                        == Some(&expected_script);
+                    if !vout_valid {
+                        anyhow::bail!(
+                            "pending anchor {} vout[0] does not match commitment",
+                            pending.anchor.txid
+                        );
+                    }
 
-                let operator = load_or_create_transparency_operator(&state.home)?;
-                target_cp.bitcoin_anchor = Some(reconciled_anchor.clone());
-                target_cp.sign(&operator)?;
-                let _mutation_guard = state.mutation_lock.lock().await;
-                if pending.checkpoint_hash == checkpoint_hash {
-                    TransactionalTransparencyStore::open(&state.home)?
-                        .replace_latest_checkpoint(&checkpoint_hash, &target_cp)?;
-                } else {
-                    TransactionalTransparencyStore::open(&state.home)?
-                        .replace_checkpoint_by_hash(&pending.checkpoint_hash, &target_cp)?;
+                    // Verify continuation output exists, holds 1,000 sats, and lock it persistently
+                    let cont_vout = pending
+                        .anchor
+                        .continuation_vout
+                        .ok_or_else(|| anyhow::anyhow!("pending anchor lacks continuation_vout"))?;
+                    let vouts = tx["vout"]
+                        .as_array()
+                        .ok_or_else(|| anyhow::anyhow!("missing vouts in tx"))?;
+                    let cont_out = vouts.get(cont_vout as usize).ok_or_else(|| {
+                        anyhow::anyhow!("continuation vout {cont_vout} out of bounds")
+                    })?;
+                    let sats =
+                        satspath_core::transparency::parse_sats(&cont_out["value"]).unwrap_or(0);
+                    if sats != 1000 {
+                        anyhow::bail!("continuation output holds {sats} sats, expected 1000");
+                    }
+                    client
+                        .lock_continuation(&pending.anchor.txid, cont_vout)
+                        .await?;
+
+                    // Validate linkage against the recorded predecessor
+                    if let Some(prev_txid) = &pending.anchor.prev_txid {
+                        let vin_spends_prev = tx["vin"]
+                            .as_array()
+                            .and_then(|vins| vins.first())
+                            .map(|vin| {
+                                vin["txid"].as_str() == Some(prev_txid)
+                                    && vin["vout"].as_u64()
+                                        == pending.anchor.prev_vout.map(|v| v as u64)
+                            })
+                            .unwrap_or(false);
+                        if !vin_spends_prev {
+                            anyhow::bail!(
+                                "pending anchor {} vin[0] does not spend predecessor outpoint ({}, {:?})",
+                                pending.anchor.txid,
+                                prev_txid,
+                                pending.anchor.prev_vout
+                            );
+                        }
+                    } else if pending.anchor.prev_vout.is_some()
+                        || pending.anchor.chain_index != Some(0)
+                    {
+                        anyhow::bail!("pending anchor is not a valid genesis anchor");
+                    }
+
+                    let mut reconciled_anchor = pending.anchor;
+                    reconciled_anchor.confirmations = confirmations;
+                    reconciled_anchor.block_hash = tx["blockhash"].as_str().map(str::to_owned);
+                    reconciled_anchor.verified = true;
+
+                    let operator = load_or_create_transparency_operator(&state.home)?;
+                    target_cp.bitcoin_anchor = Some(reconciled_anchor.clone());
+                    target_cp.sign(&operator)?;
+                    let _mutation_guard = state.mutation_lock.lock().await;
+                    if pending.checkpoint_hash == checkpoint_hash {
+                        TransactionalTransparencyStore::open(&state.home)?
+                            .replace_latest_checkpoint(&checkpoint_hash, &target_cp)?;
+                        let _ = fs::remove_file(&pending_file);
+                        return Ok(reconciled_anchor);
+                    } else {
+                        TransactionalTransparencyStore::open(&state.home)?
+                            .replace_checkpoint_by_hash(&pending.checkpoint_hash, &target_cp)?;
+                        let _ = fs::remove_file(&pending_file);
+                        prev_anchor = Some(reconciled_anchor);
+                    }
                 }
-                let _ = fs::remove_file(&pending_file);
-                return Ok(reconciled_anchor);
             }
         }
     }

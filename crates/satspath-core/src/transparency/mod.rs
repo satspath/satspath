@@ -22,9 +22,9 @@ mod verifier;
 #[cfg(test)]
 mod consistency_tests;
 
-#[cfg(feature = "std")]
-pub use anchor::RegtestAnchorClient;
 pub use anchor::{anchor_commitment, BitcoinAnchor, MockAnchorClient};
+#[cfg(feature = "std")]
+pub use anchor::{parse_sats, RegtestAnchorClient};
 pub use api::{
     MutationChallengeRequest, MutationChallengeResponse, MutationResponse, MutationStatus,
     MutationSubmitRequest,

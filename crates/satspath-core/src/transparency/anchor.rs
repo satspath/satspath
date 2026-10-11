@@ -34,7 +34,7 @@ pub fn anchor_commitment(checkpoint_hash: &str) -> Result<String, hex::FromHexEr
 }
 
 #[cfg(feature = "std")]
-fn parse_sats(val: &Value) -> Option<u64> {
+pub fn parse_sats(val: &Value) -> Option<u64> {
     val.as_u64()
         .or_else(|| val.as_f64().map(|btc| (btc * 100_000_000.0).round() as u64))
 }
@@ -706,6 +706,22 @@ impl RegtestAnchorClient {
         let miner_address = self.rpc("getnewaddress", json!([])).await?;
         self.rpc("generatetoaddress", json!([count, miner_address]))
             .await?;
+        Ok(())
+    }
+
+    /// Persistently lock a continuation outpoint to protect it from wallet coin selection.
+    pub async fn lock_continuation(&self, txid: &str, vout: u32) -> crate::Result<()> {
+        let lock_res = self
+            .rpc(
+                "lockunspent",
+                json!([false, [{"txid": txid, "vout": vout}], true]),
+            )
+            .await?;
+        if lock_res.as_bool() != Some(true) {
+            return Err(crate::SatsPathError::NetworkError(
+                "lockunspent failed to lock continuation output".into(),
+            ));
+        }
         Ok(())
     }
 }
