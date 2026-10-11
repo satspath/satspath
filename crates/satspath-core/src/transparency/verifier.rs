@@ -288,7 +288,17 @@ pub fn verify_key_continuity(events: &[NameEvent]) -> Result<bool> {
     Ok(true)
 }
 
-pub fn verify_event_transition(head: Option<&NameEvent>, proposed: &NameEvent) -> Result<()> {
+/// Validate an incremental transition between two adjacent events for an identifier,
+/// with an explicit active recovery policy.
+///
+/// NOTE: Full historical validation including recovery policy retention across
+/// updates that set `recovery_policy: None` must use `verify_identifier_history`
+/// (or `TransparencyLog::prepare_append`).
+pub fn verify_event_transition_with_policy(
+    head: Option<&NameEvent>,
+    proposed: &NameEvent,
+    active_recovery_policy: Option<&crate::recovery::RecoveryPolicy>,
+) -> Result<()> {
     match head {
         None => {
             if proposed.action != NameAction::Register || proposed.sequence != 0 {
@@ -328,10 +338,7 @@ pub fn verify_event_transition(head: Option<&NameEvent>, proposed: &NameEvent) -
             }
 
             let signing_key = if proposed.action == NameAction::RecoverKey {
-                let policy = head_event
-                    .recovery_policy
-                    .as_ref()
-                    .ok_or(TransparencyError::RecoveryDisabled)?;
+                let policy = active_recovery_policy.ok_or(TransparencyError::RecoveryDisabled)?;
                 let recovery = proposed.recovery.as_ref().ok_or_else(|| {
                     TransparencyError::InvalidRecovery("missing recovery proof".into())
                 })?;
@@ -404,6 +411,17 @@ pub fn verify_event_transition(head: Option<&NameEvent>, proposed: &NameEvent) -
     }
 
     Ok(())
+}
+
+/// Validate an incremental transition between two adjacent events for an identifier.
+///
+/// NOTE: Full historical validation including recovery policy retention across
+/// updates that set `recovery_policy: None` must use `verify_identifier_history`
+/// (or `TransparencyLog::prepare_append`). When checking an isolated single-step
+/// transition, `head.recovery_policy` is evaluated as the active policy.
+pub fn verify_event_transition(head: Option<&NameEvent>, proposed: &NameEvent) -> Result<()> {
+    let active_policy = head.and_then(|h| h.recovery_policy.as_ref());
+    verify_event_transition_with_policy(head, proposed, active_policy)
 }
 
 pub fn next_identifier_sequence(

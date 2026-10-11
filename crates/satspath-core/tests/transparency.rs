@@ -313,9 +313,7 @@ fn recovery_without_policy_fails_with_recovery_disabled() {
 
 #[test]
 fn recovery_with_valid_policy_and_proof_succeeds() {
-    use satspath_core::recovery::{
-        sign_guardian_authorization, KeyRecoveryProof, RecoveryPolicy,
-    };
+    use satspath_core::recovery::{sign_guardian_authorization, KeyRecoveryProof, RecoveryPolicy};
 
     let key = generate_identity_keypair();
     let g1 = generate_identity_keypair();

@@ -444,14 +444,19 @@ pub fn cmd_wallet_recover(
             .or_else(|| load_wallet().ok().and_then(|w| w.alias));
 
         if let Some(target) = &target_alias {
-            if let Ok(reg) = open_registry() {
-                if let Ok(existing) = reg.resolve_alias(target) {
+            let reg = open_registry()?;
+            match reg.resolve_alias(target) {
+                Ok(existing) => {
                     if existing.profile.identity_pubkey != pubkey_hex {
                         anyhow::bail!(
                             "derived key does not match the registered identity key for '{target}'; nothing was changed"
                         );
                     }
                 }
+                Err(satspath_core::SatsPathError::AliasNotFound(_)) => {
+                    // Alias not yet in local registry; key derivation can proceed.
+                }
+                Err(err) => return Err(err.into()),
             }
         }
 
