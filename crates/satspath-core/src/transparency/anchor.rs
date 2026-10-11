@@ -183,7 +183,9 @@ impl RegtestAnchorClient {
         let raw = self
             .rpc("createrawtransaction", json!([[], outputs]))
             .await?;
-        let funded = self.rpc("fundrawtransaction", json!([raw])).await?;
+        let funded = self
+            .rpc("fundrawtransaction", json!([raw, {"changePosition": 2}]))
+            .await?;
         let signed = self
             .rpc("signrawtransactionwithwallet", json!([funded["hex"]]))
             .await?;
@@ -196,10 +198,23 @@ impl RegtestAnchorClient {
             .as_str()
             .ok_or_else(|| crate::SatsPathError::NetworkError("missing signed hex".into()))?;
 
-        // Pre-broadcast validation: verify continuation UTXO output exists before broadcasting
+        // Pre-broadcast validation: verify continuation UTXO output and commitment exist before broadcasting
         let decoded = self
             .rpc("decoderawtransaction", json!([signed_hex]))
             .await?;
+
+        let expected_commitment_script = format!("6a20{commitment}");
+        let commitment_valid = decoded["vout"]
+            .as_array()
+            .and_then(|vouts| vouts.first())
+            .and_then(|v0| v0["scriptPubKey"]["hex"].as_str())
+            == Some(&expected_commitment_script);
+        if !commitment_valid {
+            return Err(crate::SatsPathError::ValidationError(
+                "vout[0] is not the expected Catena OP_RETURN commitment".into(),
+            ));
+        }
+
         let continuation_vout = find_continuation_vout_for_address(&decoded, &continuation_addr)
             .ok_or_else(|| {
                 crate::SatsPathError::NetworkError(
@@ -233,11 +248,17 @@ impl RegtestAnchorClient {
             .to_owned();
 
         // Lock the continuation output persistently so wallet coin selection cannot accidentally spend it
-        self.rpc(
-            "lockunspent",
-            json!([false, [{"txid": &txid, "vout": continuation_vout}], true]),
-        )
-        .await?;
+        let lock_res = self
+            .rpc(
+                "lockunspent",
+                json!([false, [{"txid": &txid, "vout": continuation_vout}], true]),
+            )
+            .await?;
+        if lock_res.as_bool() != Some(true) {
+            return Err(crate::SatsPathError::NetworkError(
+                "lockunspent failed to lock continuation output".into(),
+            ));
+        }
 
         let miner_address = self.rpc("getnewaddress", json!([])).await?;
         self.rpc("generatetoaddress", json!([1, miner_address]))
@@ -314,7 +335,9 @@ impl RegtestAnchorClient {
         let raw = self
             .rpc("createrawtransaction", json!([inputs, outputs]))
             .await?;
-        let funded = self.rpc("fundrawtransaction", json!([raw])).await?;
+        let funded = self
+            .rpc("fundrawtransaction", json!([raw, {"changePosition": 2}]))
+            .await?;
         let signed = self
             .rpc("signrawtransactionwithwallet", json!([funded["hex"]]))
             .await?;
@@ -327,10 +350,23 @@ impl RegtestAnchorClient {
             .as_str()
             .ok_or_else(|| crate::SatsPathError::NetworkError("missing signed hex".into()))?;
 
-        // Pre-broadcast validation: verify vin[0] and continuation output before broadcast
+        // Pre-broadcast validation: verify vin[0], vout[0] commitment, and continuation output before broadcast
         let decoded = self
             .rpc("decoderawtransaction", json!([signed_hex]))
             .await?;
+
+        let expected_commitment_script = format!("6a20{commitment}");
+        let commitment_valid = decoded["vout"]
+            .as_array()
+            .and_then(|vouts| vouts.first())
+            .and_then(|v0| v0["scriptPubKey"]["hex"].as_str())
+            == Some(&expected_commitment_script);
+        if !commitment_valid {
+            return Err(crate::SatsPathError::ValidationError(
+                "vout[0] is not the expected Catena OP_RETURN commitment".into(),
+            ));
+        }
+
         let inputs_spent = decoded["vin"]
             .as_array()
             .and_then(|vins| vins.first())
@@ -379,11 +415,17 @@ impl RegtestAnchorClient {
             .to_owned();
 
         // Lock newly created continuation output persistently to protect it from wallet coin selection
-        self.rpc(
-            "lockunspent",
-            json!([false, [{"txid": &txid, "vout": next_continuation_vout}], true]),
-        )
-        .await?;
+        let lock_res = self
+            .rpc(
+                "lockunspent",
+                json!([false, [{"txid": &txid, "vout": next_continuation_vout}], true]),
+            )
+            .await?;
+        if lock_res.as_bool() != Some(true) {
+            return Err(crate::SatsPathError::NetworkError(
+                "lockunspent failed to lock chained continuation output".into(),
+            ));
+        }
 
         let miner_address = self.rpc("getnewaddress", json!([])).await?;
         self.rpc("generatetoaddress", json!([1, miner_address]))
@@ -636,6 +678,35 @@ impl RegtestAnchorClient {
             continuation_vout: None,
             chain_index: None,
         })
+    }
+
+    /// Retrieve decoded transaction if present in mempool or blockchain, returning None if unknown.
+    pub async fn get_raw_transaction(&self, txid: &str) -> crate::Result<Option<Value>> {
+        match self.rpc("getrawtransaction", json!([txid, true])).await {
+            Ok(tx) => Ok(Some(tx)),
+            Err(crate::SatsPathError::NetworkError(ref msg))
+                if msg.contains("No such mempool or blockchain transaction")
+                    || msg.contains("code\":-5")
+                    || msg.contains("code: -5") =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Check if a specific outpoint is currently unspent on the blockchain (via gettxout).
+    pub async fn is_tx_out_unspent(&self, txid: &str, vout: u32) -> crate::Result<bool> {
+        let res = self.rpc("gettxout", json!([txid, vout])).await?;
+        Ok(!res.is_null())
+    }
+
+    /// Mine a given number of blocks to a new address.
+    pub async fn mine_blocks(&self, count: u32) -> crate::Result<()> {
+        let miner_address = self.rpc("getnewaddress", json!([])).await?;
+        self.rpc("generatetoaddress", json!([count, miner_address]))
+            .await?;
+        Ok(())
     }
 }
 

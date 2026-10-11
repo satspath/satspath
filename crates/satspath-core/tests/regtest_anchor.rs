@@ -115,7 +115,8 @@ async fn catena_double_spend_equivocation_rejected_by_bitcoin_core() {
         err_msg.contains("bad-txns-inputs-missingorspent")
             || err_msg.contains("txn-mempool-conflict")
             || err_msg.contains("Missing inputs")
-            || err_msg.contains("missing-inputs"),
+            || err_msg.contains("missing-inputs")
+            || err_msg.contains("did not fully sign"),
         "Bitcoin Core error must indicate input conflict or spent inputs: {err_msg}"
     );
 

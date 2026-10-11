@@ -185,6 +185,12 @@ pub fn verify_catena_commitments(
 
     for (i, (anchor, &cp_hash)) in anchors.iter().zip(checkpoint_hashes.iter()).enumerate() {
         let expected_index = i as u64;
+        if anchor.chain_index != Some(expected_index) {
+            return Err(TransparencyError::InvalidCatenaChain(format!(
+                "anchor at step {} has unexpected chain index {:?}, expected Some({})",
+                i, anchor.chain_index, expected_index
+            )));
+        }
         let expected_commitment = catena_commitment(cp_hash, expected_index)
             .map_err(|e| TransparencyError::InvalidCatenaChain(e.to_string()))?;
 
@@ -467,5 +473,10 @@ mod tests {
         // Mismatched checkpoint hash
         let bad_cp2 = "33".repeat(32);
         assert!(verify_catena_commitments(&chain, &[&cp0, &cp1, &bad_cp2]).is_err());
+
+        // Mismatched chain index
+        let mut bad_index_chain = chain.clone();
+        bad_index_chain[1].chain_index = Some(5);
+        assert!(verify_catena_commitments(&bad_index_chain, &[&cp0, &cp1, &cp2]).is_err());
     }
 }

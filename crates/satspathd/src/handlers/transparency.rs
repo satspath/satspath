@@ -108,63 +108,138 @@ pub(crate) async fn anchor_latest_checkpoint(
             .map_err(|e| anyhow::anyhow!("failed to read pending anchor file: {e}"))?;
         let pending: PendingCatenaAnchor = serde_json::from_slice(&bytes)
             .map_err(|e| anyhow::anyhow!("failed to parse pending anchor file: {e}"))?;
-        if pending.checkpoint_hash != checkpoint_hash {
-            anyhow::bail!(
-                "pending anchor is for checkpoint {}, expected {}",
-                pending.checkpoint_hash,
-                checkpoint_hash
-            );
-        }
 
-        // Validate linkage against the current tip
-        match &prev_anchor {
-            Some(tip) => {
-                let expected_index = tip.chain_index.unwrap_or(0) + 1;
-                if pending.anchor.prev_txid.as_deref() != Some(&tip.txid)
-                    || pending.anchor.prev_vout != tip.continuation_vout
-                    || pending.anchor.chain_index != Some(expected_index)
-                {
+        // Query whether transaction is in mempool or blockchain
+        let maybe_tx = client.get_raw_transaction(&pending.anchor.txid).await?;
+        match maybe_tx {
+            None => {
+                // The transaction was never broadcast or was rejected from the mempool.
+                let can_discard = match &prev_anchor {
+                    Some(tip) => {
+                        let tip_vout = tip.continuation_vout.unwrap_or(1);
+                        client
+                            .is_tx_out_unspent(&tip.txid, tip_vout)
+                            .await
+                            .unwrap_or(false)
+                    }
+                    None => true, // Genesis was never broadcast, can safely discard
+                };
+
+                if can_discard {
+                    eprintln!(
+                        "satspathd: discarding stale pending Catena anchor transaction {}: never broadcast",
+                        pending.anchor.txid
+                    );
+                    let _ = fs::remove_file(&pending_file);
+                    // Fall through to build and broadcast a fresh anchor
+                } else {
                     anyhow::bail!(
-                        "pending anchor does not link to the current Catena tip {} (expected chain index {})",
-                        tip.txid,
-                        expected_index
+                        "pending anchor {} was not found, but predecessor output is already spent",
+                        pending.anchor.txid
                     );
                 }
             }
-            None => {
-                if pending.anchor.prev_txid.is_some()
-                    || pending.anchor.prev_vout.is_some()
-                    || pending.anchor.chain_index != Some(0)
-                {
-                    anyhow::bail!("pending anchor is not a valid genesis anchor");
+            Some(mut tx) => {
+                if pending.checkpoint_hash != checkpoint_hash {
+                    anyhow::bail!(
+                        "pending anchor is for checkpoint {}, expected {}",
+                        pending.checkpoint_hash,
+                        checkpoint_hash
+                    );
                 }
+
+                // If unconfirmed, mine a block on regtest to confirm it
+                let mut confirmations = tx["confirmations"].as_u64().unwrap_or(0) as u32;
+                if confirmations == 0 {
+                    client.mine_blocks(1).await?;
+                    if let Some(updated_tx) =
+                        client.get_raw_transaction(&pending.anchor.txid).await?
+                    {
+                        tx = updated_tx;
+                        confirmations = tx["confirmations"].as_u64().unwrap_or(0) as u32;
+                    }
+                }
+
+                if confirmations == 0 {
+                    anyhow::bail!(
+                        "pending anchor {} is not yet confirmed on Bitcoin",
+                        pending.anchor.txid
+                    );
+                }
+
+                // Verify vout[0] has the expected commitment
+                let expected_script = format!("6a20{}", pending.anchor.commitment);
+                let vout_valid = tx["vout"]
+                    .as_array()
+                    .and_then(|vouts| vouts.first())
+                    .and_then(|v0| v0["scriptPubKey"]["hex"].as_str())
+                    == Some(&expected_script);
+                if !vout_valid {
+                    anyhow::bail!(
+                        "pending anchor {} vout[0] does not match commitment",
+                        pending.anchor.txid
+                    );
+                }
+
+                // Validate linkage against the current tip
+                match &prev_anchor {
+                    Some(tip) => {
+                        let expected_index = tip.chain_index.unwrap_or(0) + 1;
+                        if pending.anchor.prev_txid.as_deref() != Some(&tip.txid)
+                            || pending.anchor.prev_vout != tip.continuation_vout
+                            || pending.anchor.chain_index != Some(expected_index)
+                        {
+                            anyhow::bail!(
+                                "pending anchor does not link to the current Catena tip {} (expected chain index {})",
+                                tip.txid,
+                                expected_index
+                            );
+                        }
+
+                        let vin_spends_prev = tx["vin"]
+                            .as_array()
+                            .and_then(|vins| vins.first())
+                            .map(|vin| {
+                                vin["txid"].as_str() == Some(&tip.txid)
+                                    && vin["vout"].as_u64()
+                                        == tip.continuation_vout.map(|v| v as u64)
+                            })
+                            .unwrap_or(false);
+                        if !vin_spends_prev {
+                            anyhow::bail!(
+                                "pending anchor {} vin[0] does not spend tip outpoint ({:?}, {:?})",
+                                pending.anchor.txid,
+                                tip.txid,
+                                tip.continuation_vout
+                            );
+                        }
+                    }
+                    None => {
+                        if pending.anchor.prev_txid.is_some()
+                            || pending.anchor.prev_vout.is_some()
+                            || pending.anchor.chain_index != Some(0)
+                        {
+                            anyhow::bail!("pending anchor is not a valid genesis anchor");
+                        }
+                    }
+                }
+
+                let mut reconciled_anchor = pending.anchor;
+                reconciled_anchor.confirmations = confirmations;
+                reconciled_anchor.block_hash = tx["blockhash"].as_str().map(str::to_owned);
+                reconciled_anchor.verified = true;
+
+                let operator = load_or_create_transparency_operator(&state.home)?;
+                let mut anchored = checkpoint.clone();
+                anchored.bitcoin_anchor = Some(reconciled_anchor.clone());
+                anchored.sign(&operator)?;
+                let _mutation_guard = state.mutation_lock.lock().await;
+                TransactionalTransparencyStore::open(&state.home)?
+                    .replace_latest_checkpoint(&checkpoint_hash, &anchored)?;
+                let _ = fs::remove_file(&pending_file);
+                return Ok(reconciled_anchor);
             }
         }
-
-        let verified = client
-            .verify_anchor(&pending.anchor.txid, &pending.anchor.commitment)
-            .await?;
-        if !verified.verified || verified.confirmations == 0 {
-            anyhow::bail!(
-                "pending anchor {} is not yet confirmed on Bitcoin",
-                pending.anchor.txid
-            );
-        }
-
-        let mut reconciled_anchor = pending.anchor;
-        reconciled_anchor.confirmations = verified.confirmations;
-        reconciled_anchor.block_hash = verified.block_hash;
-        reconciled_anchor.verified = true;
-
-        let operator = load_or_create_transparency_operator(&state.home)?;
-        let mut anchored = checkpoint.clone();
-        anchored.bitcoin_anchor = Some(reconciled_anchor.clone());
-        anchored.sign(&operator)?;
-        let _mutation_guard = state.mutation_lock.lock().await;
-        TransactionalTransparencyStore::open(&state.home)?
-            .replace_latest_checkpoint(&checkpoint_hash, &anchored)?;
-        let _ = fs::remove_file(&pending_file);
-        return Ok(reconciled_anchor);
     }
 
     let pre_broadcast =
