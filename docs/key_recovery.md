@@ -27,7 +27,7 @@ Candidate scalar = first 32 bytes (must be valid secp256k1 scalar)
 
 **Key Isolation Invariant:** This derivation is strictly isolated from Bitcoin spending keys (e.g., `m/84'/0'/0'` or `m/86'/0'/0'`). The identity key is purely a `secp256k1` Schnorr identity signing key; it never signs transactions, touches UTXOs, or exposes wallet funds. The decoded seed buffer is zeroized when the recovery command releases it. Input strings and command-line arguments are not zeroized.
 
-**Seed Derivation Compatibility Boundary:** `satspath wallet init`, `satspath register`, and the daemon generate random identity keys; these cannot be reconstructed from any seed and must rely on Tier 2 (pre-committed guardian recovery). To use deterministic seed recovery, initialize the identity key by running `satspath wallet recover --seed-stdin --alias <alias>` on an empty wallet prior to registering methods with `satspath wallet add-methods`.
+**Non-Custodial CLI Boundary:** SatsPath is a universal payment discovery router and never prompts for or manages seed phrases or spending keys in its user interface. The `derive_identity_key_from_seed` HMAC primitive remains available in `satspath-core` for offline or external tooling, but CLI recovery is performed via sovereign, pre-committed guardian threshold proofs ([`KeyRecoveryProof`](file:///home/chelo/antigravity/PlanB/satspath-issue97-recovery/crates/satspath-core/src/recovery.rs)).
 
 ### 2. M-of-N Threshold Guardian Recovery (Social / Multi-Device Recovery)
 
@@ -99,16 +99,10 @@ When an identifier transition occurs via `RecoverKey`:
 
 ### CLI Commands
 ```bash
-# Recover from deterministic seed via interactive prompt without terminal echo (recommended to avoid argv and shell history exposure)
-satspath wallet recover --seed-stdin --account-index 0 --alias alice@example.com
+# Recover an alias identity key using a pre-committed guardian threshold proof (requires a RecoveryPolicy committed in the local CLI registry)
+satspath alias recover --proof-file proof.json --alias alice@example.com
 
-# Recover from deterministic seed piped from secure source or password manager
-cat /path/to/seed.txt | satspath wallet recover --seed-stdin --account-index 0 --alias alice@example.com
-
-# Recover from deterministic seed via flag (caution: visible in process list and shell history)
-satspath wallet recover --seed-hex <HEX_SEED> --account-index 0 --alias alice@example.com
-
-# Recover via guardian proof file (requires a RecoveryPolicy committed in the local CLI registry; daemon PUT /v1/profile alone is not sufficient)
+# Alternatively via the wallet subcommand:
 satspath wallet recover --proof-file proof.json --alias alice@example.com
 ```
 
