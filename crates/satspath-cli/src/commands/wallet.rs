@@ -491,15 +491,19 @@ pub fn cmd_wallet_recover(
             }
         }
 
-        if !confirmed {
-            if let Some(current) = &existing_wallet.identity_pubkey {
-                if current != &pubkey_hex {
-                    anyhow::bail!(
-                        "derived key does not match the existing wallet identity and no registered profile confirms it; nothing was changed"
-                    );
-                }
+        if let Some(current) = &existing_wallet.identity_pubkey {
+            if current != &pubkey_hex {
+                anyhow::bail!(
+                    "wallet already holds a different identity; refusing to switch identities during recovery; nothing was changed"
+                );
             }
         }
+        if let (Some(cur), Some(tgt)) = (&existing_wallet.alias, &target_alias) {
+            if cur != tgt {
+                anyhow::bail!("wallet is bound to a different alias; nothing was changed");
+            }
+        }
+        let _ = confirmed;
 
         keystore::save_identity_key(&satspath_dir(), derived_secret)?;
 
