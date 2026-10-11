@@ -36,7 +36,7 @@ For users wishing to guard against total key and seed loss, SatsPath supports pr
 #### Fail-Closed Pre-Commitment Rule
 Key recovery cannot be retroactively claimed:
 - A user must have committed a `RecoveryPolicy` in their profile and transparency log events *prior* to losing access.
-- If an identifier has no active `RecoveryPolicy` (`recovery_policy: None`), any attempt to execute `NameAction::RecoverKey` fails immediately with `TransparencyError::RecoveryDisabled`.
+- If an identifier has no active `RecoveryPolicy` (either never configured, or no prior event in replayed history established one), any attempt to execute `NameAction::RecoverKey` fails immediately with `TransparencyError::RecoveryDisabled`. Note that publishing an event with `recovery_policy: None` does *not* disable an existing active policy; it retains the previously committed policy in replayed history.
 - A recovery event cannot supply its own policy to authorize itself; the policy must be pre-committed in prior log history.
 
 #### Policy Structure
@@ -99,7 +99,10 @@ When an identifier transition occurs via `RecoverKey`:
 
 ### CLI Commands
 ```bash
-# Recover an alias identity key using a pre-committed guardian threshold proof (requires a RecoveryPolicy committed in the local CLI registry)
+# Recover an alias identity key using a pre-committed guardian threshold proof.
+# NOTE: The CLI does not yet commit a new RecoveryPolicy during `satspath register` (which writes
+# `recovery_policy: None`). These commands succeed only if the local registry entry already carries
+# a policy (for example, an imported profile or one updated via daemon API).
 satspath alias recover --proof-file proof.json --alias alice@example.com
 
 # Alternatively via the wallet subcommand:

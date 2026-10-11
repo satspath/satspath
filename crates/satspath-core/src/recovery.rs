@@ -289,6 +289,10 @@ pub fn recover_identity_key(
     new_profile.identity_pubkey = new_pubkey_hex;
     new_profile.recovery = Some(recovery);
     new_profile.sequence = Some(sequence);
+    let now = chrono::Utc::now().timestamp();
+    new_profile.updated_at = now.max(profile.profile.updated_at);
+    new_profile.expires_at = Some(new_profile.updated_at + 30 * 24 * 3600);
+    new_profile.nonce = Some(crate::crypto::generate_nonce());
     new_profile.rotation = None;
     new_profile.method_verifications.clear();
     new_profile.hybrid_pubkey = None;
