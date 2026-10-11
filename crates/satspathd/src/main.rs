@@ -165,6 +165,7 @@ async fn run() -> Result<()> {
         open_ui: !cli.no_open,
         auth_token,
         mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+        anchor_lock: Arc::new(tokio::sync::Mutex::new(())),
         rate_limiter,
         is_tls,
     };
@@ -223,6 +224,7 @@ mod tests {
             open_ui: false,
             auth_token: "test_auth_token".into(),
             mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            anchor_lock: Arc::new(tokio::sync::Mutex::new(())),
             rate_limiter: Arc::new(rate_limit::RateLimiter::new(
                 rate_limit::RateLimiterConfig::default(),
             )),
@@ -1015,6 +1017,7 @@ mod tests {
             open_ui: false,
             auth_token: "test_token".into(),
             mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            anchor_lock: Arc::new(tokio::sync::Mutex::new(())),
             rate_limiter: Arc::new(rate_limit::RateLimiter::new(config)),
             is_tls: scheme == "https",
         });

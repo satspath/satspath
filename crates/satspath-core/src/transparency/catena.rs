@@ -163,6 +163,39 @@ pub fn verify_catena_links(anchors: &[BitcoinAnchor]) -> Result<bool, Transparen
     Ok(true)
 }
 
+/// Verifies that each anchor in the sequence correctly commits to the corresponding checkpoint hash.
+///
+/// Ensures:
+/// 1. The number of anchors matches the number of checkpoint hashes.
+/// 2. For each anchor `A_i` with `chain_index == i`, its commitment matches `catena_commitment(checkpoint_hash[i], i)`.
+pub fn verify_catena_commitments(
+    anchors: &[BitcoinAnchor],
+    checkpoint_hashes: &[&str],
+) -> Result<bool, TransparencyError> {
+    if anchors.len() != checkpoint_hashes.len() {
+        return Err(TransparencyError::InvalidCatenaChain(format!(
+            "anchor count ({}) does not match checkpoint hash count ({})",
+            anchors.len(),
+            checkpoint_hashes.len()
+        )));
+    }
+
+    for (i, (anchor, &cp_hash)) in anchors.iter().zip(checkpoint_hashes.iter()).enumerate() {
+        let expected_index = i as u64;
+        let expected_commitment = catena_commitment(cp_hash, expected_index)
+            .map_err(|e| TransparencyError::InvalidCatenaChain(e.to_string()))?;
+
+        if anchor.commitment != expected_commitment {
+            return Err(TransparencyError::InvalidCatenaChain(format!(
+                "anchor at step {} commitment ({}) does not match expected commitment ({}) for checkpoint hash {}",
+                i, anchor.commitment, expected_commitment, cp_hash
+            )));
+        }
+    }
+
+    Ok(true)
+}
+
 /// Detect whether two anchors represent an equivocation attack (two conflicting transactions spending the same continuation UTXO).
 pub fn detect_catena_equivocation(
     a1: &BitcoinAnchor,
@@ -386,5 +419,49 @@ mod tests {
         assert_eq!(proof.spent_txid, a0.txid);
         assert_eq!(proof.spent_vout, 1);
         assert!(proof.evidence.contains("Double-spend detected"));
+    }
+
+    #[test]
+    fn test_verify_catena_commitments() {
+        let cp0 = "00".repeat(32);
+        let cp1 = "11".repeat(32);
+        let cp2 = "22".repeat(32);
+
+        let mut a0 = make_test_anchor(0x10, Some(0), None, None, Some(1), true, 1);
+        a0.commitment = catena_commitment(&cp0, 0).unwrap();
+
+        let mut a1 = make_test_anchor(
+            0x11,
+            Some(1),
+            Some(a0.txid.clone()),
+            Some(1),
+            Some(1),
+            true,
+            1,
+        );
+        a1.commitment = catena_commitment(&cp1, 1).unwrap();
+
+        let mut a2 = make_test_anchor(
+            0x12,
+            Some(2),
+            Some(a1.txid.clone()),
+            Some(1),
+            Some(1),
+            true,
+            2,
+        );
+        a2.commitment = catena_commitment(&cp2, 2).unwrap();
+
+        let chain = vec![a0, a1, a2];
+
+        // Valid matching commitments
+        assert!(verify_catena_commitments(&chain, &[&cp0, &cp1, &cp2]).unwrap());
+
+        // Length mismatch
+        assert!(verify_catena_commitments(&chain, &[&cp0, &cp1]).is_err());
+
+        // Mismatched checkpoint hash
+        let bad_cp2 = "33".repeat(32);
+        assert!(verify_catena_commitments(&chain, &[&cp0, &cp1, &bad_cp2]).is_err());
     }
 }

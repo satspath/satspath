@@ -101,11 +101,15 @@ impl RegtestAnchorClient {
             std::env::var(name)
                 .map_err(|_| crate::SatsPathError::ValidationError(format!("missing {name}")))
         };
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| crate::SatsPathError::NetworkError(e.to_string()))?;
         Ok(Self {
             rpc_url: required("SATSPATH_BITCOIN_RPC_URL")?,
             rpc_user: required("SATSPATH_BITCOIN_RPC_USER")?,
             rpc_password: required("SATSPATH_BITCOIN_RPC_PASSWORD")?,
-            client: reqwest::Client::new(),
+            client,
         })
     }
 
@@ -206,7 +210,6 @@ impl RegtestAnchorClient {
             .rpc("decoderawtransaction", json!([signed_hex]))
             .await?;
         let continuation_vout = find_continuation_vout_for_address(&decoded, &continuation_addr)
-            .or_else(|| find_continuation_vout(&decoded))
             .ok_or_else(|| {
                 crate::SatsPathError::NetworkError(
                     "could not locate 1000-sat continuation UTXO in decoded genesis tx".into(),
@@ -220,13 +223,12 @@ impl RegtestAnchorClient {
             .ok_or_else(|| crate::SatsPathError::NetworkError("missing anchor txid".into()))?
             .to_owned();
 
-        // Lock the continuation output so wallet coin selection cannot accidentally spend it
-        let _ = self
-            .rpc(
-                "lockunspent",
-                json!([false, [{"txid": &txid, "vout": continuation_vout}]]),
-            )
-            .await;
+        // Lock the continuation output persistently so wallet coin selection cannot accidentally spend it
+        self.rpc(
+            "lockunspent",
+            json!([false, [{"txid": &txid, "vout": continuation_vout}], true]),
+        )
+        .await?;
 
         let miner_address = self.rpc("getnewaddress", json!([])).await?;
         self.rpc("generatetoaddress", json!([1, miner_address]))
@@ -265,13 +267,6 @@ impl RegtestAnchorClient {
                 "previous anchor is missing continuation_vout for chaining".into(),
             )
         })?;
-        // Unlock previous continuation UTXO so Bitcoin Core wallet can spend it
-        let _ = self
-            .rpc(
-                "lockunspent",
-                json!([true, [{"txid": &prev_anchor.txid, "vout": prev_continuation_vout}]]),
-            )
-            .await;
 
         let next_index = prev_anchor.chain_index.unwrap_or(0) + 1;
         let commitment = catena_commitment(checkpoint_hash, next_index)
@@ -329,13 +324,11 @@ impl RegtestAnchorClient {
         }
 
         let next_continuation_vout =
-            find_continuation_vout_for_address(&decoded, &continuation_addr)
-                .or_else(|| find_continuation_vout(&decoded))
-                .ok_or_else(|| {
-                    crate::SatsPathError::NetworkError(
-                        "could not locate 1000-sat continuation UTXO in decoded chained tx".into(),
-                    )
-                })?;
+            find_continuation_vout_for_address(&decoded, &continuation_addr).ok_or_else(|| {
+                crate::SatsPathError::NetworkError(
+                    "could not locate 1000-sat continuation UTXO in decoded chained tx".into(),
+                )
+            })?;
 
         let txid = self
             .rpc("sendrawtransaction", json!([signed_hex]))
@@ -344,13 +337,12 @@ impl RegtestAnchorClient {
             .ok_or_else(|| crate::SatsPathError::NetworkError("missing anchor txid".into()))?
             .to_owned();
 
-        // Lock newly created continuation output to protect it from wallet coin selection
-        let _ = self
-            .rpc(
-                "lockunspent",
-                json!([false, [{"txid": &txid, "vout": next_continuation_vout}]]),
-            )
-            .await;
+        // Lock newly created continuation output persistently to protect it from wallet coin selection
+        self.rpc(
+            "lockunspent",
+            json!([false, [{"txid": &txid, "vout": next_continuation_vout}], true]),
+        )
+        .await?;
 
         let miner_address = self.rpc("getnewaddress", json!([])).await?;
         self.rpc("generatetoaddress", json!([1, miner_address]))
@@ -520,6 +512,20 @@ impl RegtestAnchorClient {
             anchor.chain_index = Some(idx as u64);
         }
 
+        Ok(chain)
+    }
+
+    /// Trace backwards through Bitcoin transactions from `latest_txid` to `genesis_txid`,
+    /// verifying continuation UTXO spends and cryptographic binding to `checkpoint_hashes`.
+    pub async fn verify_catena_chain_with_checkpoints(
+        &self,
+        latest_txid: &str,
+        genesis_txid: &str,
+        checkpoint_hashes: &[&str],
+    ) -> crate::Result<Vec<BitcoinAnchor>> {
+        let chain = self.verify_catena_chain(latest_txid, genesis_txid).await?;
+        super::catena::verify_catena_commitments(&chain, checkpoint_hashes)
+            .map_err(|e| crate::SatsPathError::ValidationError(e.to_string()))?;
         Ok(chain)
     }
 

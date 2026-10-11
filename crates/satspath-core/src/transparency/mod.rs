@@ -34,9 +34,9 @@ pub use attestation::{
     TrustedVerifier,
 };
 pub use catena::{
-    catena_commitment, detect_catena_equivocation, verify_catena_links, CatenaChainProof,
-    CatenaEquivocationProof, CatenaGenesis, CATENA_COMMITMENT_DOMAIN, CONTINUATION_BTC,
-    CONTINUATION_SATOSHIS, MAX_CATENA_HOPS,
+    catena_commitment, detect_catena_equivocation, verify_catena_commitments, verify_catena_links,
+    CatenaChainProof, CatenaEquivocationProof, CatenaGenesis, CATENA_COMMITMENT_DOMAIN,
+    CONTINUATION_BTC, CONTINUATION_SATOSHIS, MAX_CATENA_HOPS,
 };
 pub use checkpoint::{
     CheckpointComparison, OperatorKeyRotation, PinnedCheckpoint, TransparencyCheckpoint,

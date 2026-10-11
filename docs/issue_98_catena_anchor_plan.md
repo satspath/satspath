@@ -163,8 +163,8 @@ Cuando el daemon emite un nuevo checkpoint en el log de transparencia:
    - Output 1: `continuation_address` (P2TR o P2WPKH del operador) con valor de 1,000 satoshis.
 4. **Financiación y Firma**:
    - Bitcoin Core agrega inputs adicionales para cubrir el fee mediante `fundrawtransaction`.
-   - Se firma el input de continuación usando la clave del operador y los inputs de tarifa usando la billetera de Bitcoin Core.
-5. **Transmisión y Confirmación**: Se emite la transacción mediante `sendrawtransaction` y se registra en SQLite.
+   - Se firman todos los inputs usando la billetera de Bitcoin Core mediante `signrawtransactionwithwallet`.
+5. **Transmisión y Confirmación**: Se emite la transacción mediante `sendrawtransaction`, se mina un bloque y el anclaje confirmado se almacena dentro de `TransparencyCheckpoint.bitcoin_anchor`.
 
 ### 4.2 Verificación de Cadena Hacia Atrás (Backward Verification)
 

@@ -73,7 +73,7 @@ pub(crate) fn consistency_from_query(
 pub(crate) async fn anchor_latest_checkpoint(
     state: &AppState,
 ) -> Result<satspath_core::TransparencyBitcoinAnchor> {
-    let _guard = state.mutation_lock.lock().await;
+    let _anchor_guard = state.anchor_lock.lock().await;
     let log = transparency_log(state)?;
     let checkpoint = log
         .checkpoints()
@@ -107,6 +107,8 @@ pub(crate) async fn anchor_latest_checkpoint(
     let mut anchored = checkpoint;
     anchored.bitcoin_anchor = Some(anchor.clone());
     anchored.sign(&operator)?;
+
+    let _mutation_guard = state.mutation_lock.lock().await;
     TransactionalTransparencyStore::open(&state.home)?
         .replace_latest_checkpoint(&checkpoint_hash, &anchored)?;
     Ok(anchor)

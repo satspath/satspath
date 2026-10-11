@@ -63,6 +63,20 @@ async fn catena_chain_anchoring_and_backward_verification_on_regtest() {
 
     // 5. Verify chain pure links in-memory
     assert!(satspath_core::transparency::verify_catena_links(&verified_chain).unwrap());
+
+    // 6. Verify chain commitments against expected checkpoints
+    assert!(satspath_core::transparency::verify_catena_commitments(
+        &verified_chain,
+        &[&cp0, &cp1, &cp2]
+    )
+    .unwrap());
+
+    // 7. Verify full chain backwards with checkpoint binding via RPC
+    let verified_with_cps = client
+        .verify_catena_chain_with_checkpoints(&a2.txid, &a0.txid, &[&cp0, &cp1, &cp2])
+        .await
+        .unwrap();
+    assert_eq!(verified_with_cps.len(), 3);
 }
 
 #[tokio::test]

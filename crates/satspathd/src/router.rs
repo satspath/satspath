@@ -334,14 +334,29 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
         }
         (Method::Post, "/v1/transparency/verify/catena") => {
             match read_json::<CatenaVerifyRequest>(&mut request).and_then(|body| {
-                satspath_core::transparency::verify_catena_links(&body.anchors).map_err(Into::into)
+                let structurally_consistent =
+                    satspath_core::transparency::verify_catena_links(&body.anchors)?;
+                let commitments_valid = match &body.checkpoint_hashes {
+                    Some(hashes) => {
+                        let str_hashes: Vec<&str> = hashes.iter().map(String::as_str).collect();
+                        Some(satspath_core::transparency::verify_catena_commitments(
+                            &body.anchors,
+                            &str_hashes,
+                        )?)
+                    }
+                    None => None,
+                };
+                Ok((structurally_consistent, commitments_valid))
             }) {
-                Ok(structurally_consistent) => json_response(
-                    StatusCode(200),
-                    &serde_json::json!({
+                Ok((structurally_consistent, commitments_valid)) => {
+                    let mut resp = serde_json::json!({
                         "structurally_consistent": structurally_consistent
-                    }),
-                ),
+                    });
+                    if let Some(valid) = commitments_valid {
+                        resp["commitments_valid"] = serde_json::json!(valid);
+                    }
+                    json_response(StatusCode(200), &resp)
+                }
                 Err(e) => json_error(StatusCode(400), e),
             }
         }
