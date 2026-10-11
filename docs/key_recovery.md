@@ -108,7 +108,7 @@ cat /path/to/seed.txt | satspath wallet recover --seed-stdin --account-index 0 -
 # Recover from deterministic seed via flag (caution: visible in process list and shell history)
 satspath wallet recover --seed-hex <HEX_SEED> --account-index 0 --alias alice@example.com
 
-# Recover via guardian proof file
+# Recover via guardian proof file (requires a RecoveryPolicy committed in the local CLI registry; daemon PUT /v1/profile alone is not sufficient)
 satspath wallet recover --proof-file proof.json --alias alice@example.com
 ```
 
