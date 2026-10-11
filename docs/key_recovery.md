@@ -27,7 +27,7 @@ Candidate scalar = first 32 bytes (must be valid secp256k1 scalar)
 
 **Key Isolation Invariant:** This derivation is strictly isolated from Bitcoin spending keys (e.g., `m/84'/0'/0'` or `m/86'/0'/0'`). The identity key is purely a `secp256k1` Schnorr identity signing key; it never signs transactions, touches UTXOs, or exposes wallet funds. The decoded seed buffer is zeroized when the recovery command releases it. Input strings and command-line arguments are not zeroized.
 
-**Seed Derivation Compatibility Boundary:** Deterministic seed recovery applies to identities initialized or derived from a root seed. Standalone randomly generated identity keypairs created without a seed (e.g. ad-hoc random keys) cannot be reconstructed deterministically; such identities rely on Tier 2 (pre-committed threshold guardian recovery) for recovery.
+**Seed Derivation Compatibility Boundary:** `satspath wallet init`, `satspath register`, and the daemon generate random identity keys; these cannot be reconstructed from any seed and must rely on Tier 2 (pre-committed guardian recovery). To use deterministic seed recovery, initialize the identity key by running `satspath wallet recover --seed-stdin --alias <alias>` on an empty wallet prior to registering methods with `satspath wallet add-methods`.
 
 ### 2. M-of-N Threshold Guardian Recovery (Social / Multi-Device Recovery)
 

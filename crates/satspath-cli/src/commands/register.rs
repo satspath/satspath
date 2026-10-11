@@ -124,7 +124,7 @@ pub async fn cmd_register(
          profile. Back up {} securely.",
         key_path.display()
     );
-    println!("   There is no recovery mechanism in v0.1. A future version may support BIP-39.");
+    println!("   Randomly generated keys require a pre-committed guardian recovery policy for sovereign recovery. See docs/key_recovery.md for details.");
     println!();
     println!(
         "Prove ownership of a method:  satspath prove {} --method-index 0",

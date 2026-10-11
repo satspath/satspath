@@ -355,10 +355,30 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
         (Method::Post, "/v1/profile/recover") => {
             match read_json::<ProfileRecoverRequest>(&mut request) {
                 Ok(body) => {
-                    let _guard = state.mutation_lock.lock().await;
-                    match recover_profile_key(state, body) {
-                        Ok(response) => json_response(StatusCode(200), &response),
-                        Err(error) => json_error(StatusCode(400), error),
+                    let precheck = || -> Result<()> {
+                        let alias = satspath_core::privacy::canonical_identifier(&body.alias);
+                        let store = satspath_core::TransactionalTransparencyStore::open_read_only(
+                            &state.home,
+                        )?;
+                        let existing = store
+                            .profile(&alias)?
+                            .ok_or(satspath_core::SatsPathError::AliasNotFound(alias))?;
+                        if !satspath_core::recovery::verify_key_recovery(
+                            &existing,
+                            &body.signed_profile,
+                        )? {
+                            anyhow::bail!("recovery proof failed verification against existing profile/policy");
+                        }
+                        Ok(())
+                    };
+                    if let Err(error) = precheck() {
+                        json_error(StatusCode(400), error)
+                    } else {
+                        let _guard = state.mutation_lock.lock().await;
+                        match recover_profile_key(state, body) {
+                            Ok(response) => json_response(StatusCode(200), &response),
+                            Err(error) => json_error(StatusCode(400), error),
+                        }
                     }
                 }
                 Err(error) => json_error(StatusCode(400), error),
