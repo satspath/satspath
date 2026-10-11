@@ -14,7 +14,7 @@
 ## 1. Contexto y Problema
 
 ### Limitación Actual de los Anclajes Independientes
-Actualmente, SatsPath implementa el anclaje de checkpoints en Bitcoin mediante [`RegtestAnchorClient`](file:///home/chelo/antigravity/PlanB/satspath/crates/satspath-core/src/transparency/anchor.rs) utilizando transacciones `OP_RETURN` individuales:
+Actualmente, SatsPath implementa el anclaje de checkpoints en Bitcoin mediante [`RegtestAnchorClient`](../crates/satspath-core/src/transparency/anchor.rs) utilizando transacciones `OP_RETURN` individuales:
 
 ```text
 Tx_A: [Wallet UTXO] ---> [OP_RETURN Commitment_A] + [Change]
@@ -181,7 +181,7 @@ Si un observador $A$ tiene un anclaje con hash de checkpoint $H_A$ y el observad
    - Anclar 1 vez cada 24 horas (o cada 144 bloques de Bitcoin).
    - Costo mensual estimado: $30 \times 3,000 \text{ sats} = 90,000 \text{ sats}$ (~$60 USD/mes), perfectamente viable para un operador de infraestructura.
 2. **Anclaje Inmediato por Eventos Críticos (Event-Driven Anchoring)**:
-   - Se fuerza un anclaje inmediato si ocurre una rotación de clave de identidad ([`RotateKey`](file:///home/chelo/antigravity/PlanB/satspath/crates/satspath-core/src/transparency/mod.rs)), una revocación de método de pago, o una recuperación de cuenta ([`RecoverKey`](file:///home/chelo/antigravity/PlanB/satspath/crates/satspath-core/src/recovery.rs)).
+   - Se fuerza un anclaje inmediato si ocurre una rotación de clave de identidad ([`RotateKey`](../crates/satspath-core/src/transparency/mod.rs)), una revocación de método de pago, o una recuperación de cuenta ([`RecoverKey`](../crates/satspath-core/src/recovery.rs)).
 3. **Entorno Regtest / Testnet4**:
    - En regtest, anclar en cada bloque de prueba o checkpoint para validar el pipeline CI continuo.
 

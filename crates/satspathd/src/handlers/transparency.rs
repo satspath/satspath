@@ -73,12 +73,16 @@ pub(crate) fn consistency_from_query(
 pub(crate) async fn anchor_latest_checkpoint(
     state: &AppState,
 ) -> Result<satspath_core::TransparencyBitcoinAnchor> {
+    let _guard = state.mutation_lock.lock().await;
     let log = transparency_log(state)?;
     let checkpoint = log
         .checkpoints()
         .last()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("no checkpoint to anchor"))?;
+    if checkpoint.bitcoin_anchor.is_some() {
+        anyhow::bail!("latest checkpoint is already anchored");
+    }
     let checkpoint_hash = checkpoint.checkpoint_hash()?;
     let client = satspath_core::transparency::RegtestAnchorClient::from_env()?;
 

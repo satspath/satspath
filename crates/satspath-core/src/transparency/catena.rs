@@ -58,6 +58,9 @@ pub fn catena_commitment(
     Ok(hex::encode(h.finalize()))
 }
 
+/// Maximum number of hops allowed when traversing or verifying a Catena chain backwards.
+pub const MAX_CATENA_HOPS: usize = 1000;
+
 /// Pure in-memory verification of an ordered list of `BitcoinAnchor`s forming a Catena chain.
 ///
 /// Ensures:
@@ -75,6 +78,12 @@ pub fn verify_catena_links(anchors: &[BitcoinAnchor]) -> Result<bool, Transparen
         return Err(TransparencyError::InvalidCatenaChain(
             "empty anchor sequence".into(),
         ));
+    }
+    if anchors.len() > MAX_CATENA_HOPS {
+        return Err(TransparencyError::InvalidCatenaChain(format!(
+            "anchor sequence length ({}) exceeds maximum allowed hops ({MAX_CATENA_HOPS})",
+            anchors.len()
+        )));
     }
 
     let genesis = &anchors[0];

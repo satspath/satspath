@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::catena::{catena_commitment, CONTINUATION_BTC, CONTINUATION_SATOSHIS};
+use super::catena::{catena_commitment, CONTINUATION_BTC, CONTINUATION_SATOSHIS, MAX_CATENA_HOPS};
 use crate::BitcoinNetwork;
 
 #[cfg(feature = "std")]
@@ -266,20 +266,19 @@ impl RegtestAnchorClient {
         let confirmations = tx["confirmations"].as_u64().unwrap_or(0) as u32;
         let block_hash = tx["blockhash"].as_str().map(str::to_owned);
 
-        // Verify that one of the vin inputs spent prev_anchor.txid:prev_continuation_vout
+        // Verify that vin[0] spent prev_anchor.txid:prev_continuation_vout
         let inputs_spent = tx["vin"]
             .as_array()
-            .map(|vins| {
-                vins.iter().any(|vin| {
-                    vin["txid"].as_str() == Some(&prev_anchor.txid)
-                        && vin["vout"].as_u64() == Some(prev_continuation_vout as u64)
-                })
+            .and_then(|vins| vins.first())
+            .map(|vin| {
+                vin["txid"].as_str() == Some(&prev_anchor.txid)
+                    && vin["vout"].as_u64() == Some(prev_continuation_vout as u64)
             })
             .unwrap_or(false);
 
         if !inputs_spent {
             return Err(crate::SatsPathError::ValidationError(
-                "Chained anchor transaction did not spend the required predecessor continuation UTXO".into(),
+                "Chained anchor transaction vin[0] did not spend the required predecessor continuation UTXO".into(),
             ));
         }
 
@@ -309,6 +308,12 @@ impl RegtestAnchorClient {
         let mut curr_txid = latest_txid.to_string();
 
         loop {
+            if chain.len() >= MAX_CATENA_HOPS {
+                return Err(crate::SatsPathError::ValidationError(format!(
+                    "Catena chain traversal exceeded maximum allowed hops ({MAX_CATENA_HOPS})"
+                )));
+            }
+
             let tx = self
                 .rpc("getrawtransaction", json!([curr_txid, true]))
                 .await?;
@@ -357,36 +362,63 @@ impl RegtestAnchorClient {
                 break;
             }
 
-            // Find which input spent the predecessor's 1000-sat continuation output
-            let mut found_prev: Option<(String, u32)> = None;
-            if let Some(vins) = tx["vin"].as_array() {
-                for vin in vins {
-                    if let (Some(vin_txid), Some(vin_vout)) =
-                        (vin["txid"].as_str(), vin["vout"].as_u64())
-                    {
-                        let parent_tx = self
-                            .rpc("getrawtransaction", json!([vin_txid, true]))
-                            .await?;
-                        if let Some(parent_vouts) = parent_tx["vout"].as_array() {
-                            if let Some(parent_out) = parent_vouts.get(vin_vout as usize) {
-                                let sats = (parent_out["value"].as_f64().unwrap_or(0.0)
-                                    * 100_000_000.0)
-                                    .round() as u64;
-                                if sats == CONTINUATION_SATOSHIS {
-                                    found_prev = Some((vin_txid.to_string(), vin_vout as u32));
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            let (prev_txid, prev_vout) = found_prev.ok_or_else(|| {
+            // In Catena, vin[0] MUST spend the predecessor's continuation UTXO
+            let vins = tx["vin"].as_array().ok_or_else(|| {
+                crate::SatsPathError::ValidationError(format!("missing vin in tx {curr_txid}"))
+            })?;
+            let vin_0 = vins.first().ok_or_else(|| {
+                crate::SatsPathError::ValidationError(format!("empty vin in tx {curr_txid}"))
+            })?;
+            let vin_txid = vin_0["txid"].as_str().ok_or_else(|| {
                 crate::SatsPathError::ValidationError(format!(
-                    "Tx {curr_txid} does not spend a continuation UTXO"
+                    "missing txid in vin[0] of tx {curr_txid}"
                 ))
             })?;
+            let vin_vout = vin_0["vout"].as_u64().ok_or_else(|| {
+                crate::SatsPathError::ValidationError(format!(
+                    "missing vout in vin[0] of tx {curr_txid}"
+                ))
+            })? as u32;
+
+            let parent_tx = self
+                .rpc("getrawtransaction", json!([vin_txid, true]))
+                .await?;
+
+            // Verify parent transaction contains a Catena OP_RETURN output
+            let parent_has_op_return = parent_tx["vout"].as_array().is_some_and(|outputs| {
+                outputs.iter().any(|out| {
+                    out["scriptPubKey"]["hex"]
+                        .as_str()
+                        .map(|h| h.starts_with("6a"))
+                        .unwrap_or(false)
+                })
+            });
+            if !parent_has_op_return {
+                return Err(crate::SatsPathError::ValidationError(format!(
+                    "Parent tx {vin_txid} does not contain an OP_RETURN output"
+                )));
+            }
+
+            // Verify parent output vin_0.vout is the 1000-sat continuation UTXO
+            let parent_vouts = parent_tx["vout"].as_array().ok_or_else(|| {
+                crate::SatsPathError::ValidationError(format!(
+                    "missing vout in parent tx {vin_txid}"
+                ))
+            })?;
+            let parent_out = parent_vouts.get(vin_vout as usize).ok_or_else(|| {
+                crate::SatsPathError::ValidationError(format!(
+                    "vout {vin_vout} out of bounds in parent tx {vin_txid}"
+                ))
+            })?;
+            let sats = (parent_out["value"].as_f64().unwrap_or(0.0) * 100_000_000.0).round() as u64;
+            if sats != CONTINUATION_SATOSHIS {
+                return Err(crate::SatsPathError::ValidationError(format!(
+                    "Tx {curr_txid} vin[0] spent output {vin_txid}:{vin_vout} with {sats} sats, expected continuation UTXO of {CONTINUATION_SATOSHIS} sats"
+                )));
+            }
+
+            let prev_txid = vin_txid.to_string();
+            let prev_vout = vin_vout;
 
             chain.push(BitcoinAnchor {
                 network: BitcoinNetwork::Regtest,
