@@ -140,13 +140,23 @@ pub(crate) async fn anchor_latest_checkpoint(
                 }
             }
             Some(mut tx) => {
-                if pending.checkpoint_hash != checkpoint_hash {
+                let target_checkpoint = if pending.checkpoint_hash == checkpoint_hash {
+                    Some(checkpoint.clone())
+                } else {
+                    log.checkpoints()
+                        .iter()
+                        .find(|c| {
+                            c.checkpoint_hash().ok().as_deref() == Some(&pending.checkpoint_hash)
+                        })
+                        .cloned()
+                };
+
+                let Some(mut target_cp) = target_checkpoint else {
                     anyhow::bail!(
-                        "pending anchor is for checkpoint {}, expected {}",
-                        pending.checkpoint_hash,
-                        checkpoint_hash
+                        "pending anchor is for checkpoint {}, which is not in the transparency log",
+                        pending.checkpoint_hash
                     );
-                }
+                };
 
                 // If unconfirmed, mine a block on regtest to confirm it
                 let mut confirmations = tx["confirmations"].as_u64().unwrap_or(0) as u32;
@@ -181,47 +191,29 @@ pub(crate) async fn anchor_latest_checkpoint(
                     );
                 }
 
-                // Validate linkage against the current tip
-                match &prev_anchor {
-                    Some(tip) => {
-                        let expected_index = tip.chain_index.unwrap_or(0) + 1;
-                        if pending.anchor.prev_txid.as_deref() != Some(&tip.txid)
-                            || pending.anchor.prev_vout != tip.continuation_vout
-                            || pending.anchor.chain_index != Some(expected_index)
-                        {
-                            anyhow::bail!(
-                                "pending anchor does not link to the current Catena tip {} (expected chain index {})",
-                                tip.txid,
-                                expected_index
-                            );
-                        }
-
-                        let vin_spends_prev = tx["vin"]
-                            .as_array()
-                            .and_then(|vins| vins.first())
-                            .map(|vin| {
-                                vin["txid"].as_str() == Some(&tip.txid)
-                                    && vin["vout"].as_u64()
-                                        == tip.continuation_vout.map(|v| v as u64)
-                            })
-                            .unwrap_or(false);
-                        if !vin_spends_prev {
-                            anyhow::bail!(
-                                "pending anchor {} vin[0] does not spend tip outpoint ({:?}, {:?})",
-                                pending.anchor.txid,
-                                tip.txid,
-                                tip.continuation_vout
-                            );
-                        }
+                // Validate linkage against the recorded predecessor
+                if let Some(prev_txid) = &pending.anchor.prev_txid {
+                    let vin_spends_prev = tx["vin"]
+                        .as_array()
+                        .and_then(|vins| vins.first())
+                        .map(|vin| {
+                            vin["txid"].as_str() == Some(prev_txid)
+                                && vin["vout"].as_u64()
+                                    == pending.anchor.prev_vout.map(|v| v as u64)
+                        })
+                        .unwrap_or(false);
+                    if !vin_spends_prev {
+                        anyhow::bail!(
+                            "pending anchor {} vin[0] does not spend predecessor outpoint ({}, {:?})",
+                            pending.anchor.txid,
+                            prev_txid,
+                            pending.anchor.prev_vout
+                        );
                     }
-                    None => {
-                        if pending.anchor.prev_txid.is_some()
-                            || pending.anchor.prev_vout.is_some()
-                            || pending.anchor.chain_index != Some(0)
-                        {
-                            anyhow::bail!("pending anchor is not a valid genesis anchor");
-                        }
-                    }
+                } else if pending.anchor.prev_vout.is_some()
+                    || pending.anchor.chain_index != Some(0)
+                {
+                    anyhow::bail!("pending anchor is not a valid genesis anchor");
                 }
 
                 let mut reconciled_anchor = pending.anchor;
@@ -230,12 +222,16 @@ pub(crate) async fn anchor_latest_checkpoint(
                 reconciled_anchor.verified = true;
 
                 let operator = load_or_create_transparency_operator(&state.home)?;
-                let mut anchored = checkpoint.clone();
-                anchored.bitcoin_anchor = Some(reconciled_anchor.clone());
-                anchored.sign(&operator)?;
+                target_cp.bitcoin_anchor = Some(reconciled_anchor.clone());
+                target_cp.sign(&operator)?;
                 let _mutation_guard = state.mutation_lock.lock().await;
-                TransactionalTransparencyStore::open(&state.home)?
-                    .replace_latest_checkpoint(&checkpoint_hash, &anchored)?;
+                if pending.checkpoint_hash == checkpoint_hash {
+                    TransactionalTransparencyStore::open(&state.home)?
+                        .replace_latest_checkpoint(&checkpoint_hash, &target_cp)?;
+                } else {
+                    TransactionalTransparencyStore::open(&state.home)?
+                        .replace_checkpoint_by_hash(&pending.checkpoint_hash, &target_cp)?;
+                }
                 let _ = fs::remove_file(&pending_file);
                 return Ok(reconciled_anchor);
             }
@@ -244,6 +240,16 @@ pub(crate) async fn anchor_latest_checkpoint(
 
     let pre_broadcast =
         |pre_anchor: &satspath_core::transparency::BitcoinAnchor| -> anyhow::Result<()> {
+            let current_log = TransactionalTransparencyStore::open(&state.home)?.load_log()?;
+            let current_latest_hash = current_log
+                .checkpoints()
+                .last()
+                .map(|c| c.checkpoint_hash())
+                .transpose()?;
+            if current_latest_hash.as_deref() != Some(&checkpoint_hash) {
+                anyhow::bail!("checkpoint changed concurrently before anchor broadcast");
+            }
+
             let pending = PendingCatenaAnchor {
                 checkpoint_hash: checkpoint_hash.clone(),
                 anchor: pre_anchor.clone(),

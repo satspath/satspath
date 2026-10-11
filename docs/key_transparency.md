@@ -92,12 +92,13 @@ Pins are indexed by a stable deployment `log_id`, never by an untrusted newly pr
 sequenceDiagram
   participant Daemon
   participant Core as Bitcoin Core regtest
-  Daemon->>Daemon: SHA256("SatsPathCheckpointAnchorV1" || checkpoint_hash)
-  Daemon->>Core: OP_RETURN transaction
-  Daemon->>Core: fund, wallet-sign, broadcast, mine one block
-  Daemon->>Core: fetch verbose transaction
-  Core-->>Daemon: script + block + confirmations
-  Daemon->>Daemon: verify commitment
+  Daemon->>Daemon: SHA256("SatsPathCatenaAnchorV1" || chain_index_be64 || checkpoint_hash)
+  Daemon->>Core: createrawtransaction: vin[0] spends prev continuation UTXO, vout[0] OP_RETURN commitment, vout[1] 1000-sat continuation UTXO
+  Daemon->>Core: fundrawtransaction (changePosition=2), signrawtransactionwithwallet
+  Daemon->>Core: sendrawtransaction, lockunspent continuation UTXO, generatetoaddress (mine 1 block)
+  Daemon->>Core: getrawtransaction (fetch confirmations & blockhash)
+  Core-->>Daemon: confirmed transaction details
+  Daemon->>Daemon: verify commitment, continuation linkage & store anchor
 ```
 
 Anchoring is never automatic. Authenticated `POST /v1/transparency/anchors` requires `SATSPATH_BITCOIN_NETWORK=regtest` plus `SATSPATH_BITCOIN_RPC_URL`, `SATSPATH_BITCOIN_RPC_USER` and `SATSPATH_BITCOIN_RPC_PASSWORD`. Mainnet is rejected and credentials are never logged. SatsPath implements Catena-style UTXO chaining (`POST /v1/transparency/anchors`, `GET /v1/transparency/catena/chain`), where anchor transaction $Tx_N$ spends the 1,000-sat continuation UTXO of $Tx_{N-1}$ and emits a domain-separated `OP_RETURN` commitment (`SatsPathCatenaAnchorV1`).

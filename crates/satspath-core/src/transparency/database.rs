@@ -361,4 +361,58 @@ impl TransactionalTransparencyStore {
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)
     }
+
+    pub fn replace_checkpoint_by_hash(
+        &self,
+        target_hash: &str,
+        checkpoint: &TransparencyCheckpoint,
+    ) -> Result<()> {
+        if !super::verify_checkpoint(checkpoint)? {
+            return Err(TransparencyError::InvalidCheckpointSignature.into());
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let row: Option<i64> = transaction
+            .query_row(
+                "SELECT checkpoint_index FROM checkpoints WHERE checkpoint_hash=?1",
+                params![target_hash],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let index = row.ok_or_else(|| {
+            TransparencyError::CorruptCheckpointChain(format!(
+                "checkpoint with hash {target_hash} not found to replace"
+            ))
+        })?;
+        let new_hash = checkpoint.checkpoint_hash()?;
+        let json = serde_json::to_string(checkpoint)?;
+        transaction
+            .execute(
+                "UPDATE checkpoints SET checkpoint_hash=?1,checkpoint_json=?2 WHERE checkpoint_index=?3",
+                params![new_hash, json, index],
+            )
+            .map_err(db_error)?;
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO anchors(txid,anchor_json) VALUES (?1,?2)",
+                params![
+                    checkpoint
+                        .bitcoin_anchor
+                        .as_ref()
+                        .map(|a| a.txid.as_str())
+                        .unwrap_or(""),
+                    checkpoint
+                        .bitcoin_anchor
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?
+                        .unwrap_or_default()
+                ],
+            )
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)
+    }
 }
