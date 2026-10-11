@@ -353,11 +353,14 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
             }
         }
         (Method::Post, "/v1/profile/recover") => {
-            let _guard = state.mutation_lock.lock().await;
-            match read_json::<ProfileRecoverRequest>(&mut request)
-                .and_then(|body| recover_profile_key(state, body))
-            {
-                Ok(response) => json_response(StatusCode(200), &response),
+            match read_json::<ProfileRecoverRequest>(&mut request) {
+                Ok(body) => {
+                    let _guard = state.mutation_lock.lock().await;
+                    match recover_profile_key(state, body) {
+                        Ok(response) => json_response(StatusCode(200), &response),
+                        Err(error) => json_error(StatusCode(400), error),
+                    }
+                }
                 Err(error) => json_error(StatusCode(400), error),
             }
         }

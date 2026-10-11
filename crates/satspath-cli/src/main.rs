@@ -288,10 +288,10 @@ struct WalletRecoverArgs {
     #[arg(long)]
     alias: Option<String>,
     /// Hex-encoded seed for deterministic identity derivation (warning: visible in process list; prefer --seed-stdin)
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["seed_stdin", "proof_file"])]
     seed_hex: Option<String>,
     /// Read hex-encoded seed securely from stdin
-    #[arg(long)]
+    #[arg(long, conflicts_with = "proof_file")]
     seed_stdin: bool,
     /// Account index for deterministic derivation (default 0)
     #[arg(long, default_value_t = 0)]

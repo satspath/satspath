@@ -26,6 +26,8 @@ Candidate scalar = first 32 bytes (must be valid secp256k1 scalar)
 
 **Key Isolation Invariant:** This derivation is strictly isolated from Bitcoin spending keys (e.g., `m/84'/0'/0'` or `m/86'/0'/0'`). The identity key is purely a `secp256k1` Schnorr identity signing key; it never signs transactions, touches UTXOs, or exposes wallet funds. Seed bytes are zeroized immediately upon derivation.
 
+**Seed Derivation Compatibility Boundary:** Deterministic seed recovery applies to identities initialized or derived from a root master seed. Standalone randomly generated identity keypairs created without a seed (e.g. ad-hoc random keys) cannot be reconstructed deterministically; such identities rely on Tier 2 (pre-committed threshold guardian recovery) for recovery.
+
 ### 2. M-of-N Threshold Guardian Recovery (Social / Multi-Device Recovery)
 
 For users wishing to guard against total key and seed loss, SatsPath supports pre-committed threshold guardian recovery.
