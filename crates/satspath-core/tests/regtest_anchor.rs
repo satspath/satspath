@@ -91,6 +91,16 @@ async fn catena_double_spend_equivocation_rejected_by_bitcoin_core() {
         equivocation_attempt.is_err(),
         "Bitcoin Core must reject double-spending a continuation UTXO"
     );
+    let err_msg = equivocation_attempt.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("bad-txns-inputs-missingorspent")
+            || err_msg.contains("txn-mempool-conflict")
+            || err_msg.contains("Missing inputs")
+            || err_msg.contains("missing-inputs")
+            || err_msg.contains("insufficient fee")
+            || err_msg.contains("rejected"),
+        "Bitcoin Core error must indicate input conflict or rejection: {err_msg}"
+    );
 
     // 4. In-memory equivocation detector verification
     // Construct hypothetical branch2 anchor to test detector

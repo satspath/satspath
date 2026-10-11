@@ -34,10 +34,42 @@ pub fn anchor_commitment(checkpoint_hash: &str) -> Result<String, hex::FromHexEr
 }
 
 #[cfg(feature = "std")]
+fn parse_sats(val: &Value) -> Option<u64> {
+    val.as_u64()
+        .or_else(|| val.as_f64().map(|btc| (btc * 100_000_000.0).round() as u64))
+}
+
+#[cfg(feature = "std")]
+fn find_continuation_vout_for_address(tx: &Value, addr: &str) -> Option<u32> {
+    tx["vout"].as_array().and_then(|outputs| {
+        outputs.iter().find_map(|out| {
+            let matched_addr = out["scriptPubKey"]["address"].as_str() == Some(addr)
+                || out["scriptPubKey"]["addresses"]
+                    .as_array()
+                    .is_some_and(|arr| arr.iter().any(|a| a.as_str() == Some(addr)));
+            let sats = parse_sats(&out["value"]).unwrap_or(0);
+            if matched_addr && sats == CONTINUATION_SATOSHIS {
+                out["n"].as_u64().map(|n| n as u32)
+            } else {
+                None
+            }
+        })
+    })
+}
+
+#[cfg(feature = "std")]
 fn find_continuation_vout(tx: &Value) -> Option<u32> {
     tx["vout"].as_array().and_then(|outputs| {
         outputs.iter().find_map(|out| {
-            let sats = (out["value"].as_f64().unwrap_or(0.0) * 100_000_000.0).round() as u64;
+            let is_op_return = out["scriptPubKey"]["type"].as_str() == Some("nulldata")
+                || out["scriptPubKey"]["hex"]
+                    .as_str()
+                    .map(|h| h.starts_with("6a"))
+                    .unwrap_or(false);
+            if is_op_return {
+                return None;
+            }
+            let sats = parse_sats(&out["value"]).unwrap_or(0);
             if sats == CONTINUATION_SATOSHIS {
                 out["n"].as_u64().map(|n| n as u32)
             } else {
@@ -151,7 +183,7 @@ impl RegtestAnchorClient {
 
         let outputs = json!([
             {"data": commitment},
-            {continuation_addr: CONTINUATION_BTC}
+            {&continuation_addr: CONTINUATION_BTC}
         ]);
         let raw = self
             .rpc("createrawtransaction", json!([[], outputs]))
@@ -177,11 +209,13 @@ impl RegtestAnchorClient {
             .await?;
 
         let tx = self.rpc("getrawtransaction", json!([txid, true])).await?;
-        let continuation_vout = find_continuation_vout(&tx).ok_or_else(|| {
-            crate::SatsPathError::NetworkError(
-                "could not locate 1000-sat continuation UTXO in genesis tx".into(),
-            )
-        })?;
+        let continuation_vout = find_continuation_vout_for_address(&tx, &continuation_addr)
+            .or_else(|| find_continuation_vout(&tx))
+            .ok_or_else(|| {
+                crate::SatsPathError::NetworkError(
+                    "could not locate 1000-sat continuation UTXO in genesis tx".into(),
+                )
+            })?;
         let confirmations = tx["confirmations"].as_u64().unwrap_or(0) as u32;
         let block_hash = tx["blockhash"].as_str().map(str::to_owned);
 
@@ -232,7 +266,7 @@ impl RegtestAnchorClient {
         ]);
         let outputs = json!([
             {"data": commitment},
-            {continuation_addr: CONTINUATION_BTC}
+            {&continuation_addr: CONTINUATION_BTC}
         ]);
         let raw = self
             .rpc("createrawtransaction", json!([inputs, outputs]))
@@ -258,11 +292,13 @@ impl RegtestAnchorClient {
             .await?;
 
         let tx = self.rpc("getrawtransaction", json!([txid, true])).await?;
-        let next_continuation_vout = find_continuation_vout(&tx).ok_or_else(|| {
-            crate::SatsPathError::NetworkError(
-                "could not locate 1000-sat continuation UTXO in chained tx".into(),
-            )
-        })?;
+        let next_continuation_vout = find_continuation_vout_for_address(&tx, &continuation_addr)
+            .or_else(|| find_continuation_vout(&tx))
+            .ok_or_else(|| {
+                crate::SatsPathError::NetworkError(
+                    "could not locate 1000-sat continuation UTXO in chained tx".into(),
+                )
+            })?;
         let confirmations = tx["confirmations"].as_u64().unwrap_or(0) as u32;
         let block_hash = tx["blockhash"].as_str().map(str::to_owned);
 
@@ -407,7 +443,7 @@ impl RegtestAnchorClient {
                     "vout {vin_vout} out of bounds in parent tx {vin_txid}"
                 ))
             })?;
-            let sats = (parent_out["value"].as_f64().unwrap_or(0.0) * 100_000_000.0).round() as u64;
+            let sats = parse_sats(&parent_out["value"]).unwrap_or(0);
             if sats != CONTINUATION_SATOSHIS {
                 return Err(crate::SatsPathError::ValidationError(format!(
                     "Tx {curr_txid} vin[0] spent output {vin_txid}:{vin_vout} with {sats} sats, expected continuation UTXO of {CONTINUATION_SATOSHIS} sats"
