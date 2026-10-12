@@ -1,6 +1,6 @@
 use ml_dsa::{Keypair, MlDsa65, Signature, Signer, SigningKey, Verifier};
 
-/// NIST FIPS 204 Parameter Sets:
+/// Implementation regression snapshots and parameter bound tests:
 /// ML-DSA-65 (Security Category 3):
 /// - Public key (vk) length: 1,952 bytes
 /// - Signing key seed length: 32 bytes
@@ -23,7 +23,7 @@ fn test_mldsa65_parameter_bounds() {
         "ML-DSA-65 verifying key must be exactly 1952 bytes according to FIPS 204"
     );
 
-    let msg = b"SatsPath NIST FIPS 204 Test Vector Validation Message";
+    let msg = b"SatsPath ML-DSA-65 Regression Snapshot Validation Message";
     let sig: Signature<MlDsa65> = sk.sign(msg);
     let encoded_sig = sig.encode();
 
@@ -38,7 +38,7 @@ fn test_mldsa65_parameter_bounds() {
 }
 
 #[test]
-fn test_mldsa65_deterministic_seed_derivation() {
+fn test_mldsa65_deterministic_seed_regression_snapshots() {
     // Known seed vector 1
     let seed1_bytes = [0x11u8; 32];
     let seed1: ml_dsa::Seed = seed1_bytes.into();
