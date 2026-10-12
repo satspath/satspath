@@ -5,10 +5,10 @@ use satspath_core::profile::{PaymentMethod, PaymentProfile};
 use satspath_core::resolvers::bip353::Bip353Resolver;
 use satspath_core::resolvers::http::HttpResolver;
 
-fn create_pqc_profile() -> PaymentProfile {
+fn create_pqc_profile(pubkey: &secp256k1::PublicKey) -> PaymentProfile {
     PaymentProfile {
         alias: "quantum@satspath.dev".to_string(),
-        identity_pubkey: "02dummy".to_string(),
+        identity_pubkey: hex::encode(pubkey.serialize()),
         methods: vec![PaymentMethod::Lightning {
             label: "Lightning".into(),
             lightning_address: Some("quantum@node".to_string()),
@@ -73,7 +73,7 @@ async fn test_attack_memory_exhaustion_dos() {
 fn test_attack_pqc_downgrade() {
     println!("✅ SETUP: User requires Post-Quantum Cryptography (pqc_required = true)...");
     let alice_keys = generate_identity_keypair();
-    let profile = create_pqc_profile();
+    let profile = create_pqc_profile(&alice_keys.public_key);
 
     let signed_profile = sign_profile(profile, &alice_keys.secret_key).unwrap();
     let original_json = serde_json::to_string(&signed_profile).unwrap();
@@ -95,6 +95,18 @@ fn test_attack_pqc_downgrade() {
         "SECURITY FAILURE: The node accepted a downgraded PQC profile!"
     );
     println!("🛡️ DEFENSE SUCCESS: Cryptographic downgrade rejected. The Schnorr signature covers the canonical profile including the PQC flag and explicitly rejects modified payloads.");
+}
+
+#[test]
+fn test_pqc_required_fails_closed_without_pqc_support() {
+    let alice_keys = generate_identity_keypair();
+    let profile = create_pqc_profile(&alice_keys.public_key);
+    let signed_profile = sign_profile(profile, &alice_keys.secret_key).unwrap();
+    let verified = verify_signed_profile(&signed_profile).unwrap();
+    assert!(
+        !verified,
+        "Profile requiring PQC must fail closed when PQC feature is disabled or PQC keys are absent"
+    );
 }
 
 #[tokio::test]

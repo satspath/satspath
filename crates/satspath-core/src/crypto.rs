@@ -123,30 +123,49 @@ pub fn verify_signed_profile(signed: &SignedPaymentProfile) -> Result<bool> {
     }
 
     // 2. Post-Quantum verification (ML-DSA) if present or required
-    if signed.profile.pqc_required {
-        if let (Some(hybrid_pubkey), Some(hybrid_sig)) =
+    #[cfg(feature = "pqc")]
+    {
+        if signed.profile.pqc_required {
+            if let (Some(hybrid_pubkey), Some(hybrid_sig)) =
+                (&signed.profile.hybrid_pubkey, &signed.hybrid_signature)
+            {
+                if hybrid_pubkey.classical_pubkey != signed.profile.identity_pubkey {
+                    return Ok(false);
+                }
+                let pqc_pk: satspath_pqc::types::HybridPublicKey = hybrid_pubkey.into();
+                let pqc_sig: satspath_pqc::types::HybridSignature = hybrid_sig.into();
+                let pqc_ok = satspath_pqc::hybrid_sig::hybrid_verify(&bytes, &pqc_sig, &pqc_pk);
+                if !pqc_ok {
+                    return Ok(false);
+                }
+            } else {
+                // Missing PQC fields but required by profile
+                return Ok(false);
+            }
+        } else if let (Some(hybrid_pubkey), Some(hybrid_sig)) =
             (&signed.profile.hybrid_pubkey, &signed.hybrid_signature)
         {
+            // Optional verification if present
             if hybrid_pubkey.classical_pubkey != signed.profile.identity_pubkey {
                 return Ok(false);
             }
-            let pqc_ok = satspath_pqc::hybrid_sig::hybrid_verify(&bytes, hybrid_sig, hybrid_pubkey);
+            let pqc_pk: satspath_pqc::types::HybridPublicKey = hybrid_pubkey.into();
+            let pqc_sig: satspath_pqc::types::HybridSignature = hybrid_sig.into();
+            let pqc_ok = satspath_pqc::hybrid_sig::hybrid_verify(&bytes, &pqc_sig, &pqc_pk);
             if !pqc_ok {
                 return Ok(false);
             }
-        } else {
-            // Missing PQC fields but required by profile
-            return Ok(false);
         }
-    } else if let (Some(hybrid_pubkey), Some(hybrid_sig)) =
-        (&signed.profile.hybrid_pubkey, &signed.hybrid_signature)
+    }
+    #[cfg(not(feature = "pqc"))]
     {
-        // Optional verification if present
-        if hybrid_pubkey.classical_pubkey != signed.profile.identity_pubkey {
-            return Ok(false);
-        }
-        let pqc_ok = satspath_pqc::hybrid_sig::hybrid_verify(&bytes, hybrid_sig, hybrid_pubkey);
-        if !pqc_ok {
+        if signed.profile.pqc_required
+            || signed.profile.hybrid_pubkey.is_some()
+            || signed.hybrid_signature.is_some()
+        {
+            // Reject any supplied hybrid signatures or keys when PQC verification is unavailable:
+            // A profile demanding post-quantum verification or providing unverified PQC extensions
+            // cannot be accepted when PQC support is disabled. This guarantees fail-closed behavior.
             return Ok(false);
         }
     }

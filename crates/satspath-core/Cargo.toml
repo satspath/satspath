@@ -10,6 +10,7 @@ crate-type = ["rlib", "cdylib"]
 [features]
 default = ["std"]
 test-utils = []
+pqc = ["dep:satspath-pqc"]
 std = [
     "tokio",
     "reqwest",
@@ -46,7 +47,7 @@ canonical_json = "0.5"
 bech32 = "0.9"
 hmac = "0.12"
 zeroize = { workspace = true }
-satspath-pqc = { path = "../satspath-pqc" }
+satspath-pqc = { path = "../satspath-pqc", optional = true }
 hickory-resolver = { workspace = true, optional = true }
 
 # Optional dependencies (enabled by default/std feature)
@@ -65,6 +66,7 @@ web-sys = { version = "0.3", features = ["Request", "Response", "Headers", "Wind
 idna = "1.1.0"
 
 [dev-dependencies]
+satspath-pqc = { path = "../satspath-pqc" }
 tempfile = "3"
 tokio = { workspace = true }
 mockito = "1"
