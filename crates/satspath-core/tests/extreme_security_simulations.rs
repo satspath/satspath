@@ -185,13 +185,29 @@ fn test_pqc_required_succeeds_with_valid_hybrid_signature_and_rejects_tampering(
         tampered_pqc.replace_range(0..1, "0");
     }
     signed.hybrid_signature = Some(satspath_core::pqc::HybridSignature {
-        schnorr_sig: hybrid_sig.schnorr_sig,
+        schnorr_sig: hybrid_sig.schnorr_sig.clone(),
         pqc_sig: tampered_pqc,
         suite: satspath_core::pqc::PqcSuite::MlDsa65Schnorr,
     });
     assert!(
         !verify_signed_profile(&signed).unwrap(),
         "Tampered hybrid signature must fail verification"
+    );
+
+    // Also corrupt the middle of the ML-DSA-65 z vector, leaving Schnorr intact.
+    // Encoding: 48-byte challenge, 5 * 640-byte z vector, then hints.
+    let mut tampered_z = hex::decode(&hybrid_sig.pqc_sig).unwrap();
+    let midpoint = tampered_z.len() / 2;
+    assert!((48..48 + 5 * 640).contains(&midpoint));
+    tampered_z[midpoint] ^= 0x01;
+    signed.hybrid_signature = Some(satspath_core::pqc::HybridSignature {
+        schnorr_sig: hybrid_sig.schnorr_sig.clone(),
+        pqc_sig: hex::encode(tampered_z),
+        suite: satspath_core::pqc::PqcSuite::MlDsa65Schnorr,
+    });
+    assert!(
+        !verify_signed_profile(&signed).unwrap(),
+        "Tampered ML-DSA z vector must fail verification with unchanged Schnorr signature"
     );
 
     // 3. Unbound hybrid signature (hybrid signature present without hybrid pubkey) is rejected

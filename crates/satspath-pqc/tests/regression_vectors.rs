@@ -139,3 +139,76 @@ fn test_mldsa65_wrong_key_rejection() {
         "Signature from key 1 must be rejected by key 2"
     );
 }
+
+// Independently published NIST ACVP vectors; provenance and selection are in
+// fixtures/README.md. Keep these separate from the project-selected snapshots.
+fn acvp_vectors() -> serde_json::Value {
+    serde_json::from_str(include_str!("fixtures/mldsa65-acvp.json")).unwrap()
+}
+
+fn acvp_bytes(vector: &serde_json::Value, field: &str) -> Vec<u8> {
+    hex::decode(vector[field].as_str().expect("ACVP hex field")).unwrap()
+}
+
+#[test]
+fn test_mldsa65_nist_acvp_key_generation() {
+    let vectors = acvp_vectors();
+    let vector = &vectors["keyGen"][0];
+    let seed = ml_dsa::Seed::try_from(acvp_bytes(vector, "seed").as_slice()).unwrap();
+    let sk = SigningKey::<MlDsa65>::from_seed(&seed);
+    assert_eq!(
+        sk.verifying_key().encode().as_slice(),
+        acvp_bytes(vector, "pk")
+    );
+    // ACVP publishes the FIPS 204 expanded key, not the preferred seed encoding.
+    #[allow(deprecated)]
+    let expanded = sk.expanded_key().to_expanded();
+    assert_eq!(expanded.as_slice(), acvp_bytes(vector, "sk"));
+}
+
+#[test]
+fn test_mldsa65_nist_acvp_signing() {
+    let vectors = acvp_vectors();
+    let vector = &vectors["sigGen"][0];
+    let encoded =
+        ml_dsa::ExpandedSigningKeyBytes::<MlDsa65>::try_from(acvp_bytes(vector, "sk").as_slice())
+            .unwrap();
+    // This published signing fixture supplies only an expanded secret key.
+    #[allow(deprecated)]
+    let sk = ml_dsa::ExpandedSigningKey::<MlDsa65>::from_expanded(&encoded);
+    let sig = sk
+        .sign_deterministic(
+            &acvp_bytes(vector, "message"),
+            &acvp_bytes(vector, "context"),
+        )
+        .unwrap();
+    assert_eq!(sig.encode().as_slice(), acvp_bytes(vector, "signature"));
+}
+
+#[test]
+fn test_mldsa65_nist_acvp_verification() {
+    let vectors = acvp_vectors();
+    for vector in vectors["sigVer"].as_array().unwrap() {
+        let encoded =
+            ml_dsa::EncodedVerifyingKey::<MlDsa65>::try_from(acvp_bytes(vector, "pk").as_slice())
+                .unwrap();
+        let vk = ml_dsa::VerifyingKey::<MlDsa65>::decode(&encoded);
+        let encoded_sig = ml_dsa::EncodedSignature::<MlDsa65>::try_from(
+            acvp_bytes(vector, "signature").as_slice(),
+        )
+        .unwrap();
+        let accepted = Signature::<MlDsa65>::decode(&encoded_sig).is_some_and(|sig| {
+            vk.verify_with_context(
+                &acvp_bytes(vector, "message"),
+                &acvp_bytes(vector, "context"),
+                &sig,
+            )
+        });
+        assert_eq!(
+            accepted,
+            vector["testPassed"].as_bool().unwrap(),
+            "NIST ACVP verification tcId {}",
+            vector["tcId"]
+        );
+    }
+}
