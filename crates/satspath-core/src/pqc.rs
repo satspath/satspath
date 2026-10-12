@@ -35,6 +35,7 @@ pub struct HybridPublicKey {
 
 #[cfg(feature = "pqc")]
 impl From<satspath_pqc::types::HybridPublicKey> for HybridPublicKey {
+    /// Moves a PQC public key bundle into the core wire type, preserving its suite.
     fn from(pk: satspath_pqc::types::HybridPublicKey) -> Self {
         Self {
             classical_pubkey: pk.classical_pubkey,
@@ -49,6 +50,7 @@ impl From<satspath_pqc::types::HybridPublicKey> for HybridPublicKey {
 
 #[cfg(feature = "pqc")]
 impl From<satspath_pqc::types::HybridSignature> for HybridSignature {
+    /// Moves a PQC signature into the core wire type, preserving both signatures and suite.
     fn from(sig: satspath_pqc::types::HybridSignature) -> Self {
         Self {
             schnorr_sig: sig.schnorr_sig,
@@ -63,6 +65,7 @@ impl From<satspath_pqc::types::HybridSignature> for HybridSignature {
 
 #[cfg(feature = "pqc")]
 impl From<&HybridPublicKey> for satspath_pqc::types::HybridPublicKey {
+    /// Copies a core public key bundle into the PQC verifier's type without validation.
     fn from(pk: &HybridPublicKey) -> Self {
         Self {
             classical_pubkey: pk.classical_pubkey.clone(),
@@ -77,6 +80,7 @@ impl From<&HybridPublicKey> for satspath_pqc::types::HybridPublicKey {
 
 #[cfg(feature = "pqc")]
 impl From<&HybridSignature> for satspath_pqc::types::HybridSignature {
+    /// Copies a core signature into the PQC verifier's type without validation.
     fn from(sig: &HybridSignature) -> Self {
         Self {
             schnorr_sig: sig.schnorr_sig.clone(),

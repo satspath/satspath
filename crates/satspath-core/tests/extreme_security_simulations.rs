@@ -5,6 +5,7 @@ use satspath_core::profile::{PaymentMethod, PaymentProfile};
 use satspath_core::resolvers::bip353::Bip353Resolver;
 use satspath_core::resolvers::http::HttpResolver;
 
+/// Builds a profile bound to the supplied identity key that requires PQC verification.
 fn create_pqc_profile(pubkey: &secp256k1::PublicKey) -> PaymentProfile {
     PaymentProfile {
         alias: "quantum@satspath.dev".to_string(),
