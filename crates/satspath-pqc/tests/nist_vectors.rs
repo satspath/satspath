@@ -56,7 +56,7 @@ fn test_mldsa65_deterministic_seed_derivation() {
         "Identical seeds must deterministically produce identical verifying keys"
     );
 
-    // Independent test vector validation:
+    // Deterministic key and signature regression snapshot validation:
     // Fixed constant expected SHA-256 digests for key derivation and deterministic signature
     use sha2::{Digest, Sha256};
     let vk_hash = hex::encode(Sha256::digest(vk1.encode()));
@@ -64,7 +64,7 @@ fn test_mldsa65_deterministic_seed_derivation() {
         "0575d15a041b8b573635522018f2d25d0cc1c1d6d5295da66c52e12bc29402fc";
     assert_eq!(
         vk_hash, EXPECTED_VK_SHA256,
-        "ML-DSA-65 derived verifying key digest must match fixed reference vector"
+        "ML-DSA-65 derived verifying key digest must match regression snapshot"
     );
 
     let msg = b"SatsPath Deterministic Verification";
@@ -74,7 +74,7 @@ fn test_mldsa65_deterministic_seed_derivation() {
         "dcacfe045e39b256eb85f58cba40f2e6ac178cb35817a9479c7fce13f8135ba9";
     assert_eq!(
         sig_hash, EXPECTED_SIG_SHA256,
-        "ML-DSA-65 deterministic signature digest must match fixed reference vector"
+        "ML-DSA-65 deterministic signature digest must match regression snapshot"
     );
 
     assert!(vk2.verify(msg, &sig1).is_ok());
@@ -95,12 +95,14 @@ fn test_mldsa65_tampered_signature_rejection() {
     sig_bytes[100] ^= 0x01;
 
     let tampered_sig = Signature::<MlDsa65>::decode(&sig_bytes);
-    if let Some(decoded) = tampered_sig {
-        assert!(
-            vk.verify(msg, &decoded).is_err(),
-            "Tampered signature bit must fail verification"
-        );
-    }
+    let verification_rejected = match tampered_sig {
+        Some(decoded) => vk.verify(msg, &decoded).is_err(),
+        None => true, // Decoder rejection is an acceptable fail-closed outcome
+    };
+    assert!(
+        verification_rejected,
+        "Tampered signature bit must fail decoding or verification"
+    );
 }
 
 #[test]

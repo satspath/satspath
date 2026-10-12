@@ -142,6 +142,9 @@ pub fn verify_signed_profile(signed: &SignedPaymentProfile) -> Result<bool> {
                 // Missing PQC fields but required by profile
                 return Ok(false);
             }
+        } else if signed.profile.hybrid_pubkey.is_none() && signed.hybrid_signature.is_some() {
+            // Reject unbound hybrid signatures attached without corresponding verification keys
+            return Ok(false);
         } else if let (Some(hybrid_pubkey), Some(hybrid_sig)) =
             (&signed.profile.hybrid_pubkey, &signed.hybrid_signature)
         {

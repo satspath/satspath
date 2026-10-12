@@ -109,6 +109,111 @@ fn test_pqc_required_fails_closed_without_pqc_support() {
     );
 }
 
+#[cfg(feature = "pqc")]
+#[test]
+fn test_pqc_required_succeeds_with_valid_hybrid_signature_and_rejects_tampering() {
+    let alice_keys = generate_identity_keypair();
+    let alice_pubkey_hex = hex::encode(alice_keys.public_key.serialize());
+
+    let hybrid_kp = satspath_pqc::hybrid_sig::HybridSigningKeyPair::from_seeds(
+        &alice_keys.secret_key.secret_bytes(),
+        &[0x42u8; 32],
+    )
+    .expect("hybrid keypair from seeds");
+    let hybrid_pk = hybrid_kp.public_key();
+    assert_eq!(hybrid_pk.classical_pubkey, alice_pubkey_hex);
+
+    let mut profile = create_pqc_profile(&alice_keys.public_key);
+    profile.hybrid_pubkey = Some(satspath_core::pqc::HybridPublicKey {
+        classical_pubkey: hybrid_pk.classical_pubkey.clone(),
+        pqc_verification_key: hybrid_pk.pqc_verification_key.clone(),
+        suite: match hybrid_pk.suite {
+            satspath_pqc::types::PqcSuite::MlKem768X25519 => {
+                satspath_core::pqc::PqcSuite::MlKem768X25519
+            }
+            satspath_pqc::types::PqcSuite::MlDsa65Schnorr => {
+                satspath_core::pqc::PqcSuite::MlDsa65Schnorr
+            }
+        },
+    });
+    profile.pqc_required = true;
+
+    let canonical = satspath_core::crypto::canonical_profile_bytes(&profile).unwrap();
+    let hybrid_sig = satspath_pqc::hybrid_sig::hybrid_sign(&canonical, &hybrid_kp);
+
+    let secp = secp256k1::Secp256k1::new();
+    let digest = {
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"SatsPathProfileV1");
+        hasher.update(&canonical);
+        hasher.finalize()
+    };
+    use sha2::Digest;
+    let msg = secp256k1::Message::from_digest(digest.into());
+    let kp = secp256k1::Keypair::from_secret_key(&secp, &alice_keys.secret_key);
+    let schnorr_sig = secp.sign_schnorr(&msg, &kp);
+
+    let mut signed = satspath_core::SignedPaymentProfile {
+        profile: profile.clone(),
+        signature: hex::encode(schnorr_sig.serialize()),
+        hybrid_signature: Some(satspath_core::pqc::HybridSignature {
+            schnorr_sig: hybrid_sig.schnorr_sig.clone(),
+            pqc_sig: hybrid_sig.pqc_sig.clone(),
+            suite: match hybrid_sig.suite {
+                satspath_pqc::types::PqcSuite::MlKem768X25519 => {
+                    satspath_core::pqc::PqcSuite::MlKem768X25519
+                }
+                satspath_pqc::types::PqcSuite::MlDsa65Schnorr => {
+                    satspath_core::pqc::PqcSuite::MlDsa65Schnorr
+                }
+            },
+        }),
+    };
+
+    // 1. Success path
+    assert!(
+        verify_signed_profile(&signed).unwrap(),
+        "Valid hybrid profile with matching classical key and valid PQC signature must verify successfully"
+    );
+
+    // 2. Tampered hybrid signature is rejected
+    let mut tampered_pqc = hybrid_sig.pqc_sig.clone();
+    if tampered_pqc.starts_with('0') {
+        tampered_pqc.replace_range(0..1, "1");
+    } else {
+        tampered_pqc.replace_range(0..1, "0");
+    }
+    signed.hybrid_signature = Some(satspath_core::pqc::HybridSignature {
+        schnorr_sig: hybrid_sig.schnorr_sig,
+        pqc_sig: tampered_pqc,
+        suite: satspath_core::pqc::PqcSuite::MlDsa65Schnorr,
+    });
+    assert!(
+        !verify_signed_profile(&signed).unwrap(),
+        "Tampered hybrid signature must fail verification"
+    );
+
+    // 3. Unbound hybrid signature (hybrid signature present without hybrid pubkey) is rejected
+    let mut unbound_signed = signed.clone();
+    unbound_signed.profile.hybrid_pubkey = None;
+    unbound_signed.profile.pqc_required = false;
+    let unbound_canonical =
+        satspath_core::crypto::canonical_profile_bytes(&unbound_signed.profile).unwrap();
+    let unbound_digest = {
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"SatsPathProfileV1");
+        hasher.update(&unbound_canonical);
+        hasher.finalize()
+    };
+    let unbound_msg = secp256k1::Message::from_digest(unbound_digest.into());
+    let unbound_sig = secp.sign_schnorr(&unbound_msg, &kp);
+    unbound_signed.signature = hex::encode(unbound_sig.serialize());
+    assert!(
+        !verify_signed_profile(&unbound_signed).unwrap(),
+        "Unbound hybrid signature attached without hybrid pubkey must be rejected"
+    );
+}
+
 #[tokio::test]
 async fn test_attack_dns_spoofing() {
     println!("✅ SETUP: Analyzing DNS BIP-353 Resolver configuration...");

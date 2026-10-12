@@ -75,5 +75,5 @@ BIP-353 resolution is a preview layer: SatsPath resolves and displays DNSSEC-bac
 
 * **Experimental Classification:** The `satspath-pqc` crate and post-quantum hybrid verification primitives (ML-DSA-65, ML-KEM-768) are experimental research code and are strictly feature-gated behind the optional `pqc` Cargo feature flag in `satspath-core`.
 * **Exclusion from Production Safety Claim:** Production mainnet profile resolution and validation rely exclusively on classical, battle-tested `secp256k1` BIP-340 Schnorr signatures. PQC is not part of the production mainnet safety claim.
-* **Fail-Closed Default:** When the `pqc` feature is not enabled (the default for production builds), any profile specifying `pqc_required: true` is rejected (`Ok(false)`). This guarantees that verifiers never accept unverified post-quantum assertions or false security guarantees.
+* **Fail-Closed Default:** When the `pqc` feature is not enabled (the default for production builds), any profile specifying `pqc_required: true` or supplying `hybrid_pubkey` or `hybrid_signature` (even when `pqc_required` is false) is rejected (`Ok(false)`). This guarantees that verifiers never accept unverified post-quantum assertions, unverified hybrid extensions, or false security guarantees.
 

@@ -229,12 +229,11 @@ async fn test_attack_revoked_profile_rejection() {
     );
 }
 
+#[cfg(feature = "pqc")]
 #[test]
 fn test_attack_hybrid_pubkey_classical_mismatch() {
     let alice_keys = generate_identity_keypair();
     let alice_pubkey_hex = hex::encode(alice_keys.public_key.serialize());
-    let rogue_keys = generate_identity_keypair();
-    let rogue_pubkey_hex = hex::encode(rogue_keys.public_key.serialize());
 
     let rogue_hybrid_kp = satspath_pqc::hybrid_sig::generate_hybrid_keypair();
     let rogue_hybrid_pk = rogue_hybrid_kp.public_key();
@@ -249,8 +248,12 @@ fn test_attack_hybrid_pubkey_classical_mismatch() {
         classical_pubkey: rogue_hybrid_pk.classical_pubkey.clone(),
         pqc_verification_key: rogue_hybrid_pk.pqc_verification_key.clone(),
         suite: match rogue_hybrid_pk.suite {
-            satspath_pqc::types::PqcSuite::MlKem768X25519 => satspath_core::pqc::PqcSuite::MlKem768X25519,
-            satspath_pqc::types::PqcSuite::MlDsa65Schnorr => satspath_core::pqc::PqcSuite::MlDsa65Schnorr,
+            satspath_pqc::types::PqcSuite::MlKem768X25519 => {
+                satspath_core::pqc::PqcSuite::MlKem768X25519
+            }
+            satspath_pqc::types::PqcSuite::MlDsa65Schnorr => {
+                satspath_core::pqc::PqcSuite::MlDsa65Schnorr
+            }
         },
     });
     // Set pqc_required to false to specifically test the optional verification mismatch guard
@@ -279,8 +282,12 @@ fn test_attack_hybrid_pubkey_classical_mismatch() {
             schnorr_sig: hybrid_sig.schnorr_sig,
             pqc_sig: hybrid_sig.pqc_sig,
             suite: match hybrid_sig.suite {
-                satspath_pqc::types::PqcSuite::MlKem768X25519 => satspath_core::pqc::PqcSuite::MlKem768X25519,
-                satspath_pqc::types::PqcSuite::MlDsa65Schnorr => satspath_core::pqc::PqcSuite::MlDsa65Schnorr,
+                satspath_pqc::types::PqcSuite::MlKem768X25519 => {
+                    satspath_core::pqc::PqcSuite::MlKem768X25519
+                }
+                satspath_pqc::types::PqcSuite::MlDsa65Schnorr => {
+                    satspath_core::pqc::PqcSuite::MlDsa65Schnorr
+                }
             },
         }),
     };
@@ -288,5 +295,30 @@ fn test_attack_hybrid_pubkey_classical_mismatch() {
     assert!(
         !verify_signed_profile(&signed).unwrap(),
         "verify_signed_profile must reject hybrid_pubkey whose classical key does not match identity_pubkey"
+    );
+}
+
+#[cfg(not(feature = "pqc"))]
+#[test]
+fn test_attack_hybrid_pubkey_rejected_when_pqc_disabled() {
+    let alice_keys = generate_identity_keypair();
+    let alice_pubkey_hex = hex::encode(alice_keys.public_key.serialize());
+
+    let mut profile = create_test_profile(
+        "alice@satspath.dev",
+        &alice_pubkey_hex,
+        "alice@lightning.node",
+    );
+    profile.hybrid_pubkey = Some(satspath_core::pqc::HybridPublicKey {
+        classical_pubkey: alice_pubkey_hex.clone(),
+        pqc_verification_key: hex::encode(vec![0x42; 1952]),
+        suite: satspath_core::pqc::PqcSuite::MlDsa65Schnorr,
+    });
+    profile.pqc_required = false;
+
+    let signed = sign_profile(profile, &alice_keys.secret_key).unwrap();
+    assert!(
+        !verify_signed_profile(&signed).unwrap(),
+        "verify_signed_profile must reject hybrid pubkey when PQC feature is disabled"
     );
 }
