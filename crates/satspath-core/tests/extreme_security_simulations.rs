@@ -212,6 +212,26 @@ fn test_pqc_required_succeeds_with_valid_hybrid_signature_and_rejects_tampering(
         !verify_signed_profile(&unbound_signed).unwrap(),
         "Unbound hybrid signature attached without hybrid pubkey must be rejected"
     );
+
+    // 4. Partial hybrid state: hybrid pubkey present without hybrid signature is rejected
+    let mut key_only_signed = signed.clone();
+    key_only_signed.hybrid_signature = None;
+    key_only_signed.profile.pqc_required = false;
+    let key_only_canonical =
+        satspath_core::crypto::canonical_profile_bytes(&key_only_signed.profile).unwrap();
+    let key_only_digest = {
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"SatsPathProfileV1");
+        hasher.update(&key_only_canonical);
+        hasher.finalize()
+    };
+    let key_only_msg = secp256k1::Message::from_digest(key_only_digest.into());
+    let key_only_sig = secp.sign_schnorr(&key_only_msg, &kp);
+    key_only_signed.signature = hex::encode(key_only_sig.serialize());
+    assert!(
+        !verify_signed_profile(&key_only_signed).unwrap(),
+        "Partial hybrid profile with hybrid pubkey but no hybrid signature must be rejected"
+    );
 }
 
 #[tokio::test]
