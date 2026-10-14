@@ -52,7 +52,7 @@ pub fn select_route(req: &RouteRequest, fees: &FeeEstimate) -> Result<RouteQuote
                 PaymentMethod::Lightning {
                     bolt12: Some(invoice),
                     ..
-                } if invoice.to_ascii_lowercase().starts_with("lnbc") => {
+                } if satspath_handoff::bolt11_network(invoice).is_some() => {
                     SwapDirective::LightningPayment {
                         target_ln_address: None,
                     }

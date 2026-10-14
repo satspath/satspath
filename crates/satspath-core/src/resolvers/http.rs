@@ -81,28 +81,25 @@ impl ProfileResolver for HttpResolver {
 impl HttpResolver {
     /// Fetch, verify, and return a signed profile from an explicit URL.
     ///
-    /// Extracted so tests can pass a mock server URL directly without
-    /// needing a real DNS entry for the test domain.
+    /// The URL must satisfy all production SSRF constraints unconditionally.
     pub async fn resolve_from_url(&self, url: &str) -> Result<SignedPaymentProfile> {
-        let is_test_build = cfg!(any(test, feature = "test-utils"));
-        let parsed =
-            url::Url::parse(url).map_err(|e| SatsPathError::InvalidPaymentUri(e.to_string()))?;
-        let is_local = parsed.username().is_empty()
-            && parsed.password().is_none()
-            && matches!(parsed.host_str(), Some("localhost" | "127.0.0.1"));
+        validate_url(url, false)?;
+        self.fetch_from_validated_url(url).await
+    }
 
-        if is_test_build && is_local {
-            if let Some(port) = parsed.port() {
-                if matches!(port, 22 | 3306 | 5432 | 6379 | 27017) {
-                    return Err(SatsPathError::ValidationError(format!(
-                        "Blocked port '{port}'"
-                    )));
-                }
-            }
-        } else {
-            validate_url(url, false)?;
-        }
+    /// Test-only resolution path for mock servers without production SSRF checks.
+    #[doc(hidden)]
+    pub async fn resolve_from_mock_url(&self, url: &str) -> Result<SignedPaymentProfile> {
+        self.fetch_from_validated_url(url).await
+    }
 
+    /// Construct a resolver with a custom HTTP client (for test dependency injection).
+    #[doc(hidden)]
+    pub fn with_client(client: Client) -> Self {
+        Self { client }
+    }
+
+    async fn fetch_from_validated_url(&self, url: &str) -> Result<SignedPaymentProfile> {
         let mut resp = self.client.get(url).send().await.map_err(|e| {
             SatsPathError::NetworkError(format!("Failed to connect to {}: {}", url, e))
         })?;
@@ -304,7 +301,7 @@ mod tests {
 
         let resolver = HttpResolver::new();
         let url = format!("{}/profile", server.url());
-        let result = resolver.resolve_from_url(&url).await;
+        let result = resolver.resolve_from_mock_url(&url).await;
 
         assert!(
             result.is_ok(),
@@ -335,7 +332,7 @@ mod tests {
 
         let resolver = HttpResolver::new();
         let url = format!("{}/profile", server.url());
-        let result = resolver.resolve_from_url(&url).await;
+        let result = resolver.resolve_from_mock_url(&url).await;
 
         assert!(result.is_err(), "tampered signature must be rejected");
         let err = result.unwrap_err().to_string();
@@ -365,7 +362,7 @@ mod tests {
 
         let resolver = HttpResolver::new();
         let url = format!("{}/profile", server.url());
-        let result = resolver.resolve_from_url(&url).await;
+        let result = resolver.resolve_from_mock_url(&url).await;
 
         assert!(result.is_err(), "expired profile must be rejected");
         let err = result.unwrap_err().to_string();
@@ -386,7 +383,7 @@ mod tests {
 
         let resolver = HttpResolver::new();
         let url = format!("{}/profile", server.url());
-        let result = resolver.resolve_from_url(&url).await;
+        let result = resolver.resolve_from_mock_url(&url).await;
 
         assert!(result.is_err());
         assert!(
@@ -409,7 +406,7 @@ mod tests {
 
         let resolver = HttpResolver::new();
         let url = format!("{}/profile", server.url());
-        let result = resolver.resolve_from_url(&url).await;
+        let result = resolver.resolve_from_mock_url(&url).await;
 
         assert!(result.is_err());
         assert!(
@@ -434,12 +431,32 @@ mod tests {
 
         let resolver = HttpResolver::new();
         let url = format!("{}/profile", server.url());
-        let result = resolver.resolve_from_url(&url).await;
+        let result = resolver.resolve_from_mock_url(&url).await;
 
         assert!(result.is_err(), "malformed JSON must be rejected");
         assert!(
             matches!(result.unwrap_err(), SatsPathError::SerializationError(_)),
             "malformed JSON must map to SerializationError"
         );
+    }
+
+    // ── Test 7: Loopback URLs unconditionally rejected in resolve_from_url ────
+
+    #[tokio::test]
+    async fn resolve_from_url_unconditionally_rejects_loopback() {
+        let resolver = HttpResolver::new();
+        let loopback_urls = [
+            "http://127.0.0.1:8080/profile",
+            "https://127.0.0.1:8080/profile",
+            "http://localhost:8080/profile",
+            "https://localhost:8080/profile",
+        ];
+        for url in loopback_urls {
+            let result = resolver.resolve_from_url(url).await;
+            assert!(
+                matches!(result, Err(SatsPathError::ValidationError(_))),
+                "expected ValidationError for {url}, got: {result:?}"
+            );
+        }
     }
 }

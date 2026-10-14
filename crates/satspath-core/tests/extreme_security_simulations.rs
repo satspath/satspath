@@ -51,7 +51,11 @@ async fn test_attack_memory_exhaustion_dos() {
 
     let resolver = HttpResolver::new();
     let url = format!("{}/profile", server.url());
-    let result = resolver.resolve_from_url(&url).await;
+    assert!(
+        resolver.resolve_from_url(&url).await.is_err(),
+        "resolve_from_url must reject loopback URLs unconditionally"
+    );
+    let result = resolver.resolve_from_mock_url(&url).await;
 
     // VALIDATION
     assert!(

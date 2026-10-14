@@ -70,18 +70,7 @@ pub fn validate_method(method: PaymentMethod<'_>, sats: u64, now: i64) -> Result
                 public_key(&hex::decode(key).map_err(|e| e.to_string())?)?;
             }
             if let Some(offer) = offer {
-                let lower = offer.to_ascii_lowercase();
-                // Regtest must precede mainnet because `lnbcrt` starts with `lnbc`.
-                let network = if lower.starts_with("lnbcrt") {
-                    Some(Network::Regtest)
-                } else if lower.starts_with("lntb") {
-                    Some(Network::Testnet)
-                } else if lower.starts_with("lnbc") {
-                    Some(Network::Bitcoin)
-                } else {
-                    None
-                };
-                if let Some(network) = network {
+                if let Some(network) = bolt11_network(offer) {
                     bolt11(offer, sats, network, now.max(0) as u64)?;
                 } else {
                     bolt12(offer)?;
@@ -214,6 +203,21 @@ pub fn lightning_address(value: &str) -> Result<(), String> {
         return Err("invalid Lightning Address".into());
     }
     https(&format!("https://{domain}/.well-known/lnurlp/{user}"))
+}
+
+/// Classify a BOLT11 invoice human-readable part (HRP) case-insensitively.
+pub fn bolt11_network(s: &str) -> Option<Network> {
+    let lower = s.to_ascii_lowercase();
+    // Regtest must precede mainnet because `lnbcrt` starts with `lnbc`.
+    if lower.starts_with("lnbcrt") {
+        Some(Network::Regtest)
+    } else if lower.starts_with("lntb") {
+        Some(Network::Testnet)
+    } else if lower.starts_with("lnbc") {
+        Some(Network::Bitcoin)
+    } else {
+        None
+    }
 }
 
 /// Verify a decoded BOLT11 invoice's signature, network, exact amount, and expiry.
@@ -416,5 +420,17 @@ mod invoice_tests {
         assert!(bolt11(invoice, 250_001, Network::Bitcoin, 1_496_314_658).is_err());
         assert!(bolt11(invoice, 250_000, Network::Testnet, 1_496_314_658).is_err());
         assert!(bolt11(invoice, 250_000, Network::Bitcoin, 1_496_314_718).is_err());
+    }
+
+    #[test]
+    fn bolt11_network_classification() {
+        assert_eq!(bolt11_network("lnbc100u..."), Some(Network::Bitcoin));
+        assert_eq!(bolt11_network("LNBC100U..."), Some(Network::Bitcoin));
+        assert_eq!(bolt11_network("lntb20m..."), Some(Network::Testnet));
+        assert_eq!(bolt11_network("LNTB20M..."), Some(Network::Testnet));
+        assert_eq!(bolt11_network("lnbcrt50u..."), Some(Network::Regtest));
+        assert_eq!(bolt11_network("LNBCRT50U..."), Some(Network::Regtest));
+        assert_eq!(bolt11_network("lno1..."), None);
+        assert_eq!(bolt11_network("bc1q..."), None);
     }
 }

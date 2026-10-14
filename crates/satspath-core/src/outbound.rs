@@ -25,8 +25,7 @@ impl Resolve for ValidatingDnsResolver {
     /// Resolve the hostname at the connector boundary.
     fn resolve(&self, name: Name) -> Resolving {
         // Match resolve_from_url's explicit localhost exemption for mock servers.
-        let allow_loopback =
-            cfg!(any(test, feature = "test-utils")) && name.as_str() == "localhost";
+        let allow_loopback = cfg!(test) && name.as_str() == "localhost";
         let resolving = self.0.resolve(name);
         Box::pin(async move {
             let addrs: Vec<_> = resolving.await?.collect();
@@ -107,19 +106,8 @@ pub async fn connect_relay(
         .map_err(|e| SatsPathError::NetworkError(e.to_string()))
 }
 
-/// Validate a request URL, with a narrowly scoped loopback exception for test servers.
+/// Validate a request URL unconditionally against production SSRF policy.
 pub fn validate_request_url(value: &str) -> Result<()> {
-    let parsed =
-        url::Url::parse(value).map_err(|e| SatsPathError::ValidationError(e.to_string()))?;
-    if cfg!(any(test, feature = "test-utils"))
-        && matches!(parsed.host_str(), Some("localhost" | "127.0.0.1"))
-        && matches!(parsed.scheme(), "http" | "https")
-        && parsed.username().is_empty()
-        && parsed.password().is_none()
-        && parsed.fragment().is_none()
-    {
-        return Ok(());
-    }
     validate_url(value, false)
 }
 

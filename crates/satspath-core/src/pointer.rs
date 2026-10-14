@@ -66,9 +66,9 @@ fn validate_handoff(pointer: &PaymentPointer, sats: u64) -> Result<()> {
     let result = match pointer {
         PaymentPointer::LightningAddress { address, .. } => check::lightning_address(address),
         PaymentPointer::LnurlPay { callback_url, .. } => check::https(callback_url),
-        PaymentPointer::Bolt11Invoice { invoice, .. } => {
-            check::bolt11(invoice, sats, bitcoin::Network::Bitcoin, now.max(0) as u64)
-        }
+        PaymentPointer::Bolt11Invoice { invoice, .. } => check::bolt11_network(invoice)
+            .ok_or_else(|| "unrecognized BOLT11 network".to_string())
+            .and_then(|network| check::bolt11(invoice, sats, network, now.max(0) as u64)),
         PaymentPointer::Bolt12Offer { offer } => check::bolt12(offer),
         PaymentPointer::OnchainAddress {
             network, address, ..

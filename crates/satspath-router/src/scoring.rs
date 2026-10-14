@@ -309,7 +309,7 @@ fn candidate_score(
 }
 
 fn bolt11_like(value: Option<&str>) -> Option<&str> {
-    value.filter(|invoice| invoice.starts_with("lnbc") || invoice.starts_with("lntb"))
+    value.filter(|invoice| satspath_handoff::bolt11_network(invoice).is_some())
 }
 
 fn policy_complexity_hint(descriptor_hint: Option<&str>) -> u8 {
@@ -442,5 +442,15 @@ mod tests {
         let decision =
             score_routes(1_000, &profile, &FeeSnapshot::default(), &preferences).unwrap();
         assert_eq!(decision.selected.rail, PaymentRail::Ark);
+    }
+
+    #[test]
+    fn bolt11_like_classification() {
+        assert!(bolt11_like(Some("lnbc1...")).is_some());
+        assert!(bolt11_like(Some("LNBC1...")).is_some());
+        assert!(bolt11_like(Some("lntb1...")).is_some());
+        assert!(bolt11_like(Some("lnbcrt1...")).is_some());
+        assert!(bolt11_like(Some("lno1...")).is_none());
+        assert!(bolt11_like(None).is_none());
     }
 }

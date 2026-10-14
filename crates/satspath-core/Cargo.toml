@@ -9,7 +9,6 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = ["std"]
-test-utils = []
 pqc = ["dep:satspath-pqc"]
 std = [
     "tokio",
@@ -72,7 +71,6 @@ tokio = { workspace = true }
 mockito = "1"
 criterion = "0.8.2"
 proptest = "1.5"
-satspath-core = { path = ".", features = ["test-utils"] }
 
 [[bench]]
 name = "core_benches"

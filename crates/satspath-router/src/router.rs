@@ -116,7 +116,7 @@ pub async fn select_route(req: &RouteRequest) -> satspath_core::Result<RouteQuot
                 PaymentMethod::Lightning {
                     bolt12: Some(invoice),
                     ..
-                } if invoice.to_ascii_lowercase().starts_with("lnbc") => {
+                } if satspath_handoff::bolt11_network(invoice).is_some() => {
                     SwapDirective::LightningPayment {
                         target_ln_address: None,
                     }
@@ -330,7 +330,7 @@ pub fn select_route_with_fees(
                 PaymentMethod::Lightning {
                     bolt12: Some(invoice),
                     ..
-                } if invoice.to_ascii_lowercase().starts_with("lnbc") => {
+                } if satspath_handoff::bolt11_network(invoice).is_some() => {
                     SwapDirective::LightningPayment {
                         target_ln_address: None,
                     }

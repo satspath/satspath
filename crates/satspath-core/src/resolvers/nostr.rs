@@ -85,7 +85,10 @@ impl NostrResolver {
         let (name, domain) = canonical
             .split_once('@')
             .ok_or_else(|| SatsPathError::AliasNotFound(alias.to_string()))?;
-        let url = format!("https://{domain}/.well-known/nostr.json?name={name}");
+        let mut parsed_url = url::Url::parse(&format!("https://{domain}/.well-known/nostr.json"))
+            .map_err(|e| SatsPathError::ValidationError(e.to_string()))?;
+        parsed_url.query_pairs_mut().append_pair("name", name);
+        let url = parsed_url.to_string();
         crate::ssrf::validate_url(&url, false)?;
         let document: Nip05Document = self
             .client
