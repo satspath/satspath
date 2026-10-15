@@ -3,12 +3,14 @@ use anyhow::Result;
 use satspath_core::{
     crypto::verify_signed_profile,
     evaluate_method_trust_for_profile,
-    privacy::{mask_address, mask_identifier, mask_invoice, mask_pubkey},
+    privacy::{mask_address, mask_identifier, mask_invoice},
     resolver::ProfileResolver,
+    validation::validate_amount_sats,
     PaymentMethod,
 };
 use satspath_router::{
-    fetch_invoice, fetch_lnurl_metadata, lightning::lightning_address, select_route, RouteRequest,
+    fetch_invoice, fetch_lnurl_metadata, handoff::validate_payload, lightning::lightning_address,
+    select_route, QuoteResponse, RouteRequest,
 };
 
 use super::{
@@ -21,11 +23,21 @@ use super::{
 /// stays in [`cmd_quote`].
 pub async fn cmd_quote_json(alias: &str, amount_sats: u64) -> Result<()> {
     let response = satspath_router::quote(alias, amount_sats).await;
+    if let QuoteResponse::Ok {
+        selected_method,
+        qr,
+        ..
+    } = &response
+    {
+        validate_quote_qr(selected_method, qr, amount_sats)?;
+    }
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
 
+/// Resolve and print a route only when its wallet QR passes mainnet validation.
 pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
+    validate_amount_sats(amount_sats)?;
     let resolver = get_resolver()?;
 
     println!("Resolving identifier '{}'...", mask_identifier(alias));
@@ -106,6 +118,7 @@ pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
     println!();
     match &quote.selected_method {
         PaymentMethod::Bolt12(offer_data) => {
+            validate_quote_qr(&quote.selected_method, &offer_data.offer, amount_sats)?;
             println!("  BOLT12 Offer:");
             println!("  ─────────────────────────────────────────");
             print_qr(&offer_data.offer)?;
@@ -113,6 +126,15 @@ pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
             println!("  Preview only. No funds moved.");
         }
         PaymentMethod::Lightning { .. } => {
+            if matches!(
+                quote.selected_method,
+                PaymentMethod::Lightning {
+                    receiver_pubkey: None,
+                    ..
+                }
+            ) {
+                anyhow::bail!("Lightning invoice requires a verified receiver public key");
+            }
             let ln_addr = lightning_address(&quote.selected_method)
                 .ok_or_else(|| anyhow::anyhow!("no Lightning Address in method"))?;
 
@@ -121,11 +143,12 @@ pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
                 Ok(meta) => {
                     match fetch_invoice(&meta, amount_sats, None).await {
                         Ok(invoice) => {
+                            validate_quote_qr(&quote.selected_method, &invoice, amount_sats)?;
                             println!("received.");
                             println!();
                             println!("  Scan to pay — Lightning ({} sats)", amount_sats);
                             println!("  ─────────────────────────────────────────");
-                            print_qr(&invoice.to_uppercase())?;
+                            print_qr(&invoice)?;
                             println!("  {}...", mask_invoice(&invoice));
                             println!("  Warning: this is a real invoice QR generated from public metadata.");
                         }
@@ -150,20 +173,64 @@ pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
                 .clone()
                 .unwrap_or_else(|| address.clone().unwrap_or_default());
             let uri = bitcoin_uri(&target, amount_sats);
+            validate_quote_qr(&quote.selected_method, &uri, amount_sats)?;
             println!("  Scan to pay — Bitcoin on-chain ({} sats)", amount_sats);
             println!("  ─────────────────────────────────────────");
             print_qr(&uri)?;
             println!("  {}", mask_address(&uri));
         }
-        PaymentMethod::Ark { pubkey, server, .. } => {
-            println!("  Ark payment via {}", mask_address(server));
-            println!("  Pubkey: {}", mask_pubkey(pubkey));
-            println!(
-                "  ⚠  [EXPERIMENTAL] Use --experimental-swaps --testnet to attempt execution."
-            );
-            println!("  Use `satspath pay --mainnet-preview` for public pointer preview.");
+        PaymentMethod::Ark { .. } => {
+            anyhow::bail!("Ark wallet handoffs are not supported");
         }
     }
 
     Ok(())
+}
+
+/// Check a mainnet CLI quote against its selected method before displaying it.
+fn validate_quote_qr(method: &PaymentMethod, qr: &str, amount_sats: u64) -> Result<()> {
+    validate_payload(method, qr, "mainnet", Some(amount_sats))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use satspath_core::{profile::Bolt12Offer, BitcoinNetwork};
+
+    #[test]
+    fn cli_quote_rejects_unsupported_and_unbound_qrs() {
+        let onchain = PaymentMethod::Onchain {
+            label: "On-chain".into(),
+            network: BitcoinNetwork::Mainnet,
+            address: Some("1BoatSLRHtKNngkdXEeobR76b53LETtpyT".into()),
+            silent_payment_pubkey: None,
+            pubkey_hint: None,
+            descriptor_hint: None,
+            address_list: vec![],
+        };
+        let valid = bitcoin_uri("1BoatSLRHtKNngkdXEeobR76b53LETtpyT", 21_000);
+        assert!(validate_quote_qr(&onchain, &valid, 21_000).is_ok());
+        assert!(validate_quote_qr(&onchain, &valid, 21_001).is_err());
+        assert!(validate_quote_qr(&onchain, &format!("{valid}&lno=lno1qoffer"), 21_000).is_err());
+
+        let lightning = PaymentMethod::Lightning {
+            label: "Lightning".into(),
+            lightning_address: Some("alice@example.com".into()),
+            lnurl: None,
+            bolt12: None,
+            receiver_pubkey: None,
+        };
+        assert!(validate_quote_qr(&lightning, "alice@example.com", 21_000).is_err());
+        assert!(validate_quote_qr(&lightning, "lnbc1invalid", 21_000).is_err());
+
+        let bolt12 = PaymentMethod::Bolt12(Bolt12Offer {
+            label: "Offer".into(),
+            offer: "lno1qoffer".into(),
+            network: BitcoinNetwork::Mainnet,
+            minimum_amount_sats: None,
+            expires_at: None,
+            issuer_pubkey: String::new(),
+        });
+        assert!(validate_quote_qr(&bolt12, "lno1qoffer", 21_000).is_err());
+    }
 }

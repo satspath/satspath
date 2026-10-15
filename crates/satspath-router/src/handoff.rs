@@ -16,6 +16,7 @@ use satspath_core::{
 
 use crate::lightning::validate_bolt11_invoice;
 
+/// Format an exact on-chain amount without floating-point rounding.
 fn fmt_btc(sats: u64) -> String {
     format!("{}.{:08}", sats / 100_000_000, sats % 100_000_000)
 }
@@ -135,6 +136,7 @@ pub fn validate_payload(
     }
 }
 
+/// Interpret the configured chain name, rejecting unknown networks.
 fn configured_network(network: &str) -> Result<BitcoinNetwork> {
     match network.to_ascii_lowercase().as_str() {
         "mainnet" | "bitcoin" => Ok(BitcoinNetwork::Mainnet),
@@ -144,6 +146,7 @@ fn configured_network(network: &str) -> Result<BitcoinNetwork> {
     }
 }
 
+/// Require an unambiguous HTTPS URL for an amount-less LNURL pointer.
 fn validate_lnurl(pointer: &str) -> Result<()> {
     let url = url::Url::parse(pointer).context("invalid LNURL pointer")?;
     if url.scheme() != "https"
@@ -158,6 +161,7 @@ fn validate_lnurl(pointer: &str) -> Result<()> {
     Ok(())
 }
 
+/// Bind a BOLT11 invoice to its signed payee, network, amount, and expiry.
 fn validate_bolt11(
     payload: &str,
     receiver_pubkey: Option<&str>,

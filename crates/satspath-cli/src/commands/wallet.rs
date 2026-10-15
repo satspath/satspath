@@ -164,28 +164,15 @@ pub struct ReceiveQr {
 
 /// Compute the wallet owner's preferred receive payload, entirely locally.
 ///
-/// Route selection prefers Lightning (instant) → on-chain → Ark. With no amount
-/// it returns a reusable receive pointer. No mempool/LNURL/DNS calls are made, so
-/// the operation stays fully private.
+/// Without an amount, prefers Lightning → on-chain → Ark; with an amount,
+/// prefers on-chain → Lightning → Ark. No mempool/LNURL/DNS calls are made.
 pub fn local_receive_qr(amount_sats: Option<u64>) -> Result<ReceiveQr> {
     let state = load_wallet()?;
     let alias = state.alias.clone().ok_or_else(|| {
         anyhow::anyhow!("no wallet profile yet — run `satspath wallet add-methods`")
     })?;
     let methods = build_methods(&state);
-    let method = methods
-        .iter()
-        .find(|m| matches!(m, PaymentMethod::Lightning { .. }))
-        .or_else(|| {
-            methods
-                .iter()
-                .find(|m| matches!(m, PaymentMethod::Onchain { .. }))
-        })
-        .or_else(|| {
-            methods
-                .iter()
-                .find(|m| matches!(m, PaymentMethod::Ark { .. }))
-        })
+    let method = preferred_receive_method(&methods, amount_sats)
         .ok_or_else(|| anyhow::anyhow!("no receive methods — run `satspath wallet add-methods`"))?;
 
     let payload = receive_payload_for(method, amount_sats)?;
@@ -196,6 +183,30 @@ pub fn local_receive_qr(amount_sats: Option<u64>) -> Result<ReceiveQr> {
     })
 }
 
+/// Pick the first compatible receive rail without producing a payable pointer.
+fn preferred_receive_method(
+    methods: &[PaymentMethod],
+    amount_sats: Option<u64>,
+) -> Option<&PaymentMethod> {
+    let onchain = methods
+        .iter()
+        .find(|m| matches!(m, PaymentMethod::Onchain { .. }));
+    let lightning = methods
+        .iter()
+        .find(|m| matches!(m, PaymentMethod::Lightning { .. }));
+    (if amount_sats.is_some() {
+        onchain.or(lightning)
+    } else {
+        lightning.or(onchain)
+    })
+    .or_else(|| {
+        methods
+            .iter()
+            .find(|m| matches!(m, PaymentMethod::Ark { .. }))
+    })
+}
+
+/// Build a local receive pointer and reject unsupported or unbound handoffs.
 fn receive_payload_for(method: &PaymentMethod, amount_sats: Option<u64>) -> Result<String> {
     let payload = match method {
         PaymentMethod::Lightning {
@@ -243,6 +254,7 @@ fn receive_payload_for(method: &PaymentMethod, amount_sats: Option<u64>) -> Resu
     Ok(payload)
 }
 
+/// Represent satoshis as a fixed eight-decimal Bitcoin amount.
 fn sats_to_btc(sats: u64) -> String {
     format!("{}.{:08}", sats / 100_000_000, sats % 100_000_000)
 }
@@ -764,6 +776,7 @@ struct WalletReceivePreview {
     warnings: Vec<String>,
 }
 
+/// Translate a router quote into a validated wallet receive preview.
 async fn build_receive_preview(alias: &str, amount_sats: u64) -> WalletReceivePreview {
     use satspath_router::QuoteResponse;
 
@@ -789,13 +802,26 @@ async fn build_receive_preview(alias: &str, amount_sats: u64) -> WalletReceivePr
             qr,
             reason,
             ..
-        } => WalletReceivePreview {
-            fingerprint: recipient.fingerprint,
-            selected_rail: Some(selected_method.method_name().to_string()),
-            qr: Some(qr),
-            reason: Some(reason),
-            ..base("ok")
-        },
+        } => {
+            if let Err(e) = satspath_router::handoff::validate_payload(
+                &selected_method,
+                &qr,
+                "mainnet",
+                Some(amount_sats),
+            ) {
+                return WalletReceivePreview {
+                    reason: Some(e.to_string()),
+                    ..base("no_route")
+                };
+            }
+            WalletReceivePreview {
+                fingerprint: recipient.fingerprint,
+                selected_rail: Some(selected_method.method_name().to_string()),
+                qr: Some(qr),
+                reason: Some(reason),
+                ..base("ok")
+            }
+        }
         QuoteResponse::NoRoute { reason } => WalletReceivePreview {
             reason: Some(reason),
             ..base("no_route")
@@ -890,6 +916,28 @@ mod tests {
         })
         .remove(0);
         assert!(receive_payload_for(&ark, None).is_err());
+    }
+
+    #[test]
+    fn local_receive_prefers_onchain_with_amount_and_lightning_without() {
+        let methods = build_methods(&WalletState {
+            lightning_address: Some("alice@example.com".into()),
+            onchain_address: Some("1BoatSLRHtKNngkdXEeobR76b53LETtpyT".into()),
+            ..Default::default()
+        });
+        let amountless = preferred_receive_method(&methods, None).unwrap();
+        assert!(matches!(amountless, PaymentMethod::Lightning { .. }));
+        assert_eq!(
+            receive_payload_for(amountless, None).unwrap(),
+            "alice@example.com"
+        );
+
+        let amountful = preferred_receive_method(&methods, Some(21_000)).unwrap();
+        assert!(matches!(amountful, PaymentMethod::Onchain { .. }));
+        assert_eq!(
+            receive_payload_for(amountful, Some(21_000)).unwrap(),
+            "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00021000"
+        );
     }
 
     #[test]

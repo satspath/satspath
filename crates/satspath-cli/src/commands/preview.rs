@@ -12,8 +12,8 @@ use satspath_core::{
     BitcoinNetwork, ExecutionMode, PaymentMethod, SatsPathError, SignedPaymentProfile,
 };
 use satspath_router::{
-    fetch_invoice, fetch_lnurl_metadata, lightning::verify_invoice_amount, select_route,
-    RouteQuote, RouteRequest,
+    fetch_invoice, fetch_lnurl_metadata, handoff::validate_payload,
+    lightning::verify_invoice_amount, select_route, RouteQuote, RouteRequest,
 };
 use serde::Serialize;
 
@@ -85,6 +85,7 @@ pub struct InviteResponse {
     pub claim_url: String,
 }
 
+/// Resolve and display a mainnet payment preview in JSON or terminal form.
 pub async fn cmd_preview(
     recipient: &str,
     amount_sats: u64,
@@ -109,6 +110,7 @@ pub async fn cmd_preview(
     Ok(())
 }
 
+/// Build a quote from a signed profile, rejecting unsafe wallet handoffs.
 pub async fn build_mainnet_preview_response(
     recipient: &str,
     amount_sats: u64,
@@ -212,6 +214,7 @@ pub async fn build_mainnet_preview_response(
     })
 }
 
+/// Describe a profile that cannot be used to prepare a payment.
 fn invalid_profile_response(
     signed: &SignedPaymentProfile,
     status: &str,
@@ -237,21 +240,26 @@ fn invalid_profile_response(
     })
 }
 
+/// Construct and validate a payable mainnet QR for the selected method.
 async fn method_preview(
     quote: &RouteQuote,
     amount_sats: u64,
     fetch_lnurl_invoice: bool,
     ownership: &str,
 ) -> Result<(SelectedMethodResponse, String, Vec<String>)> {
-    match &quote.selected_method {
+    let preview = match &quote.selected_method {
         PaymentMethod::Lightning {
             label,
             lightning_address,
             lnurl,
             bolt12,
+            receiver_pubkey,
             ..
         } => {
             let qr = if fetch_lnurl_invoice {
+                if receiver_pubkey.is_none() {
+                    anyhow::bail!("Lightning invoice requires a verified receiver public key");
+                }
                 let address = lightning_address.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("--fetch-lnurl-invoice requires a Lightning Address.")
                 })?;
@@ -280,7 +288,7 @@ async fn method_preview(
                 warnings.push("LNURL invoice was not fetched. Public pointer only.".into());
             }
 
-            Ok((
+            (
                 SelectedMethodResponse::Lightning {
                     label: label.clone(),
                     lightning_address: lightning_address.clone(),
@@ -289,11 +297,11 @@ async fn method_preview(
                 },
                 qr,
                 warnings,
-            ))
+            )
         }
         PaymentMethod::Bolt12(offer_data) => {
             let warnings = vec!["BOLT12 offer pointer only (no invoice fetched).".into()];
-            Ok((
+            (
                 SelectedMethodResponse::Bolt12 {
                     label: offer_data.label.clone(),
                     offer: offer_data.offer.clone(),
@@ -301,7 +309,7 @@ async fn method_preview(
                 },
                 offer_data.offer.clone(),
                 warnings,
-            ))
+            )
         }
         PaymentMethod::Onchain {
             label,
@@ -319,7 +327,7 @@ async fn method_preview(
             validate_bitcoin_address(&target, BitcoinNetwork::Mainnet)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             let qr = bitcoin_uri(&target, amount_sats);
-            Ok((
+            (
                 SelectedMethodResponse::Onchain {
                     label: label.clone(),
                     network: *network,
@@ -331,7 +339,7 @@ async fn method_preview(
                     "Pay only from your own wallet after verifying recipient and amount.".into(),
                     "SatsPath did not create or broadcast a transaction.".into(),
                 ],
-            ))
+            )
         }
         PaymentMethod::Ark {
             label,
@@ -353,7 +361,7 @@ async fn method_preview(
             } else {
                 "unverified".into()
             };
-            Ok((
+            (
                 SelectedMethodResponse::Ark {
                     label: label.clone(),
                     server: server.clone(),
@@ -366,11 +374,19 @@ async fn method_preview(
                     "Ark mainnet execution is unavailable.".into(),
                     "Intent only.".into(),
                 ],
-            ))
+            )
         }
-    }
+    };
+    validate_payload(
+        &quote.selected_method,
+        &preview.1,
+        "mainnet",
+        Some(amount_sats),
+    )?;
+    Ok(preview)
 }
 
+/// Report whether this method has a current ownership verification.
 fn ownership_status(signed: &SignedPaymentProfile, method: &PaymentMethod) -> String {
     let now = chrono::Utc::now().timestamp();
     let status = stored_status_for_method(&signed.profile.method_verifications, method);
@@ -381,6 +397,7 @@ fn ownership_status(signed: &SignedPaymentProfile, method: &PaymentMethod) -> St
     }
 }
 
+/// Render the validated preview without exposing private profile material.
 fn print_human_preview(response: &QuoteResponse) -> Result<()> {
     println!("════════════════════════════════════════════");
     println!(" SatsPath Mainnet Preview");
@@ -460,6 +477,7 @@ fn print_human_preview(response: &QuoteResponse) -> Result<()> {
     Ok(())
 }
 
+/// Return the human-readable name of the preview rail.
 fn method_name(method: &SelectedMethodResponse) -> &'static str {
     match method {
         SelectedMethodResponse::Lightning { .. } => "Lightning",
@@ -469,6 +487,7 @@ fn method_name(method: &SelectedMethodResponse) -> &'static str {
     }
 }
 
+/// Mask a payment payload in text while leaving the validated QR intact.
 fn mask_qr_for_display(qr: &str) -> String {
     if qr.starts_with("satspath:ark?") || qr.starts_with("bitcoin:") {
         mask_address(qr)
@@ -503,7 +522,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lightning_preview_does_not_fetch_invoice_by_default() {
+    async fn lightning_preview_rejects_amountless_pointer() {
         let quote = quote_for(PaymentMethod::Lightning {
             label: "Lightning Address".into(),
             lightning_address: Some("rodrigo@getalby.com".into()),
@@ -511,11 +530,12 @@ mod tests {
             bolt12: None,
             receiver_pubkey: None,
         });
-        let (_, qr, warnings) = method_preview(&quote, 1_000, false, "unverified")
+        assert!(method_preview(&quote, 1_000, false, "unverified")
             .await
-            .unwrap();
-        assert_eq!(qr, "lightning:rodrigo@getalby.com");
-        assert!(warnings.iter().any(|w| w.contains("not fetched")));
+            .is_err());
+        assert!(method_preview(&quote, 1_000, true, "unverified")
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -555,7 +575,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ark_preview_returns_satspath_uri_with_mainnet_network() {
+    async fn ark_preview_rejects_unsupported_handoff() {
         let quote = quote_for(PaymentMethod::Ark {
             label: "Ark".into(),
             server: "https://ark.example.com".into(),
@@ -565,11 +585,23 @@ mod tests {
             proof: None,
             expires_at: None,
         });
-        let (_, qr, warnings) = method_preview(&quote, 21_000, false, "unverified")
+        assert!(method_preview(&quote, 21_000, false, "unverified")
             .await
-            .unwrap();
-        assert!(qr.starts_with("satspath:ark?"));
-        assert!(qr.contains("network=mainnet"));
-        assert!(warnings.iter().any(|w| w.contains("unavailable")));
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn bolt12_preview_rejects_unsupported_handoff() {
+        let quote = quote_for(PaymentMethod::Bolt12(satspath_core::profile::Bolt12Offer {
+            label: "Offer".into(),
+            offer: "lno1qoffer".into(),
+            network: BitcoinNetwork::Mainnet,
+            minimum_amount_sats: None,
+            expires_at: None,
+            issuer_pubkey: String::new(),
+        }));
+        assert!(method_preview(&quote, 21_000, false, "unverified")
+            .await
+            .is_err());
     }
 }

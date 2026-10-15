@@ -18,6 +18,7 @@ use crate::types::{
 };
 use crate::ui::qr_svg;
 
+/// Choose a configured receive rail and validate its final public QR payload.
 pub(crate) fn receive_view(state: &AppState, req: ReceiveRequest) -> Result<ReceiveView> {
     let wallet = load_wallet(&state.home)?;
     let alias = wallet
@@ -38,23 +39,26 @@ pub(crate) fn receive_view(state: &AppState, req: ReceiveRequest) -> Result<Rece
                 )
             })?
     } else {
-        methods
+        let onchain = methods
             .iter()
-            .find(|m| matches!(m, PaymentMethod::Lightning { .. }))
-            .or_else(|| {
-                methods
-                    .iter()
-                    .find(|m| matches!(m, PaymentMethod::Onchain { .. }))
-            })
-            .or_else(|| {
-                methods
-                    .iter()
-                    .find(|m| matches!(m, PaymentMethod::Ark { .. }))
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!("no receive methods -- add one via POST /v1/profile/methods")
-            })?
-            .clone()
+            .find(|m| matches!(m, PaymentMethod::Onchain { .. }));
+        let lightning = methods
+            .iter()
+            .find(|m| matches!(m, PaymentMethod::Lightning { .. }));
+        (if req.amount_sats.is_some() {
+            onchain.or(lightning)
+        } else {
+            lightning.or(onchain)
+        })
+        .or_else(|| {
+            methods
+                .iter()
+                .find(|m| matches!(m, PaymentMethod::Ark { .. }))
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("no receive methods -- add one via POST /v1/profile/methods")
+        })?
+        .clone()
     };
 
     let mut payload = receive_payload_for(&method)?;
@@ -120,6 +124,7 @@ pub(crate) async fn send_response(state: &AppState, body: SendRequest) -> SendRe
     send_response_with_resolver(state, body, &resolver).await
 }
 
+/// Resolve a recipient through the supplied resolver and gate its payable QR.
 pub(crate) async fn send_response_with_resolver(
     state: &AppState,
     body: SendRequest,
@@ -249,6 +254,7 @@ pub(crate) async fn send_response_with_resolver(
     }
 }
 
+/// Build an experimental invite for an alias without a usable signed profile.
 pub(crate) fn build_email_invite(
     recipient: &str,
     amount_sats: u64,

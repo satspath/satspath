@@ -289,6 +289,29 @@ mod tests {
             },
         )
         .is_err());
+        let lightning = receive_view(
+            &state,
+            ReceiveRequest {
+                rail: None,
+                amount_sats: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(lightning.rail, "Lightning");
+        assert_eq!(lightning.payload, "alice@example.com");
+        let preferred_onchain = receive_view(
+            &state,
+            ReceiveRequest {
+                rail: None,
+                amount_sats: Some(21_000),
+            },
+        )
+        .unwrap();
+        assert_eq!(preferred_onchain.rail, "Onchain");
+        assert_eq!(
+            preferred_onchain.payload,
+            format!("bitcoin:{address}?amount=0.00021000")
+        );
         let onchain = receive_view(
             &state,
             ReceiveRequest {
