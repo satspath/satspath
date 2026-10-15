@@ -6,15 +6,19 @@ use satspath_core::{
     validation::{assert_no_private_material, validate_amount_sats},
     PaymentMethod, ProfileResolver, SatsPathError,
 };
-use satspath_router::{fees::fetch_fee_estimate, handoff::validate_payload, select_priority_route};
+use satspath_router::{
+    fees::fetch_fee_estimate,
+    handoff::{fmt_btc, validate_payload},
+    select_priority_route,
+};
 
 use crate::config::AppState;
 use crate::handlers::profile::ensure_signed_profile;
 use crate::handlers::resolve::resolver_chain;
 use crate::handlers::wallet::load_wallet;
 use crate::types::{
-    build_methods, fmt_btc, pct, safety_status, EmailInvite, ReceiveRequest, ReceiveView,
-    SendRequest, SendResponse,
+    build_methods, pct, safety_status, EmailInvite, ReceiveRequest, ReceiveView, SendRequest,
+    SendResponse,
 };
 use crate::ui::qr_svg;
 

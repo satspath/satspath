@@ -27,7 +27,7 @@ use satspath_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::fees::FeeEstimate;
-use crate::handoff::validate_payload;
+use crate::handoff::{fmt_btc, validate_payload};
 use crate::router::{select_route, select_route_with_fees, RouteRequest};
 use tracing::Instrument;
 
@@ -196,7 +196,7 @@ pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> satspath_co
                 BitcoinNetwork::Regtest => "regtest",
             };
             (
-                format!("bitcoin:{address}?amount={}", sats_to_btc(amount_sats)),
+                format!("bitcoin:{address}?amount={}", fmt_btc(amount_sats)),
                 network,
             )
         }
@@ -210,15 +210,6 @@ pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> satspath_co
     validate_payload(method, &payload, network, Some(amount_sats))
         .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
     Ok(payload)
-}
-
-/// Format sats as a fixed 8-decimal BTC string, e.g. `21000 -> 0.00021000`.
-fn sats_to_btc(amount_sats: u64) -> String {
-    format!(
-        "{}.{:08}",
-        amount_sats / 100_000_000,
-        amount_sats % 100_000_000
-    )
 }
 
 // ─── Core orchestration ─────────────────────────────────────────────────────────

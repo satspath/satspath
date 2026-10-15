@@ -17,7 +17,7 @@ use satspath_core::{
 use crate::lightning::validate_bolt11_invoice;
 
 /// Format an exact on-chain amount without floating-point rounding.
-fn fmt_btc(sats: u64) -> String {
+pub fn fmt_btc(sats: u64) -> String {
     format!("{}.{:08}", sats / 100_000_000, sats % 100_000_000)
 }
 
@@ -207,6 +207,13 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     const MAINNET_ADDRESS: &str = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT";
+
+    #[test]
+    fn fmt_btc_preserves_eight_decimal_places() {
+        assert_eq!(fmt_btc(0), "0.00000000");
+        assert_eq!(fmt_btc(21_000), "0.00021000");
+        assert_eq!(fmt_btc(100_000_000), "1.00000000");
+    }
 
     fn onchain(address: &str) -> PaymentMethod {
         PaymentMethod::Onchain {

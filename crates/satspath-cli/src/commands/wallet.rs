@@ -29,6 +29,7 @@ use satspath_core::validation::{
     validate_lightning_address,
 };
 use satspath_core::{BitcoinNetwork, PaymentMethod, PaymentProfile};
+use satspath_router::handoff::fmt_btc;
 
 use super::{keystore, satspath_dir};
 
@@ -230,7 +231,7 @@ fn receive_payload_for(method: &PaymentMethod, amount_sats: Option<u64>) -> Resu
                 .clone()
                 .unwrap_or_else(|| address.clone().unwrap_or_default());
             match amount_sats {
-                Some(sats) => format!("bitcoin:{target}?amount={}", sats_to_btc(sats)),
+                Some(sats) => format!("bitcoin:{target}?amount={}", fmt_btc(sats)),
                 None => format!("bitcoin:{target}"),
             }
         }
@@ -252,11 +253,6 @@ fn receive_payload_for(method: &PaymentMethod, amount_sats: Option<u64>) -> Resu
     assert_no_private_material(&payload).map_err(|e| anyhow::anyhow!("{e}"))?;
     satspath_router::handoff::validate_payload(method, &payload, "mainnet", amount_sats)?;
     Ok(payload)
-}
-
-/// Represent satoshis as a fixed eight-decimal Bitcoin amount.
-fn sats_to_btc(sats: u64) -> String {
-    format!("{}.{:08}", sats / 100_000_000, sats % 100_000_000)
 }
 
 /// Build, sign, and persist the wallet's payment profile to the local registry.

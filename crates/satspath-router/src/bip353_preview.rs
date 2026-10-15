@@ -10,7 +10,7 @@ use satspath_core::{
     Bip353Resolution, BitcoinNetwork, PaymentMethod,
 };
 
-use crate::handoff::validate_payload;
+use crate::handoff::{fmt_btc, validate_payload};
 use crate::quote_response::{QuoteRecipient, QuoteResponse};
 
 /// Convert a BIP-353 resolution into a preview `QuoteResponse`.
@@ -139,11 +139,7 @@ pub fn quote_from_bip353_resolution(
             reason: "BIP-353 record has no on-chain address".into(),
         };
     };
-    let canonical = format!(
-        "bitcoin:{address}?amount={}.{:08}",
-        amount_sats / 100_000_000,
-        amount_sats % 100_000_000
-    );
+    let canonical = format!("bitcoin:{address}?amount={}", fmt_btc(amount_sats));
     if let Err(e) = validate_payload(&selected_method, &canonical, "mainnet", Some(amount_sats)) {
         return QuoteResponse::NoRoute {
             reason: format!("unsafe BIP-353 payment instruction: {e}"),
