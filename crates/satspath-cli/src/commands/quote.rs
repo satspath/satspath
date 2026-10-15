@@ -203,8 +203,8 @@ pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
                         "  Warning: this is a real invoice QR generated from public metadata."
                     );
                 }
-                Err(e) => {
-                    println!("unavailable ({e}).");
+                Err(_e) => {
+                    println!("unavailable (Lightning invoice could not be fetched).");
                     println!("  Preview only. No funds moved.");
                 }
             }
