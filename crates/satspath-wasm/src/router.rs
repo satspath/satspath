@@ -1,11 +1,15 @@
 //! WASM-compatible router — TypeScript port of Rust satspath-router logic
 
 use crate::types::{
-    ExecutionMode, FeeEstimate, FeeRateSnapshot, Invite, PaymentMethod, PaymentUrgency,
-    QuoteRecipient, QuoteResponse, RouteQuote, RouteRequest, SignedPaymentProfile, SwapDirective,
+    BitcoinNetwork, ExecutionMode, FeeEstimate, FeeRateSnapshot, Invite, PaymentMethod,
+    PaymentUrgency, QuoteRecipient, QuoteResponse, RouteQuote, RouteRequest, SignedPaymentProfile,
+    SwapDirective,
 };
 
 use crate::{fingerprint_pubkey, mask_identifier, ChainResolver};
+
+use bitcoin::{Address, Network};
+use std::str::FromStr;
 
 use js_sys::Date;
 use wasm_bindgen::prelude::*;
@@ -28,19 +32,7 @@ const FALLBACK_FEES: FeeEstimate = FeeEstimate {
 
 /// Main router function — exact port of Rust `select_route`
 pub fn select_route(req: &RouteRequest, fees: &FeeEstimate) -> Result<RouteQuote, String> {
-    satspath_handoff::amount(req.amount_sats)?;
-    let valid_methods: Vec<_> = req
-        .signed_profile
-        .profile
-        .methods
-        .iter()
-        .filter(|method| crate::handoff::validate_method(method, req.amount_sats).is_ok())
-        .cloned()
-        .collect();
-    if valid_methods.is_empty() {
-        return Err("no validated payment methods".into());
-    }
-    let methods = &valid_methods;
+    let methods = &req.signed_profile.profile.methods;
 
     // 1. LIGHTNING — evaluated FIRST, independent of fee environment
     if req.amount_sats < LIGHTNING_THRESHOLD_SATS {
@@ -49,14 +41,6 @@ pub fn select_route(req: &RouteRequest, fees: &FeeEstimate) -> Result<RouteQuote
                 continue;
             }
             let swap_directive = match method {
-                PaymentMethod::Lightning {
-                    bolt12: Some(invoice),
-                    ..
-                } if satspath_handoff::bolt11_network(invoice).is_some() => {
-                    SwapDirective::LightningPayment {
-                        target_ln_address: None,
-                    }
-                }
                 PaymentMethod::Lightning {
                     bolt12: Some(offer),
                     ..
@@ -260,50 +244,52 @@ pub async fn fetch_fee_estimate() -> Result<FeeEstimate, String> {
     })
 }
 
-/// Build QR payload for a payment method
+/// Build a payable QR only when the address, network, and amount can be checked.
+/// Unsupported rails must not be rendered as apparently payable wallet handoffs.
 pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> Result<String, String> {
-    crate::handoff::validate_method(method, amount_sats)?;
+    if amount_sats == 0 || amount_sats > 21_000_000 * 100_000_000 {
+        return Err("amount must be positive and within the Bitcoin supply".into());
+    }
     match method {
-        PaymentMethod::Lightning {
-            lnurl,
-            lightning_address,
-            bolt12,
-            ..
-        } => Ok(lnurl
-            .clone()
-            .or_else(|| lightning_address.clone())
-            .or_else(|| bolt12.clone())
-            .ok_or_else(|| "Lightning method has no address, LNURL, or BOLT12".to_string())?),
+        PaymentMethod::Lightning { .. } => {
+            Err("Lightning pointers cannot bind the amount; a verified invoice is required".into())
+        }
         PaymentMethod::Onchain {
+            network,
             address,
             silent_payment_pubkey,
             ..
         } => {
-            let target = silent_payment_pubkey
-                .clone()
-                .unwrap_or_else(|| address.clone().unwrap_or_default());
-            let btc = format!(
-                "{}.{:08}",
+            if silent_payment_pubkey.is_some() {
+                return Err("silent payment handoffs require wallet-side validation".into());
+            }
+            let address = address.as_deref().ok_or("on-chain method has no address")?;
+            if address.trim() != address || address.len() > 128 {
+                return Err("malformed on-chain address".into());
+            }
+            let expected = match network {
+                BitcoinNetwork::Mainnet => Network::Bitcoin,
+                BitcoinNetwork::Testnet => Network::Testnet,
+                BitcoinNetwork::Regtest => Network::Regtest,
+            };
+            let parsed = Address::from_str(address).map_err(|_| "invalid on-chain address")?;
+            if !parsed.is_valid_for_network(expected) {
+                return Err("on-chain address network mismatch".into());
+            }
+            if *network != BitcoinNetwork::Mainnet
+                && parsed.is_valid_for_network(Network::Testnet)
+                && parsed.is_valid_for_network(Network::Regtest)
+            {
+                return Err("ambiguous testnet/regtest legacy address".into());
+            }
+            Ok(format!(
+                "bitcoin:{address}?amount={}.{:08}",
                 amount_sats / 100_000_000,
                 amount_sats % 100_000_000
-            );
-            Ok(format!("bitcoin:{}?amount={}", target, btc))
-        }
-        PaymentMethod::Ark { server, pubkey, .. } => {
-            // Simple URL encoding - replace special chars
-            let encode = |s: &str| {
-                s.replace(' ', "%20")
-                    .replace('&', "%26")
-                    .replace('=', "%3D")
-                    .replace('?', "%3F")
-                    .replace('#', "%23")
-            };
-            Ok(format!(
-                "ark:{}?server={}&amount={}",
-                encode(pubkey),
-                encode(server),
-                amount_sats
             ))
+        }
+        PaymentMethod::Ark { .. } => {
+            Err("Ark pointers require protocol-aware wallet validation".into())
         }
     }
 }
@@ -312,12 +298,17 @@ pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> Result<Stri
 
 /// Full quote pipeline: resolve → verify → route → build QR
 pub async fn quote(recipient: &str, amount_sats: u64) -> Result<QuoteResponse, String> {
+    if amount_sats == 0 || amount_sats > 21_000_000 * 100_000_000 {
+        return Ok(QuoteResponse::NoRoute {
+            reason: "amount must be positive and within the Bitcoin supply".into(),
+        });
+    }
     // 1. Resolve
     let chain_resolver = ChainResolver::new();
     let signed_json = chain_resolver.resolve_alias(recipient).await?;
 
     // Parse the JSON string to get the profile
-    let signed: SignedPaymentProfile =
+    let mut signed: SignedPaymentProfile =
         serde_json::from_str(&signed_json).map_err(|e| e.to_string())?;
 
     // 2. Verify signature
@@ -340,7 +331,26 @@ pub async fn quote(recipient: &str, amount_sats: u64) -> Result<QuoteResponse, S
         }
     }
 
-    // 4. Route selection
+    // 4. Filter to methods that can produce a validated payable QR before routing.
+    let mut last_payload_err = None;
+    signed
+        .profile
+        .methods
+        .retain(|method| match build_qr_payload(method, amount_sats) {
+            Ok(_) => true,
+            Err(reason) => {
+                last_payload_err = Some(reason);
+                false
+            }
+        });
+    if signed.profile.methods.is_empty() {
+        return Ok(QuoteResponse::NoRoute {
+            reason: last_payload_err
+                .unwrap_or_else(|| "No usable rail found in profile.".to_string()),
+        });
+    }
+
+    // 5. Route selection
     let route_req = RouteRequest {
         alias: recipient.to_string(),
         amount_sats: amount_sats,
@@ -352,34 +362,12 @@ pub async fn quote(recipient: &str, amount_sats: u64) -> Result<QuoteResponse, S
 
     let route_quote = select_route_live(&route_req).await?;
 
-    // 5. Build QR payload
-    let mut qr = build_qr_payload(&route_quote.selected_method, amount_sats)?;
-
-    // 6. Optionally fetch real BOLT11 for Lightning
-    if let PaymentMethod::Lightning {
-        lightning_address,
-        bolt12,
-        ..
-    } = &route_quote.selected_method
-    {
-        let now = crate::handoff::current_time().max(0) as u64;
-        if let Some(addr) = lightning_address {
-            if let Ok(invoice) = fetch_real_invoice(addr, amount_sats).await {
-                if validate_fetched_bolt11_invoice(&invoice, amount_sats, now) {
-                    qr = invoice;
-                }
-            }
-        } else if let Some(offer) = bolt12 {
-            let proxy = "https://bolt12-proxy.satspath.dev";
-            if let Ok(invoice) =
-                crate::bolt12::fetch_bolt12_invoice(offer, amount_sats, proxy).await
-            {
-                if validate_fetched_bolt11_invoice(&invoice, amount_sats, now) {
-                    qr = invoice;
-                }
-            }
-        }
-    }
+    // No invoice is fetched in this layer: a Lightning pointer or experimental
+    // offer cannot be used as an amount-bound wallet handoff.
+    let qr = match build_qr_payload(&route_quote.selected_method, amount_sats) {
+        Ok(qr) => qr,
+        Err(reason) => return Ok(QuoteResponse::NoRoute { reason }),
+    };
 
     Ok(QuoteResponse::Ok {
         recipient: recipient_info,
@@ -403,86 +391,6 @@ fn build_recipient_info(profile: &crate::types::PaymentProfile, verified: bool) 
             "identifier-only; no inbox/domain ownership proof in this response".to_string(),
         fingerprint: Some(fingerprint_pubkey(&profile.identity_pubkey)),
     }
-}
-
-/// Verify a fetched BOLT11 invoice's signature, mainnet network, exact amount, and expiry
-/// before allowing it to replace a validated fallback QR payload.
-fn validate_fetched_bolt11_invoice(invoice: &str, amount_sats: u64, now: u64) -> bool {
-    satspath_handoff::bolt11(invoice, amount_sats, bitcoin::Network::Bitcoin, now).is_ok()
-}
-
-/// Fetch real BOLT11 invoice from LNURL-pay
-async fn fetch_real_invoice(lightning_address: &str, amount_sats: u64) -> Result<String, String> {
-    let [user, domain] = lightning_address
-        .split('@')
-        .collect::<Vec<_>>()
-        .try_into()
-        .map_err(|_| "Invalid lightning address")?;
-    let lnurl = format!("https://{}/.well-known/lnurlp/{}", domain, user);
-
-    let mut opts = RequestInit::new();
-    opts.method("GET");
-    opts.mode(RequestMode::Cors);
-
-    let request = Request::new_with_str_and_init(&lnurl, &opts)
-        .map_err(|e| format!("LNURL request failed: {:?}", e))?;
-
-    let win = web_sys::window().ok_or("no window")?;
-    let resp_value = JsFuture::from(win.fetch_with_request(&request))
-        .await
-        .map_err(|e| format!("LNURL fetch failed: {:?}", e))?;
-    let response: Response = resp_value
-        .dyn_into()
-        .map_err(|_| "Invalid LNURL response")?;
-
-    if !response.ok() {
-        return Err("LNURL fetch failed".to_string());
-    }
-
-    let json_value = JsFuture::from(
-        response
-            .json()
-            .map_err(|e| format!("LNURL JSON failed: {:?}", e))?,
-    )
-    .await
-    .map_err(|e| format!("LNURL JSON parse failed: {:?}", e))?;
-
-    let meta: serde_json::Value = serde_wasm_bindgen::from_value(json_value)
-        .map_err(|e| format!("LNURL deserialize failed: {:?}", e))?;
-
-    let callback = meta["callback"].as_str().ok_or("No callback in LNURL")?;
-    let mut callback_url = format!("{}?amount={}", callback, amount_sats * 1000); // msats
-
-    let inv_request = Request::new_with_str_and_init(&callback_url, &RequestInit::new())
-        .map_err(|e| format!("Invoice request failed: {:?}", e))?;
-
-    let win2 = web_sys::window().ok_or("no window")?;
-    let inv_resp_value = JsFuture::from(win2.fetch_with_request(&inv_request))
-        .await
-        .map_err(|e| format!("Invoice fetch failed: {:?}", e))?;
-    let inv_response: Response = inv_resp_value
-        .dyn_into()
-        .map_err(|_| "Invalid invoice response")?;
-
-    if !inv_response.ok() {
-        return Err("Invoice fetch failed".to_string());
-    }
-
-    let inv_json = JsFuture::from(
-        inv_response
-            .json()
-            .map_err(|e| format!("Invoice JSON failed: {:?}", e))?,
-    )
-    .await
-    .map_err(|e| format!("Invoice JSON parse failed: {:?}", e))?;
-
-    let invoice: serde_json::Value = serde_wasm_bindgen::from_value(inv_json)
-        .map_err(|e| format!("Invoice deserialize failed: {:?}", e))?;
-
-    invoice["pr"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "No invoice in response".to_string())
 }
 
 // ===== Helpers =====
@@ -542,72 +450,6 @@ fn estimate_onchain_fee(_amount_sats: u64, fee_rate_sat_vb: u64) -> u64 {
 mod tests {
     use super::*;
 
-    /// Invalid or cross-network receivers cannot become browser QR payloads or routes.
-    #[test]
-    fn rejects_invalid_wallet_handoffs() {
-        let mut method = PaymentMethod::Onchain {
-            label: "receiver".into(),
-            network: crate::BitcoinNetwork::Mainnet,
-            address: Some("1BoatSLRHtKNngkdXEeobR76b53LETtpyT".into()),
-            silent_payment_pubkey: None,
-            pubkey_hint: None,
-            descriptor_hint: None,
-            address_list: vec![],
-        };
-        for amount in [0, u64::MAX] {
-            assert!(build_qr_payload(&method, amount).is_err());
-        }
-        if let PaymentMethod::Onchain { network, .. } = &mut method {
-            *network = crate::BitcoinNetwork::Testnet;
-        }
-        assert!(build_qr_payload(&method, 1000).is_err());
-        for payload in ["lno1invalid", "lnbc1invalid"] {
-            let method = PaymentMethod::Lightning {
-                label: "bad".into(),
-                lightning_address: None,
-                lnurl: None,
-                bolt12: Some(payload.into()),
-                receiver_pubkey: None,
-            };
-            assert!(build_qr_payload(&method, 1000).is_err());
-        }
-        let method = PaymentMethod::Ark {
-            label: "expired".into(),
-            server: "https://ark.example".into(),
-            pubkey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".into(),
-            vtxo_pointer: None,
-            opaque_uri: None,
-            proof: None,
-            expires_at: Some(1),
-        };
-        assert!(build_qr_payload(&method, 1000).is_err());
-    }
-
-    #[test]
-    fn fetched_bolt11_invoice_must_pass_handoff_validation_before_replacing_qr() {
-        let invoice = "lnbc2500u1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpu9qrsgquk0rl77nj30yxdy8j9vdx85fkpmdla2087ne0xh8nhedh8w27kyke0lp53ut353s06fv3qfegext0eh0ymjpf39tuven09sam30g4vgpfna3rh";
-        assert!(validate_fetched_bolt11_invoice(
-            invoice,
-            250_000,
-            1_496_314_658
-        ));
-        assert!(!validate_fetched_bolt11_invoice(
-            invoice,
-            250_001,
-            1_496_314_658
-        ));
-        assert!(!validate_fetched_bolt11_invoice(
-            invoice,
-            250_000,
-            1_496_314_718
-        ));
-        assert!(!validate_fetched_bolt11_invoice(
-            "lnbc1invalid",
-            250_000,
-            1_496_314_658
-        ));
-    }
-
     #[test]
     fn lightning_threshold() {
         assert_eq!(LIGHTNING_THRESHOLD_SATS, 100_000);
@@ -619,33 +461,24 @@ mod tests {
     }
 
     #[test]
-    /// Verify that build qr payload silent payment.
-    fn test_build_qr_payload_silent_payment() {
-        use bech32::ToBase32;
-        let key = hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
-            .unwrap();
-        let mut data = vec![bech32::u5::try_from_u8(0).unwrap()];
-        data.extend([key.clone(), key].concat().to_base32());
-        let silent = bech32::encode("sp", data, bech32::Variant::Bech32m).unwrap();
-
+    fn test_build_qr_payload_rejects_unsupported_silent_payment() {
         let method = PaymentMethod::Onchain {
             label: "Main".to_string(),
             network: crate::types::BitcoinNetwork::Mainnet,
-            address: Some("1BoatSLRHtKNngkdXEeobR76b53LETtpyT".to_string()),
-            silent_payment_pubkey: Some(silent.clone()),
+            address: Some("bc1qold".to_string()),
+            silent_payment_pubkey: Some(
+                "sp1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq".to_string(),
+            ),
             pubkey_hint: None,
             descriptor_hint: None,
             address_list: vec![],
         };
 
-        let payload = build_qr_payload(&method, 100_000).unwrap();
-        // Should prioritize silent_payment_pubkey over address
-        assert_eq!(payload, format!("bitcoin:{silent}?amount=0.00100000"));
+        assert!(build_qr_payload(&method, 100_000).is_err());
     }
 
     #[test]
-    /// Verify that build qr payload fallback address.
-    fn test_build_qr_payload_fallback_address() {
+    fn test_build_qr_payload_requires_valid_network_and_amount() {
         let method = PaymentMethod::Onchain {
             label: "Main".to_string(),
             network: crate::types::BitcoinNetwork::Mainnet,
@@ -661,20 +494,72 @@ mod tests {
             payload,
             "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00050000"
         );
+        assert!(build_qr_payload(&method, 0).is_err());
+        assert!(build_qr_payload(&method, u64::MAX).is_err());
+        let mut wrong_network = method.clone();
+        if let PaymentMethod::Onchain { network, .. } = &mut wrong_network {
+            *network = BitcoinNetwork::Testnet;
+        }
+        assert!(build_qr_payload(&wrong_network, 50_000).is_err());
+        let mut invalid_address = method;
+        if let PaymentMethod::Onchain { address, .. } = &mut invalid_address {
+            *address = Some("bc1qold".into());
+        }
+        assert!(build_qr_payload(&invalid_address, 50_000).is_err());
+    }
+
+    #[test]
+    fn test_build_qr_payload_rejects_unbound_lightning_and_ark() {
+        let lightning = PaymentMethod::Lightning {
+            label: "Lightning".into(),
+            lightning_address: Some("alice@example.com".into()),
+            lnurl: None,
+            bolt12: None,
+            receiver_pubkey: None,
+        };
+        assert!(build_qr_payload(&lightning, 50_000).is_err());
+        let ark = PaymentMethod::Ark {
+            label: "Ark".into(),
+            server: "https://ark.example.com".into(),
+            pubkey: "02".repeat(33),
+            vtxo_pointer: None,
+            opaque_uri: None,
+            proof: None,
+            expires_at: None,
+        };
+        assert!(build_qr_payload(&ark, 50_000).is_err());
+    }
+
+    #[test]
+    fn quote_js_rejects_fractional_non_finite_and_out_of_range_amounts() {
+        for amount in [
+            0.0,
+            -1.0,
+            1.5,
+            f64::NAN,
+            f64::INFINITY,
+            21_000_001.0 * 100_000_000.0,
+        ] {
+            assert!(checked_amount_sats(amount).is_err());
+        }
+        assert_eq!(checked_amount_sats(50_000.0).unwrap(), 50_000);
     }
 }
-#[wasm_bindgen(js_name = quote)]
-pub async fn quote_js(recipient: &str, amount_sats: f64) -> Result<JsValue, JsValue> {
+
+fn checked_amount_sats(amount_sats: f64) -> Result<u64, String> {
     if !amount_sats.is_finite()
         || amount_sats.fract() != 0.0
-        || amount_sats < 1.0
-        || amount_sats > satspath_handoff::MAX_SATS as f64
+        || !(1.0..=2_100_000_000_000_000.0).contains(&amount_sats)
     {
-        return Err(JsValue::from_str(
-            "amount must be an integral, positive number of satoshis within Bitcoin supply",
-        ));
+        return Err("amount must be a positive whole number of sats within Bitcoin supply".into());
     }
-    match quote(recipient, amount_sats as u64).await {
+    Ok(amount_sats as u64)
+}
+
+#[wasm_bindgen(js_name = quote)]
+pub async fn quote_js(recipient: &str, amount_sats: f64) -> Result<JsValue, JsValue> {
+    let amount_sats = checked_amount_sats(amount_sats).map_err(|e| JsValue::from_str(&e))?;
+    match quote(recipient, amount_sats).await {
         Ok(resp) => {
             Ok(serde_wasm_bindgen::to_value(&resp)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?)

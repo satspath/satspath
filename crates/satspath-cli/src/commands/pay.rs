@@ -3,7 +3,6 @@ use anyhow::Result;
 use satspath_core::{
     create_invite_record,
     crypto::verify_signed_profile,
-    pointer::build_qr_payload,
     privacy::{mask_address, mask_identifier, mask_invoice, mask_pubkey},
     resolver::ProfileResolver,
     validation::{
@@ -103,6 +102,7 @@ pub async fn cmd_pay(
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     println!("  Signature valid.");
 
+    println!("Selecting public payment route...");
     let network = if mainnet_preview {
         BitcoinNetwork::Mainnet
     } else if testnet {
@@ -110,18 +110,27 @@ pub async fn cmd_pay(
     } else {
         BitcoinNetwork::Mainnet
     };
-    // Route only methods that can produce a wallet payload on the configured network.
-    let mut routable_signed = signed.clone();
-    routable_signed
-        .profile
-        .methods
-        .retain(|method| routable_for_preview(method, amount_sats, mainnet_preview, network));
-
-    println!("Selecting public payment route...");
+    let mut routable = signed.clone();
+    let mut last_payload_err = None;
+    routable.profile.methods.retain(|method| {
+        match validate_payable_method(method, amount_sats, network) {
+            Ok(_) => true,
+            Err(e) => {
+                last_payload_err = Some(e);
+                false
+            }
+        }
+    });
+    if routable.profile.methods.is_empty() {
+        if let Some(err) = last_payload_err {
+            return Err(anyhow::anyhow!("{}", err));
+        }
+        anyhow::bail!("No usable rail found in profile.");
+    }
     let req = RouteRequest {
         alias: alias.to_string(),
         amount_sats,
-        signed_profile: routable_signed,
+        signed_profile: routable,
         urgency: satspath_router::urgency::PaymentUrgency::Normal,
         max_fee_sats: None,
         max_fee_percent: None,
@@ -133,9 +142,14 @@ pub async fn cmd_pay(
 
     let pointer = payment_method_to_pointer(&quote.selected_method)?;
     validate_pointer_for_preview(&pointer, mainnet_preview, network)?;
-    let qr_payload =
-        build_qr_payload(&pointer, amount_sats).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let qr_payload = satspath_router::build_qr_payload(&quote.selected_method, amount_sats)?;
     assert_no_private_material(&qr_payload).map_err(|e| anyhow::anyhow!("{}", e))?;
+    satspath_router::handoff::validate_payload(
+        &quote.selected_method,
+        &qr_payload,
+        network_name(network),
+        Some(amount_sats),
+    )?;
 
     if let Some(snap) = &quote.fee_snapshot {
         println!();
@@ -191,21 +205,6 @@ fn validate_pay_flags(
         anyhow::bail!("--mainnet-preview cannot be combined with --experimental-swaps.");
     }
     Ok(())
-}
-
-fn routable_for_preview(
-    method: &PaymentMethod,
-    amount_sats: u64,
-    mainnet_preview: bool,
-    network: BitcoinNetwork,
-) -> bool {
-    if satspath_core::handoff::validate_method_for_network(method, amount_sats, network).is_err() {
-        return false;
-    }
-    payment_method_to_pointer(method).is_ok_and(|pointer| {
-        build_qr_payload(&pointer, amount_sats).is_ok()
-            && validate_pointer_for_preview(&pointer, mainnet_preview, network).is_ok()
-    })
 }
 
 // ─── Experimental Engine v0 ──────────────────────────────────────────────────
@@ -429,14 +428,7 @@ fn validate_pointer_for_preview(
         PaymentPointer::Bolt12Offer { offer } => {
             assert_no_private_material(offer).map_err(|e| anyhow::anyhow!("{}", e))?;
         }
-        PaymentPointer::OnchainAddress {
-            address,
-            network: declared,
-            ..
-        } => {
-            if *declared != network {
-                anyhow::bail!("on-chain method does not match configured network");
-            }
+        PaymentPointer::OnchainAddress { address, .. } => {
             if mainnet_preview {
                 validate_bitcoin_address(address, BitcoinNetwork::Mainnet)
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -527,6 +519,20 @@ fn network_name(network: BitcoinNetwork) -> &'static str {
     }
 }
 
+fn validate_payable_method(
+    method: &PaymentMethod,
+    amount_sats: u64,
+    network: BitcoinNetwork,
+) -> Result<()> {
+    let payload = satspath_router::build_qr_payload(method, amount_sats)?;
+    satspath_router::handoff::validate_payload(
+        method,
+        &payload,
+        network_name(network),
+        Some(amount_sats),
+    )
+}
+
 fn preview_safety_lines() -> [&'static str; 5] {
     [
         "SatsPath Preview Mode",
@@ -542,28 +548,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn routability_filters_on_configured_network() {
-        let method = PaymentMethod::Onchain {
-            label: "testnet".into(),
-            network: BitcoinNetwork::Testnet,
-            address: Some("mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn".into()),
+    fn payable_methods_must_match_configured_network() {
+        let mainnet = PaymentMethod::Onchain {
+            label: "mainnet".into(),
+            network: BitcoinNetwork::Mainnet,
+            address: Some("1BoatSLRHtKNngkdXEeobR76b53LETtpyT".into()),
             silent_payment_pubkey: None,
             pubkey_hint: None,
             descriptor_hint: None,
             address_list: vec![],
         };
-        assert!(routable_for_preview(
-            &method,
-            100_000,
-            false,
-            BitcoinNetwork::Testnet
-        ));
-        assert!(!routable_for_preview(
-            &method,
-            100_000,
-            false,
-            BitcoinNetwork::Mainnet
-        ));
+        let testnet = PaymentMethod::Onchain {
+            label: "testnet".into(),
+            network: BitcoinNetwork::Testnet,
+            address: Some("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".into()),
+            silent_payment_pubkey: None,
+            pubkey_hint: None,
+            descriptor_hint: None,
+            address_list: vec![],
+        };
+        assert!(validate_payable_method(&mainnet, 21_000, BitcoinNetwork::Mainnet).is_ok());
+        assert!(validate_payable_method(&mainnet, 21_000, BitcoinNetwork::Testnet).is_err());
+        assert!(validate_payable_method(&testnet, 21_000, BitcoinNetwork::Mainnet).is_err());
+        assert!(validate_payable_method(&testnet, 21_000, BitcoinNetwork::Testnet).is_ok());
     }
 
     #[test]

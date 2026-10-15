@@ -730,7 +730,7 @@ fn test_select_route_urgency_changes_onchain_and_ark_choice() {
     }
 }
 
-/// Valid decoded offers can be handed off; malformed encodings must fail closed.
+/// Valid offers can be discovered and routed, but are not payable wallet QRs.
 #[test]
 fn test_offer_validation_for_both_method_variants() {
     for (offer, valid) in [
@@ -768,10 +768,7 @@ fn test_offer_validation_for_both_method_variants() {
                 valid
             );
             assert_eq!(select_route_with_fees(&req, &low_fees()).is_ok(), valid);
-            assert_eq!(
-                satspath_router::build_qr_payload(&method, req.amount_sats).is_ok(),
-                valid
-            );
+            assert!(satspath_router::build_qr_payload(&method, req.amount_sats).is_err());
         }
     }
 }
