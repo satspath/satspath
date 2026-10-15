@@ -67,11 +67,11 @@ fn dummy_signed_profile(alias: &str, methods: Vec<PaymentMethod>) -> SignedPayme
 #[test]
 fn test_cln_ldk_bolt12_offer_parsing_and_blinded_paths() {
     let intro_node = "02".to_string() + &"aa".repeat(32);
-    let hop_node = "03".to_string() + &"bb".repeat(32);
+    let hop_node = "03".to_string() + &"33".repeat(32);
 
     let blinded_path = BlindedPath {
         introduction_node_id: intro_node.clone(),
-        blinding_point: Some("02".to_string() + &"cc".repeat(32)),
+        blinding_point: Some("02".to_string() + &"22".repeat(32)),
         blinded_hops: vec![BlindedHop {
             blinded_node_id: hop_node,
             encrypted_payload: "aabbccddeeff".to_string(),
@@ -434,11 +434,11 @@ async fn test_bolt12_amount_availability_overflow() {
 #[test]
 fn test_bolt12_scoring_blinded_path_privacy_bonus() {
     let intro_node = "02".to_string() + &"aa".repeat(32);
-    let hop_node = "03".to_string() + &"bb".repeat(32);
+    let hop_node = "03".to_string() + &"33".repeat(32);
 
     let blinded_path = BlindedPath {
         introduction_node_id: intro_node,
-        blinding_point: Some("02".to_string() + &"cc".repeat(32)),
+        blinding_point: Some("02".to_string() + &"22".repeat(32)),
         blinded_hops: vec![BlindedHop {
             blinded_node_id: hop_node,
             encrypted_payload: "112233".to_string(),
@@ -505,4 +505,72 @@ fn test_bolt12_scoring_rejects_undecoded_offer() {
         &RoutePreferences::default()
     )
     .is_err());
+}
+
+#[test]
+fn ldk_concatenated_blinded_paths_roundtrip() {
+    // Upstream LDK vector, with public-key and sciddir introduction nodes:
+    // https://github.com/lightningdevkit/rust-lightning/blob/e3439aa835be3193e2ab39699c4a3c24cc84164b/lightning/src/offers/offer.rs#L2463
+    let encoded = include_str!("../../satspath-handoff/tests/data/ldk-offer-two-paths.txt").trim();
+    satspath_core::handoff::validate_method(
+        &PaymentMethod::Lightning {
+            label: "LDK offer".into(),
+            lightning_address: None,
+            lnurl: None,
+            bolt12: Some(encoded.into()),
+            receiver_pubkey: None,
+        },
+        1,
+    )
+    .unwrap();
+    let offer = parse_bolt12_offer(encoded).unwrap();
+    let paths = offer.blinded_paths.unwrap();
+    assert_eq!(paths.len(), 2);
+    assert_eq!(
+        paths[0].introduction_node_id,
+        "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c"
+    );
+    assert_eq!(paths[1].introduction_node_id, "010000010000020003");
+    for path in &paths {
+        assert_eq!(path.blinding_point, Some("02".repeat(33)));
+        assert_eq!(path.hop_count(), 2);
+        assert_eq!(path.blinded_hops[0].blinded_node_id, "02".repeat(33));
+        assert_eq!(path.blinded_hops[0].encrypted_payload, "00".repeat(16));
+    }
+    assert_eq!(paths[0].blinded_hops[1].encrypted_payload, "11".repeat(8));
+    assert_eq!(paths[1].blinded_hops[1].encrypted_payload, "22".repeat(8));
+
+    use bitcoin::bech32::primitives::{decode::CheckedHrpstring, NoChecksum};
+    let raw: Vec<u8> = CheckedHrpstring::new::<NoChecksum>(encoded)
+        .unwrap()
+        .byte_iter()
+        .collect();
+    let path_record = decode_tlv_stream(&raw)
+        .unwrap()
+        .into_iter()
+        .find(|record| record.tag == TLV_OFFER_PATHS)
+        .unwrap();
+    let reencoded: Vec<u8> = paths
+        .iter()
+        .flat_map(|path| path.encode_bytes().unwrap())
+        .collect();
+    assert_eq!(reencoded, path_record.value);
+    assert!(
+        BlindedPath::decode_bytes(&reencoded).is_err(),
+        "single-path decoding must reject trailing paths"
+    );
+    for path in paths {
+        assert_eq!(
+            BlindedPath::decode_bytes(&path.encode_bytes().unwrap()).unwrap(),
+            path
+        );
+    }
+}
+
+#[test]
+fn offer_unknown_tlv_parity() {
+    for (tag, accepted) in [(23, true), (24, false)] {
+        let offer = encode_offer(&[issuer_id_record(), TlvRecord { tag, value: vec![] }]);
+        assert_eq!(parse_bolt12_offer(&offer).is_ok(), accepted);
+    }
 }

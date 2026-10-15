@@ -35,11 +35,12 @@ fn create_pqc_profile(pubkey: &secp256k1::PublicKey) -> PaymentProfile {
 async fn test_attack_loopback_profile_url_rejected() {
     let resolver = HttpResolver::new();
     let result = resolver
-        .resolve_from_url("http://127.0.0.1:8080/profile")
+        .resolve_from_url("https://127.0.0.1:8080/profile")
         .await;
     assert!(
-        result.is_err(),
-        "resolve_from_url must reject loopback URLs unconditionally"
+        matches!(result, Err(satspath_core::SatsPathError::ValidationError(ref message))
+            if message.starts_with("Blocked IP: 127.0.0.1")),
+        "resolve_from_url must reject the loopback IP range: {result:?}"
     );
 }
 

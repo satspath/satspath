@@ -269,22 +269,30 @@ fn bolt12_take<'a>(input: &mut &'a [u8], length: usize) -> Result<&'a [u8], Stri
     Ok(value)
 }
 
-/// Check the bounded shape of one blinded path, including at least one hop.
+/// Check concatenated BOLT #4 blinded paths, each including at least one hop.
 fn bolt12_path(mut value: &[u8]) -> Result<(), String> {
-    bolt12_take(&mut value, 33)?; // Introduction node.
-    bolt12_take(&mut value, 33)?; // Blinding point.
-    let hops = bolt12_bigsize(&mut value)?;
-    if hops == 0 || hops > 100 || hops > (value.len() / 34) as u64 {
-        return Err("invalid BOLT12 offer path hop count".into());
+    if value.is_empty() {
+        return Err("BOLT12 offer paths must not be empty".into());
     }
-    for _ in 0..hops {
-        bolt12_take(&mut value, 33)?;
-        let length = usize::try_from(bolt12_bigsize(&mut value)?)
-            .map_err(|_| "BOLT12 path length overflow")?;
-        bolt12_take(&mut value, length)?;
-    }
-    if !value.is_empty() {
-        return Err("trailing bytes in BOLT12 offer path".into());
+    while !value.is_empty() {
+        match value[0] {
+            0 | 1 => {
+                bolt12_take(&mut value, 9)?;
+            } // sciddir: direction + u64.
+            2 | 3 => public_key(bolt12_take(&mut value, 33)?)?,
+            _ => return Err("invalid BOLT12 introduction node".into()),
+        }
+        public_key(bolt12_take(&mut value, 33)?)?; // First path key.
+        let hops = usize::from(bolt12_take(&mut value, 1)?[0]);
+        if hops == 0 || hops > 100 || hops > value.len() / 35 {
+            return Err("invalid BOLT12 offer path hop count".into());
+        }
+        for _ in 0..hops {
+            public_key(bolt12_take(&mut value, 33)?)?;
+            let length = bolt12_take(&mut value, 2)?;
+            let length = usize::from(u16::from_be_bytes([length[0], length[1]]));
+            bolt12_take(&mut value, length)?;
+        }
     }
     Ok(())
 }
@@ -340,6 +348,10 @@ pub fn bolt12(value: &str) -> Result<(), String> {
             22 => {
                 public_key(payload)?;
                 has_destination = true;
+            }
+            2 | 4 | 6 | 8 | 10 | 12 | 14 | 18 | 20 => {}
+            _ if tag.is_multiple_of(2) => {
+                return Err(format!("unknown even BOLT12 TLV type: {tag}"))
             }
             _ => {}
         }
@@ -397,7 +409,7 @@ mod tests {
             key.as_slice(),
             &[1],
             key.as_slice(),
-            &[1, 42],
+            &[0, 1, 42],
         ]
         .concat();
         let mut path_record = vec![16, path.len() as u8];
@@ -427,6 +439,25 @@ mod tests {
                 bolt12(&invalid).is_err(),
                 "accepted malformed offer: {invalid}"
             );
+        }
+    }
+
+    #[test]
+    fn bolt12_accepts_ldk_concatenated_blinded_paths() {
+        // LDK's parses_bech32_encoded_offers vector: a public-key introduction
+        // followed by sciddir 1x2x3, direction 1.
+        // https://github.com/lightningdevkit/rust-lightning/blob/e3439aa835be3193e2ab39699c4a3c24cc84164b/lightning/src/offers/offer.rs#L2463
+        assert!(bolt12(include_str!("../tests/data/ldk-offer-two-paths.txt")).is_ok());
+    }
+
+    #[test]
+    fn bolt12_unknown_tlv_parity() {
+        let key = hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap();
+        for (tag, accepted) in [(23, true), (24, false)] {
+            let raw = [vec![22, 33], key.clone(), vec![tag, 0]].concat();
+            let offer = bech32::encode("lno", raw.to_base32(), bech32::Variant::Bech32m).unwrap();
+            assert_eq!(bolt12(&offer).is_ok(), accepted);
         }
     }
 

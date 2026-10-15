@@ -25,7 +25,8 @@ use std::str::FromStr;
 /// Build a parseable blinded offer fixture for routing determinism tests.
 fn valid_blinded_bolt12_offer() -> String {
     let bp = BlindedPath {
-        introduction_node_id: "02".to_string() + &"11".repeat(32),
+        introduction_node_id: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            .into(),
         blinding_point: Some("02".to_string() + &"22".repeat(32)),
         blinded_hops: vec![BlindedHop {
             blinded_node_id: "03".to_string() + &"33".repeat(32),
