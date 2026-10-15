@@ -147,10 +147,12 @@ pub(crate) async fn send_response_with_resolver(
             }
             let fee = fetch_fee_estimate().await;
             let routing_ok = body.routing_ok.unwrap_or(true);
+            let payable_methods =
+                payable_methods(&signed.profile.methods, body.amount_sats, &state.network);
             match select_priority_route(
                 body.amount_sats,
                 &fee.unwrap_or_default(),
-                &signed.profile.methods,
+                &payable_methods,
                 routing_ok,
             ) {
                 Some(decision) => {
@@ -195,7 +197,7 @@ pub(crate) async fn send_response_with_resolver(
                     }
                 }
                 None => SendResponse::NoRoute {
-                    reason: "recipient exposes no usable rail".to_string(),
+                    reason: "recipient exposes no safely payable rail".to_string(),
                 },
             }
         }
@@ -252,6 +254,23 @@ pub(crate) async fn send_response_with_resolver(
             }
         }
     }
+}
+
+/// Retain only signed-profile methods that can produce a validated payable QR.
+fn payable_methods(
+    methods: &[PaymentMethod],
+    amount_sats: u64,
+    network: &str,
+) -> Vec<PaymentMethod> {
+    methods
+        .iter()
+        .filter(|method| {
+            send_payload_for(method, amount_sats)
+                .and_then(|payload| validate_payload(method, &payload, network, Some(amount_sats)))
+                .is_ok()
+        })
+        .cloned()
+        .collect()
 }
 
 /// Build an experimental invite for an alias without a usable signed profile.
@@ -322,4 +341,76 @@ pub(crate) fn broadcast(state: &AppState) -> Result<serde_json::Value> {
     Ok(
         serde_json::json!({ "broadcasting": false, "status": "Profile saved. Enabled transports manage publication; saving is not proof of network availability." }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use satspath_core::BitcoinNetwork;
+    use satspath_router::fees::FeeEstimate;
+
+    fn onchain(address: &str) -> PaymentMethod {
+        PaymentMethod::Onchain {
+            label: "On-chain".into(),
+            network: BitcoinNetwork::Mainnet,
+            address: Some(address.into()),
+            silent_payment_pubkey: None,
+            pubkey_hint: None,
+            descriptor_hint: None,
+            address_list: vec![],
+        }
+    }
+
+    #[test]
+    fn send_skips_unpayable_preferred_rails_before_selecting_route() {
+        let good = onchain("1BoatSLRHtKNngkdXEeobR76b53LETtpyT");
+        let methods = vec![
+            onchain("invalid-address"),
+            PaymentMethod::Lightning {
+                label: "Lightning".into(),
+                lightning_address: Some("alice@example.com".into()),
+                lnurl: None,
+                bolt12: None,
+                receiver_pubkey: None,
+            },
+            good.clone(),
+        ];
+        let payable = payable_methods(&methods, 21_000, "mainnet");
+        assert_eq!(payable, vec![good.clone()]);
+
+        // High fees would pick Lightning first, but its static pointer has no
+        // amount-bound invoice. The router's last resort is the valid on-chain QR.
+        let high_fee = FeeEstimate {
+            fastest_fee: 40,
+            ..FeeEstimate::default()
+        };
+        let selected = select_priority_route(21_000, &high_fee, &payable, true).unwrap();
+        assert_eq!(selected.rail, "onchain");
+        assert_eq!(selected.method, good);
+        assert!(validate_payload(
+            &selected.method,
+            &send_payload_for(&selected.method, 21_000).unwrap(),
+            "mainnet",
+            Some(21_000)
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn send_has_no_route_when_every_method_is_unpayable() {
+        let methods = [PaymentMethod::Lightning {
+            label: "Lightning".into(),
+            lightning_address: Some("alice@example.com".into()),
+            lnurl: None,
+            bolt12: None,
+            receiver_pubkey: None,
+        }];
+        assert!(payable_methods(&methods, 21_000, "mainnet").is_empty());
+        assert!(payable_methods(
+            &[onchain("1BoatSLRHtKNngkdXEeobR76b53LETtpyT")],
+            21_000,
+            "devnet"
+        )
+        .is_empty());
+    }
 }
