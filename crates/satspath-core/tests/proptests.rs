@@ -421,12 +421,10 @@ proptest! {
             }
             _ => {
                 // Tamper with signature bytes
-                if let Ok(mut sig_bytes) = hex::decode(&tampered.signature) {
-                    if !sig_bytes.is_empty() {
-                        sig_bytes[0] ^= tamper_byte;
-                        tampered.signature = hex::encode(sig_bytes);
-                    }
-                }
+                let mut sig_bytes = hex::decode(&tampered.signature).expect("signed signature is hex");
+                let first = sig_bytes.first_mut().expect("signed signature is nonempty");
+                *first ^= tamper_byte;
+                tampered.signature = hex::encode(sig_bytes);
             }
         }
 

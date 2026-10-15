@@ -56,7 +56,10 @@ fn valid_unblinded_bolt12_offer() -> String {
         },
         TlvRecord {
             tag: TLV_OFFER_NODE_ID,
-            value: [vec![0x02], vec![0x11; 32]].concat(),
+            value: hex::decode(
+                "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            )
+            .expect("valid offer issuer key"),
         },
     ];
     let raw = encode_tlv_stream(&records);

@@ -376,13 +376,10 @@ impl Bolt12Offer {
     }
 
     pub fn offer_id(&self) -> Result<[u8; 32]> {
-        let (hrp, data, _) =
-            bech32::decode(&self.offer).map_err(|e| anyhow!("invalid offer bech32: {e}"))?;
-        if !hrp.starts_with("lno") {
-            anyhow::bail!("invalid offer HRP prefix: {hrp}");
+        let (hrp, raw) = decode_bolt12_offer_bech32(self.offer.trim())?;
+        if !matches!(hrp.as_str(), "lno" | "lnot" | "lnob" | "lnos") {
+            anyhow::bail!("invalid offer HRP: {hrp}");
         }
-        let raw =
-            Vec::<u8>::from_base32(&data).map_err(|e| anyhow!("invalid base32 in offer: {e}"))?;
         let records = decode_tlv_stream(&raw)?;
         // Exclude signature (tag 240) from offer_id computation
         let unsigned_records: Vec<TlvRecord> = records
@@ -1387,6 +1384,43 @@ mod tests {
         )
         .unwrap();
         assert!(parse_bolt12_offer(&malformed_tlv).is_err());
+    }
+
+    #[test]
+    fn offer_id_accepts_checksumless_and_checks_known_hrps() {
+        use bitcoin::bech32::primitives::NoChecksum;
+        use bitcoin::bech32::Hrp;
+
+        let raw = encode_tlv_stream(&[TlvRecord {
+            tag: TLV_OFFER_NODE_ID,
+            value: hex::decode(
+                "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            )
+            .unwrap(),
+        }]);
+        let checksummed = bech32::encode("lno", raw.to_base32(), bech32::Variant::Bech32m).unwrap();
+        let checksumless =
+            bitcoin::bech32::encode::<NoChecksum>(Hrp::parse("lno").unwrap(), &raw).unwrap();
+        let offer = parse_bolt12_offer(&checksummed).unwrap();
+        let id = offer.offer_id().unwrap();
+        assert_eq!(
+            parse_bolt12_offer(&checksumless)
+                .unwrap()
+                .offer_id()
+                .unwrap(),
+            id
+        );
+
+        let mut invalid = offer.clone();
+        invalid.offer =
+            bech32::encode("lnoextra", raw.to_base32(), bech32::Variant::Bech32m).unwrap();
+        assert!(invalid.offer_id().is_err());
+        invalid.offer = bitcoin::bech32::encode::<NoChecksum>(
+            Hrp::parse("lno").unwrap(),
+            &[TLV_OFFER_NODE_ID as u8, 34, 2],
+        )
+        .unwrap();
+        assert!(invalid.offer_id().is_err());
     }
 
     #[test]

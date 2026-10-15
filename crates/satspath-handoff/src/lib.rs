@@ -242,7 +242,54 @@ pub fn bolt11(value: &str, sats: u64, network: Network, now: u64) -> Result<(), 
     Ok(())
 }
 
-/// Validate a BOLT12 offer string encoding.
+/// Read one canonical bigsize integer without reading past the supplied TLV bytes.
+fn bolt12_bigsize(input: &mut &[u8]) -> Result<u64, String> {
+    let prefix = bolt12_take(input, 1)?[0];
+    let (length, minimum) = match prefix {
+        0..=0xfc => return Ok(u64::from(prefix)),
+        0xfd => (2, 0xfd),
+        0xfe => (4, 0x1_0000),
+        0xff => (8, 0x1_0000_0000),
+    };
+    let mut bytes = [0u8; 8];
+    bytes[8 - length..].copy_from_slice(bolt12_take(input, length)?);
+    let value = u64::from_be_bytes(bytes);
+    if value < minimum {
+        return Err("non-canonical BOLT12 bigsize".into());
+    }
+    Ok(value)
+}
+
+fn bolt12_take<'a>(input: &mut &'a [u8], length: usize) -> Result<&'a [u8], String> {
+    if length > input.len() {
+        return Err("truncated BOLT12 TLV stream".into());
+    }
+    let (value, rest) = input.split_at(length);
+    *input = rest;
+    Ok(value)
+}
+
+/// Check the bounded shape of one blinded path, including at least one hop.
+fn bolt12_path(mut value: &[u8]) -> Result<(), String> {
+    bolt12_take(&mut value, 33)?; // Introduction node.
+    bolt12_take(&mut value, 33)?; // Blinding point.
+    let hops = bolt12_bigsize(&mut value)?;
+    if hops == 0 || hops > 100 || hops > (value.len() / 34) as u64 {
+        return Err("invalid BOLT12 offer path hop count".into());
+    }
+    for _ in 0..hops {
+        bolt12_take(&mut value, 33)?;
+        let length = usize::try_from(bolt12_bigsize(&mut value)?)
+            .map_err(|_| "BOLT12 path length overflow")?;
+        bolt12_take(&mut value, length)?;
+    }
+    if !value.is_empty() {
+        return Err("trailing bytes in BOLT12 offer path".into());
+    }
+    Ok(())
+}
+
+/// Validate a BOLT12 offer encoding, ordered TLV stream, and payment destination.
 pub fn bolt12(value: &str) -> Result<(), String> {
     let trimmed = value.trim();
     if !trimmed.starts_with("lno1")
@@ -252,22 +299,53 @@ pub fn bolt12(value: &str) -> Result<(), String> {
     {
         return Err("invalid BOLT12 offer prefix".into());
     }
-    // Checksummed bech32/bech32m
-    if let Ok((hrp, data, _)) = bech32::decode(trimmed) {
-        if matches!(hrp.as_str(), "lno" | "lnot" | "lnob" | "lnos") && !data.is_empty() {
-            return Ok(());
-        }
-    }
-    // Checksumless BOLT12 bech32
     use bitcoin::bech32::primitives::decode::CheckedHrpstring;
     use bitcoin::bech32::primitives::NoChecksum;
-    let checked = CheckedHrpstring::new::<NoChecksum>(trimmed)
-        .map_err(|e| format!("invalid BOLT12 offer encoding: {e}"))?;
-    if !matches!(checked.hrp().as_str(), "lno" | "lnot" | "lnob" | "lnos") {
+
+    let (hrp, raw_bytes): (String, Vec<u8>) = if let Ok((hrp, data, _)) = bech32::decode(trimmed) {
+        let raw = Vec::<u8>::from_base32(&data).map_err(|e| e.to_string())?;
+        (hrp, raw)
+    } else {
+        let checked = CheckedHrpstring::new::<NoChecksum>(trimmed)
+            .map_err(|e| format!("invalid BOLT12 offer encoding: {e}"))?;
+        checked
+            .validate_segwit_padding()
+            .map_err(|e| format!("invalid BOLT12 offer padding: {e}"))?;
+        (
+            checked.hrp().as_str().to_string(),
+            checked.byte_iter().collect(),
+        )
+    };
+    if !matches!(hrp.as_str(), "lno" | "lnot" | "lnob" | "lnos") {
         return Err("invalid BOLT12 offer HRP".into());
     }
-    if checked.byte_iter().count() == 0 {
-        return Err("empty BOLT12 offer payload".into());
+
+    let mut raw = raw_bytes.as_slice();
+    let mut last_type = None;
+    let mut has_destination = false;
+    while !raw.is_empty() {
+        let tag = bolt12_bigsize(&mut raw)?;
+        if last_type.is_some_and(|previous| tag <= previous) {
+            return Err("BOLT12 TLV types must be strictly ascending".into());
+        }
+        last_type = Some(tag);
+        let length =
+            usize::try_from(bolt12_bigsize(&mut raw)?).map_err(|_| "BOLT12 TLV length overflow")?;
+        let payload = bolt12_take(&mut raw, length)?;
+        match tag {
+            16 => {
+                bolt12_path(payload)?;
+                has_destination = true;
+            }
+            22 => {
+                public_key(payload)?;
+                has_destination = true;
+            }
+            _ => {}
+        }
+    }
+    if !has_destination {
+        return Err("BOLT12 offer missing invoice-request destination".into());
     }
     Ok(())
 }
@@ -297,6 +375,60 @@ pub fn ark(
 mod tests {
     use super::*;
     use bech32::ToBase32;
+
+    #[test]
+    fn bolt12_requires_an_ordered_tlv_destination() {
+        let key = hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap();
+        let mut node_record = vec![22, 33];
+        node_record.extend_from_slice(&key);
+        let encode =
+            |raw: &[u8]| bech32::encode("lno", raw.to_base32(), bech32::Variant::Bech32m).unwrap();
+        let checksumless = bitcoin::bech32::encode::<bitcoin::bech32::primitives::NoChecksum>(
+            bitcoin::bech32::Hrp::parse("lno").unwrap(),
+            &node_record,
+        )
+        .unwrap();
+        assert!(bolt12(&encode(&node_record)).is_ok());
+        assert!(bolt12(&checksumless).is_ok());
+
+        let mut path = [
+            key.as_slice(),
+            key.as_slice(),
+            &[1],
+            key.as_slice(),
+            &[1, 42],
+        ]
+        .concat();
+        let mut path_record = vec![16, path.len() as u8];
+        path_record.append(&mut path);
+        assert!(bolt12(&encode(&path_record)).is_ok());
+
+        let mut duplicate = node_record.clone();
+        duplicate.extend_from_slice(&node_record);
+        let mut descending = node_record.clone();
+        descending.extend_from_slice(&[10, 1, b'x']);
+        let mut truncated = vec![22, 34];
+        truncated.extend_from_slice(&key);
+        let mut bad_key = vec![22, 33];
+        bad_key.extend_from_slice(&[0; 33]);
+        for invalid in [
+            "lno1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq".into(),
+            encode(&[]),
+            encode(&[10, 1, b'x']),
+            encode(&[16, 0]),
+            encode(&bad_key),
+            encode(&truncated),
+            encode(&duplicate),
+            encode(&descending),
+            encode(&[0xfd, 0, 22, 0]),
+        ] {
+            assert!(
+                bolt12(&invalid).is_err(),
+                "accepted malformed offer: {invalid}"
+            );
+        }
+    }
 
     /// Decimal parsing must preserve satoshis and reject ambiguous or excessive amounts.
     #[test]

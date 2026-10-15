@@ -84,7 +84,7 @@ pub struct SilentPaymentScanKey {
 /// BIP-352: bech32m(hrp, version || scan_pubkey || spend_pubkey)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SilentPaymentAddress {
-    /// The silent payment bech32m address (starts with sp1q... or tsp1q...)
+    /// The silent payment bech32m address (sp1q..., tsp1q..., or sprt1q...)
     pub address: String,
     /// The scan public key (hex)
     pub scan_pubkey: String,
@@ -534,9 +534,12 @@ pub fn generate_silent_payment_keys() -> Result<(String, String, String, String)
 /// Parse a silent payment scan public key
 pub fn parse_silent_payment_scan_key(scan_key: &str) -> Result<PublicKey, anyhow::Error> {
     let trimmed = scan_key.trim();
-    if !trimmed.starts_with("sp1q") && !trimmed.starts_with("tsp1q") {
+    if !trimmed.starts_with("sp1q")
+        && !trimmed.starts_with("tsp1q")
+        && !trimmed.starts_with("sprt1q")
+    {
         return Err(anyhow!(
-            "Invalid silent payment scan key: must start with 'sp1q' or 'tsp1q'"
+            "Invalid silent payment scan key: must start with 'sp1q', 'tsp1q', or 'sprt1q'"
         ));
     }
 
@@ -546,7 +549,9 @@ pub fn parse_silent_payment_scan_key(scan_key: &str) -> Result<PublicKey, anyhow
     }
 
     // Fallback: legacy hex format after prefix (used in mock unit tests)
-    let hex_part = if let Some(stripped) = trimmed.strip_prefix("tsp1q") {
+    let hex_part = if let Some(stripped) = trimmed.strip_prefix("sprt1q") {
+        stripped
+    } else if let Some(stripped) = trimmed.strip_prefix("tsp1q") {
         stripped
     } else if let Some(stripped) = trimmed.strip_prefix("sp1q") {
         stripped
@@ -572,7 +577,7 @@ pub fn create_silent_payment_address(
 }
 
 /// Create a silent payment address for a specific network:
-/// Mainnet uses HRP "sp", Testnet/Signet/Regtest use HRP "tsp".
+/// Mainnet uses HRP "sp", Testnet/Signet use "tsp", and Regtest uses "sprt".
 /// Payload: one five-bit version followed by the base32 encoding of two compressed keys.
 pub fn create_silent_payment_address_for_network(
     scan_pubkey: &PublicKey,
@@ -581,7 +586,8 @@ pub fn create_silent_payment_address_for_network(
 ) -> Result<String, anyhow::Error> {
     let hrp = match network {
         Network::Bitcoin => "sp",
-        Network::Testnet | Network::Signet | Network::Regtest => "tsp",
+        Network::Testnet | Network::Signet => "tsp",
+        Network::Regtest => "sprt",
         _ => "tsp",
     };
 
@@ -606,9 +612,10 @@ pub fn parse_silent_payment_address(
 
     let is_mainnet = lower.starts_with("sp1q");
     let is_testnet = lower.starts_with("tsp1q");
-    if !is_mainnet && !is_testnet {
+    let is_regtest = lower.starts_with("sprt1q");
+    if !is_mainnet && !is_testnet && !is_regtest {
         return Err(anyhow!(
-            "Invalid silent payment address prefix: expected 'sp1q' or 'tsp1q'"
+            "Invalid silent payment address prefix: expected 'sp1q', 'tsp1q', or 'sprt1q'"
         ));
     }
 
@@ -624,6 +631,7 @@ pub fn parse_silent_payment_address(
     let network = match hrp.as_str() {
         "sp" => Network::Bitcoin,
         "tsp" => Network::Testnet,
+        "sprt" => Network::Regtest,
         other => return Err(anyhow!("Unknown silent payment HRP: {other}")),
     };
 
@@ -695,6 +703,32 @@ mod tests {
         assert_eq!(parsed_scan_t, scan_pk);
         assert_eq!(parsed_spend_t, spend_pk);
         assert_eq!(net_t, Network::Testnet);
+
+        let regtest_addr =
+            create_silent_payment_address_for_network(&scan_pk, &spend_pk, Network::Regtest)
+                .unwrap();
+        assert!(regtest_addr.starts_with("sprt1q"));
+        let (parsed_scan_r, parsed_spend_r, net_r) =
+            parse_silent_payment_address(&regtest_addr).unwrap();
+        assert_eq!(
+            (parsed_scan_r, parsed_spend_r, net_r),
+            (scan_pk, spend_pk, Network::Regtest)
+        );
+        assert_eq!(
+            parse_silent_payment_scan_key(&regtest_addr).unwrap(),
+            scan_pk
+        );
+        assert!(satspath_handoff::silent(&regtest_addr, Network::Regtest).is_ok());
+        assert!(satspath_handoff::silent(&regtest_addr, Network::Testnet).is_err());
+
+        let signet_addr =
+            create_silent_payment_address_for_network(&scan_pk, &spend_pk, Network::Signet)
+                .unwrap();
+        assert!(signet_addr.starts_with("tsp1q"));
+        assert_eq!(
+            parse_silent_payment_address(&signet_addr).unwrap().2,
+            Network::Testnet
+        );
     }
 
     #[test]
