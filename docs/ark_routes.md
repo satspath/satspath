@@ -32,11 +32,8 @@ fails closed for execution.
 
 ## Current Status
 
-- Ark route planning exists.
-- Ark direct receive/send previews exist.
+- Ark route planning and scoring are implemented.
+- Live Ark ASP client connector (`LiveArkAspClient`) queries real ASP public keys, round intervals, dust limits, and fee schedules (`/v1/info`).
+- VTXO covenant tree DAG verification (`verify_ark_vtxo_dag`) and non-custodial host-wallet settlement handoff structures (`ArkBoardingHandoff`, `ArkForfeitHandoff`, `ArkOorPaymentRequest`) are implemented in `crates/satspath-router/src/ark.rs`.
 - Ownership proof verification exists.
-- Mainnet execution is disabled.
-- Testnet execution is gated by `--testnet`, `--execute-testnet`, exact
-  confirmation text, profile validation, Ark ownership proof validation, bridge
-  availability, encrypted swap storage, and claim/refund builder availability.
-- Boltz Ark swap settlement is not implemented end to end.
+- Mainnet execution by SatsPath is disabled; all signing and settlement execution is delegated to compatible host wallets (e.g. Arkade Money).

@@ -14,6 +14,11 @@ pub mod silent_payments;
 pub mod split_payments;
 pub mod urgency;
 
+pub use ark::{
+    first_ark_method, is_ark_available, verify_ark_vtxo_dag, ArkAspInfo, ArkBoardingHandoff,
+    ArkClient, ArkFeeSchedule, ArkForfeitHandoff, ArkOorPaymentRequest, ArkRoundSubmissionReceipt,
+    ArkSettlementHandoff, ArkVtxoTreeNode, LiveArkAspClient, MockArkClient, SimulatedArkIntent,
+};
 pub use ark_routes::{plan_ark_route, ArkRoutePlan, SenderCapabilities};
 pub use bip353_preview::quote_from_bip353_resolution;
 pub use bolt12::{parse_bolt12_offer, Bolt12Invoice, Bolt12InvoiceRequest, Bolt12Offer};
