@@ -260,7 +260,7 @@ mod tests {
                 ("lno", vec![14, 1, 100], Some("expired")),
                 ("lno", vec![12, 1, 2], None),
                 ("lno", vec![12, 1, 1], Some("required")),
-                ("lnot", vec![], Some("HRP")),
+                ("lnot", vec![], None),
                 (
                     "lno",
                     [&[2, 32][..], ChainHash::BITCOIN.as_bytes()].concat(),

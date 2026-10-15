@@ -32,7 +32,12 @@ pub enum PaymentMethod<'a> {
 
 /// Validate every supplied receiver field before route selection or wallet handoff.
 /// The explicit clock keeps native and browser expiry policy identical.
-pub fn validate_method(method: PaymentMethod<'_>, sats: u64, now: i64) -> Result<(), String> {
+pub fn validate_method(
+    method: PaymentMethod<'_>,
+    sats: u64,
+    now: i64,
+    expected_network: Option<Network>,
+) -> Result<(), String> {
     amount(sats)?;
     match method {
         PaymentMethod::Onchain {
@@ -40,6 +45,9 @@ pub fn validate_method(method: PaymentMethod<'_>, sats: u64, now: i64) -> Result
             address,
             silent_payment_pubkey,
         } => {
+            if expected_network.is_some_and(|expected| expected != network) {
+                return Err("on-chain network mismatch".into());
+            }
             if address.is_none() && silent_payment_pubkey.is_none() {
                 return Err("missing on-chain receiver".into());
             }
@@ -71,9 +79,12 @@ pub fn validate_method(method: PaymentMethod<'_>, sats: u64, now: i64) -> Result
             }
             if let Some(offer) = offer {
                 if let Some(network) = bolt11_network(offer) {
+                    if expected_network.is_some_and(|expected| expected != network) {
+                        return Err("BOLT11 invoice network mismatch".into());
+                    }
                     bolt11(offer, sats, network, now.max(0) as u64)?;
                 } else {
-                    bolt12(offer, None, now.max(0) as u64)?;
+                    bolt12(offer, expected_network, now.max(0) as u64)?;
                 }
             }
             Ok(())
@@ -92,7 +103,12 @@ pub fn validate_method(method: PaymentMethod<'_>, sats: u64, now: i64) -> Result
             expires_at,
             now,
         ),
-        PaymentMethod::Bolt12(offer, network) => bolt12(offer, network, now.max(0) as u64),
+        PaymentMethod::Bolt12(offer, network) => {
+            if expected_network.is_some_and(|expected| network.is_some_and(|n| n != expected)) {
+                return Err("BOLT12 method network mismatch".into());
+            }
+            bolt12(offer, expected_network.or(network), now.max(0) as u64)
+        }
     }
 }
 
@@ -310,7 +326,7 @@ fn bolt12_path(mut value: &[u8]) -> Result<(), String> {
 }
 
 /// Validate a BOLT12 offer's encoding, destination, required features, and expiry.
-/// When supplied, the network must match the HRP and any explicit chain hashes.
+/// The `lno` HRP is network-neutral; `offer_chains` selects non-Bitcoin chains.
 pub fn bolt12(value: &str, network: Option<Network>, now: u64) -> Result<(), String> {
     let trimmed = value.trim();
     if !trimmed.starts_with("lno1")
@@ -340,20 +356,9 @@ pub fn bolt12(value: &str, network: Option<Network>, now: u64) -> Result<(), Str
     if !matches!(hrp.as_str(), "lno" | "lnot" | "lnob" | "lnos") {
         return Err("invalid BOLT12 offer HRP".into());
     }
-    if let Some(network) = network {
-        let expected = match network {
-            Network::Bitcoin => "lno",
-            Network::Testnet | Network::Testnet4 => "lnot",
-            Network::Regtest => "lnob",
-            Network::Signet => "lnos",
-        };
-        if hrp != expected {
-            return Err("BOLT12 offer network HRP mismatch".into());
-        }
-    }
-
     let mut raw = raw_bytes.as_slice();
     let mut last_type = None;
+    let mut has_offer_chains = false;
     let mut has_currency = false;
     let mut has_amount = false;
     let mut has_description = false;
@@ -372,6 +377,7 @@ pub fn bolt12(value: &str, network: Option<Network>, now: u64) -> Result<(), Str
         }
         match tag {
             2 => {
+                has_offer_chains = true;
                 if payload.is_empty() || !payload.len().is_multiple_of(32) {
                     return Err("invalid BOLT12 offer chain hashes".into());
                 }
@@ -438,6 +444,9 @@ pub fn bolt12(value: &str, network: Option<Network>, now: u64) -> Result<(), Str
     }
     if has_currency && !has_amount {
         return Err("BOLT12 offer with currency requires amount".into());
+    }
+    if network.is_some_and(|network| network != Network::Bitcoin) && !has_offer_chains {
+        return Err("non-Bitcoin BOLT12 offer requires offer_chains".into());
     }
     if !has_destination {
         return Err("BOLT12 offer missing invoice-request destination".into());
@@ -515,14 +524,14 @@ mod tests {
     }
 
     #[test]
-    fn bolt12_network_checks_hrp_and_explicit_chain_membership() {
+    fn bolt12_network_checks_explicit_chain_membership() {
         use bitcoin::blockdata::constants::ChainHash;
         let networks = [
             (Network::Bitcoin, "lno"),
-            (Network::Testnet, "lnot"),
-            (Network::Testnet4, "lnot"),
-            (Network::Regtest, "lnob"),
-            (Network::Signet, "lnos"),
+            (Network::Testnet, "lno"),
+            (Network::Testnet4, "lno"),
+            (Network::Regtest, "lno"),
+            (Network::Signet, "lno"),
         ];
         for (network, hrp) in networks {
             let chain = ChainHash::using_genesis_block(network);
@@ -537,8 +546,10 @@ mod tests {
                     "{network:?} offer on {selected:?}"
                 );
             }
-            let wrong_hrp = if hrp == "lno" { "lnot" } else { "lno" };
-            assert!(bolt12(&offer_with_fields(wrong_hrp, &fields), Some(network), 100).is_err());
+            assert_eq!(
+                bolt12(&offer_with_fields(hrp, &[]), Some(network), 100).is_ok(),
+                network == Network::Bitcoin
+            );
         }
 
         let chains = [
@@ -548,13 +559,13 @@ mod tests {
         ]
         .concat();
         assert!(bolt12(
-            &offer_with_fields("lnot", &chains),
+            &offer_with_fields("lno", &chains),
             Some(Network::Testnet),
             100
         )
         .is_ok());
         assert!(bolt12(
-            &offer_with_fields("lnob", &chains),
+            &offer_with_fields("lno", &chains),
             Some(Network::Regtest),
             100
         )
@@ -585,7 +596,8 @@ mod tests {
                 validate_method(
                     PaymentMethod::Bolt12(&offer, Some(Network::Bitcoin)),
                     1,
-                    now
+                    now,
+                    None
                 )
                 .is_ok(),
                 now < 101
@@ -599,7 +611,8 @@ mod tests {
                         receiver_pubkey: None,
                     },
                     1,
-                    now
+                    now,
+                    None
                 )
                 .is_ok(),
                 now < 101
@@ -608,10 +621,11 @@ mod tests {
         assert!(validate_method(
             PaymentMethod::Bolt12(&offer, Some(Network::Testnet)),
             1,
-            100
+            100,
+            None
         )
         .is_err());
-        assert!(validate_method(PaymentMethod::Bolt12(&offer, None), 1, 100).is_ok());
+        assert!(validate_method(PaymentMethod::Bolt12(&offer, None), 1, 100, None).is_ok());
     }
 
     #[test]
@@ -853,9 +867,16 @@ mod invoice_tests {
                     bolt12: Some(invoice),
                     receiver_pubkey: None,
                 };
-                assert!(validate_method(method(), 1000, 100).is_ok(), "{currency:?}");
-                assert!(validate_method(method(), 1001, 100).is_err());
-                assert!(validate_method(method(), 1000, 160).is_err());
+                assert!(
+                    validate_method(method(), 1000, 100, None).is_ok(),
+                    "{currency:?}"
+                );
+                assert!(validate_method(method(), 1001, 100, None).is_err());
+                assert!(validate_method(method(), 1000, 160, None).is_err());
+                assert!(
+                    validate_method(method(), 1000, 100, Some(Network::Bitcoin)).is_ok()
+                        == matches!(currency, Currency::Bitcoin)
+                );
             }
         }
     }

@@ -12,8 +12,7 @@ use satspath_core::{
     BitcoinNetwork, ExecutionMode, PaymentMethod, SatsPathError, SignedPaymentProfile,
 };
 use satspath_router::{
-    fetch_invoice, fetch_lnurl_metadata, lightning::verify_invoice_amount, select_route,
-    RouteQuote, RouteRequest,
+    fetch_invoice, fetch_lnurl_metadata, select_route, RouteQuote, RouteRequest,
 };
 use serde::Serialize;
 
@@ -244,7 +243,11 @@ async fn method_preview(
     fetch_lnurl_invoice: bool,
     ownership: &str,
 ) -> Result<(SelectedMethodResponse, String, Vec<String>)> {
-    satspath_core::handoff::validate_method(&quote.selected_method, amount_sats)?;
+    satspath_core::handoff::validate_method_for_network(
+        &quote.selected_method,
+        amount_sats,
+        BitcoinNetwork::Mainnet,
+    )?;
     match &quote.selected_method {
         PaymentMethod::Lightning {
             label,
@@ -259,7 +262,11 @@ async fn method_preview(
                 })?;
                 let meta = fetch_lnurl_metadata(address).await?;
                 let invoice = fetch_invoice(&meta, amount_sats, None).await?;
-                verify_invoice_amount(&invoice, amount_sats)?;
+                satspath_core::handoff::validate_invoice_for_network(
+                    &invoice,
+                    amount_sats,
+                    BitcoinNetwork::Mainnet,
+                )?;
                 invoice
             } else if let Some(address) = lightning_address {
                 format!("lightning:{}", address.to_ascii_lowercase())

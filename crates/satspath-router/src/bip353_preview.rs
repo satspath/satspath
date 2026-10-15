@@ -11,7 +11,7 @@ use satspath_core::{
     Bip353Resolution, BitcoinNetwork, PaymentMethod,
 };
 
-use crate::quote_response::{QuoteRecipient, QuoteResponse};
+use crate::quote_response::{fmt_btc, QuoteRecipient, QuoteResponse};
 
 /// Convert a BIP-353 resolution into a preview `QuoteResponse`.
 ///
@@ -125,15 +125,14 @@ pub fn quote_from_bip353_resolution(
             resolution.bitcoin_uri.clone()
         } else {
             format!(
-                "{}{}amount={}.{:08}",
+                "{}{}amount={}",
                 resolution.bitcoin_uri,
                 if resolution.bitcoin_uri.contains('?') {
                     "&"
                 } else {
                     "?"
                 },
-                amount_sats / 100_000_000,
-                amount_sats % 100_000_000
+                fmt_btc(amount_sats)
             )
         },
         execution: None,

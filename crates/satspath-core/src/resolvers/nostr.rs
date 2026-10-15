@@ -90,17 +90,15 @@ impl NostrResolver {
         parsed_url.query_pairs_mut().append_pair("name", name);
         let url = parsed_url.to_string();
         crate::ssrf::validate_url(&url, false)?;
-        let document: Nip05Document = self
+        let response = self
             .client
             .get(&url)
             .send()
             .await
             .map_err(|e| SatsPathError::NetworkError(format!("NIP-05 fetch failed: {e}")))?
             .error_for_status()
-            .map_err(|e| SatsPathError::NetworkError(format!("NIP-05 HTTP error: {e}")))?
-            .json()
-            .await
-            .map_err(|e| SatsPathError::SerializationError(format!("NIP-05 JSON: {e}")))?;
+            .map_err(|e| SatsPathError::NetworkError(format!("NIP-05 HTTP error: {e}")))?;
+        let document = read_nip05_document(response).await?;
 
         let pubkey = document
             .names
@@ -172,6 +170,26 @@ impl NostrResolver {
 
         relay_result
     }
+}
+
+/// Bound the NIP-05 response before parsing attacker-controlled JSON.
+async fn read_nip05_document(mut response: reqwest::Response) -> Result<Nip05Document> {
+    const MAX_NIP05_BYTES: usize = 50 * 1024;
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| SatsPathError::NetworkError(format!("NIP-05 response read failed: {e}")))?
+    {
+        if chunk.len() > MAX_NIP05_BYTES - body.len() {
+            return Err(SatsPathError::NetworkError(
+                "NIP-05 response exceeded 50 KiB limit".into(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body)
+        .map_err(|e| SatsPathError::SerializationError(format!("NIP-05 JSON: {e}")))
 }
 
 #[async_trait]
@@ -431,6 +449,49 @@ mod tests {
     use super::*;
     use crate::crypto::{generate_identity_keypair, sign_profile};
     use crate::{PaymentMethod, PaymentProfile};
+
+    async fn served_nip05(body: Vec<u8>) -> Result<Nip05Document> {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            let _ = socket.write_all(&body).await;
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/nostr.json"))
+            .send()
+            .await
+            .unwrap();
+        let result = read_nip05_document(response).await;
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn nip05_response_size_is_bounded_before_json_parsing() {
+        let valid = br#"{"names":{"alice":"0123456789"}}"#;
+        let mut at_limit = valid.to_vec();
+        at_limit.resize(50 * 1024, b' ');
+        assert_eq!(
+            served_nip05(at_limit.clone()).await.unwrap().names["alice"],
+            "0123456789"
+        );
+        at_limit.push(b' ');
+        assert!(matches!(
+            served_nip05(at_limit).await,
+            Err(SatsPathError::NetworkError(message)) if message.contains("50 KiB")
+        ));
+        assert!(matches!(
+            served_nip05(b"not JSON".to_vec()).await,
+            Err(SatsPathError::SerializationError(message)) if message.contains("NIP-05 JSON")
+        ));
+    }
 
     fn signed(alias: &str) -> SignedPaymentProfile {
         let kp = generate_identity_keypair();

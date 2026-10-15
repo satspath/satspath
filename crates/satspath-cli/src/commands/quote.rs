@@ -5,7 +5,7 @@ use satspath_core::{
     evaluate_method_trust_for_profile,
     privacy::{mask_address, mask_identifier, mask_invoice, mask_pubkey},
     resolver::ProfileResolver,
-    PaymentMethod,
+    BitcoinNetwork, PaymentMethod,
 };
 use satspath_router::{
     fetch_invoice, fetch_lnurl_metadata, lightning::lightning_address, select_route, RouteRequest,
@@ -62,6 +62,11 @@ pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
     let quote = select_route(&req)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
+    satspath_core::handoff::validate_method_for_network(
+        &quote.selected_method,
+        amount_sats,
+        BitcoinNetwork::Mainnet,
+    )?;
     println!("done.");
 
     if let Some(snap) = &quote.fee_snapshot {
@@ -121,7 +126,14 @@ pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
             match fetch_lnurl_metadata(ln_addr).await {
                 Ok(meta) => {
                     match fetch_invoice(&meta, amount_sats, None).await {
-                        Ok(invoice) => {
+                        Ok(invoice)
+                            if satspath_core::handoff::validate_invoice_for_network(
+                                &invoice,
+                                amount_sats,
+                                BitcoinNetwork::Mainnet,
+                            )
+                            .is_ok() =>
+                        {
                             println!("received.");
                             println!();
                             println!("  Scan to pay — Lightning ({} sats)", amount_sats);
@@ -129,6 +141,10 @@ pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
                             print_qr(&invoice.to_uppercase())?;
                             println!("  {}...", mask_invoice(&invoice));
                             println!("  Warning: this is a real invoice QR generated from public metadata.");
+                        }
+                        Ok(_) => {
+                            println!("unavailable (invoice failed mainnet handoff validation).");
+                            println!("  Preview only. No funds moved.");
                         }
                         Err(e) => {
                             println!("unavailable ({e}).");

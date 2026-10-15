@@ -193,11 +193,7 @@ pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> satspath_co
             let target_address = silent_payment_pubkey
                 .clone()
                 .unwrap_or_else(|| address.clone().unwrap_or_default());
-            format!(
-                "bitcoin:{}?amount={}",
-                target_address,
-                sats_to_btc(amount_sats)
-            )
+            format!("bitcoin:{}?amount={}", target_address, fmt_btc(amount_sats))
         }
         PaymentMethod::Ark { server, pubkey, .. } => format!(
             "ark:{}?server={}&amount={}",
@@ -214,7 +210,7 @@ pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> satspath_co
 }
 
 /// Format sats as a fixed 8-decimal BTC string, e.g. `21000 -> 0.00021000`.
-fn sats_to_btc(amount_sats: u64) -> String {
+pub fn fmt_btc(amount_sats: u64) -> String {
     format!(
         "{}.{:08}",
         amount_sats / 100_000_000,

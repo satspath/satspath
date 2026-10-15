@@ -9,7 +9,7 @@ pub fn validate_method(method: &crate::types::PaymentMethod, sats: u64) -> Resul
 
 /// Validate using an explicit clock so expiry tests remain deterministic.
 fn validate(method: &crate::types::PaymentMethod, sats: u64, now: i64) -> Result<(), String> {
-    check::validate_method(method.into(), sats, now)
+    check::validate_method(method.into(), sats, now, None)
 }
 
 impl<'a> From<&'a crate::types::PaymentMethod> for check::PaymentMethod<'a> {

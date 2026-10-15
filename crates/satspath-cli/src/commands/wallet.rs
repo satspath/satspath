@@ -218,7 +218,10 @@ fn receive_payload_for(method: &PaymentMethod, amount_sats: Option<u64>) -> Resu
                 .clone()
                 .unwrap_or_else(|| address.clone().unwrap_or_default());
             match amount_sats {
-                Some(sats) => format!("bitcoin:{target}?amount={}", sats_to_btc(sats)),
+                Some(sats) => format!(
+                    "bitcoin:{target}?amount={}",
+                    satspath_router::quote_response::fmt_btc(sats)
+                ),
                 None => format!("bitcoin:{target}"),
             }
         }
@@ -239,10 +242,6 @@ fn receive_payload_for(method: &PaymentMethod, amount_sats: Option<u64>) -> Resu
     };
     assert_no_private_material(&payload).map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(payload)
-}
-
-fn sats_to_btc(sats: u64) -> String {
-    format!("{}.{:08}", sats / 100_000_000, sats % 100_000_000)
 }
 
 /// Build, sign, and persist the wallet's payment profile to the local registry.
