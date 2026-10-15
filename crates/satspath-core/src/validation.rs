@@ -62,37 +62,21 @@ pub fn validate_lightning_address(address: &str) -> Result<()> {
     }
 }
 
-/// Validate a BOLT12 offer string.
-/// BOLT12 offers are bech32 encoded with prefix "lno" (mainnet) or "lnot" (testnet).
-/// They contain an amount, node_id, paths, and other metadata.
+/// Validate a BOLT12 offer string using the shared handoff validator.
 pub fn validate_bolt12_offer(offer: &str) -> Result<()> {
+    validate_bolt12_offer_for_network(offer, None)
+}
+
+fn validate_bolt12_offer_for_network(offer: &str, network: Option<BitcoinNetwork>) -> Result<()> {
     let trimmed = offer.trim();
-    if trimmed.is_empty() {
-        return Err(SatsPathError::InvalidPaymentPointer(
-            "BOLT12 offer cannot be empty".into(),
-        ));
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    // BOLT12 offers use bech32 with prefixes lno (mainnet) or lnot (testnet)
-    if !lower.starts_with("lno") && !lower.starts_with("lnot") {
-        return Err(SatsPathError::InvalidPaymentPointer(
-            "BOLT12 offer must start with 'lno' (mainnet) or 'lnot' (testnet)".into(),
-        ));
-    }
-    // Decode and validate the bech32 payload
-    let (_, data, _) = bech32::decode(&lower).map_err(|e| {
-        SatsPathError::InvalidPaymentPointer(format!("BOLT12 offer bech32 decode failed: {e}"))
-    })?;
-    // A real BOLT12 offer always has substantial TLV data -- reject suspiciously
-    // short payloads that are likely truncated, synthetic, or just a prefix.
-    if data.len() < 40 {
-        return Err(SatsPathError::InvalidPaymentPointer(
-            "BOLT12 offer data too short -- likely truncated or invalid".into(),
-        ));
-    }
-    // Ensure no private material
     assert_no_private_material(trimmed)?;
-    Ok(())
+    let network = network.map(|net| match net {
+        BitcoinNetwork::Mainnet => Network::Bitcoin,
+        BitcoinNetwork::Testnet => Network::Testnet,
+        BitcoinNetwork::Regtest => Network::Regtest,
+    });
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    satspath_handoff::bolt12(trimmed, network, now).map_err(SatsPathError::InvalidPaymentPointer)
 }
 
 /// Decode a Bitcoin address and require the declared network.
@@ -267,16 +251,18 @@ pub fn validate_public_profile(profile: &PaymentProfile) -> Result<()> {
                     validate_lightning_address(address)?;
                 }
                 if let Some(url) = lnurl {
-                    let parsed = url::Url::parse(url)
-                        .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
-                    if !matches!(parsed.scheme(), "https" | "http") {
-                        return Err(SatsPathError::InvalidPaymentPointer(
-                            "LNURL must be http(s)".into(),
-                        ));
-                    }
+                    assert_no_private_material(url)?;
+                    satspath_handoff::https(url).map_err(SatsPathError::InvalidPaymentPointer)?;
                 }
                 if let Some(invoice) = bolt12 {
-                    validate_bolt12_offer(invoice)?;
+                    assert_no_private_material(invoice)?;
+                    if let Some(network) = satspath_handoff::bolt11_network(invoice) {
+                        let now = chrono::Utc::now().timestamp().max(0) as u64;
+                        satspath_handoff::bolt11_profile(invoice, network, now)
+                            .map_err(SatsPathError::InvalidPaymentPointer)?;
+                    } else {
+                        validate_bolt12_offer(invoice)?;
+                    }
                 }
                 if let Some(pubkey) = receiver_pubkey {
                     validate_compressed_pubkey(pubkey)?;
@@ -304,7 +290,7 @@ pub fn validate_public_profile(profile: &PaymentProfile) -> Result<()> {
                 }
             }
             PaymentMethod::Bolt12(offer) => {
-                validate_bolt12_offer(&offer.offer)?;
+                validate_bolt12_offer_for_network(&offer.offer, Some(offer.network))?;
             }
             PaymentMethod::Ark {
                 server,
@@ -491,5 +477,45 @@ mod tests {
         let bad_version =
             bech32::encode("sp", bad_version_payload, bech32::Variant::Bech32m).unwrap();
         assert!(validate_silent_payment_address(&bad_version, BitcoinNetwork::Mainnet).is_err());
+    }
+
+    #[test]
+    fn bolt12_and_profile_validation_match_handoff_rules() {
+        let checksumless = "lno1pgx9getnwss8vetrw3hhyucs5ypjgef743p5fzqq9nqxh0ah7y87rzv3ud0eleps9kl2d5348hq2k8qzqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgqpqqqqqqqqqqqqqqqqqqqqqqqqqqqzqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqqzq3zyg3zyg3zygs";
+        assert!(validate_bolt12_offer(checksumless).is_ok());
+
+        let mut profile = PaymentProfile {
+            alias: "alice@example.com".into(),
+            identity_pubkey: VALID_PUBKEY.into(),
+            methods: vec![PaymentMethod::Lightning {
+                label: "BOLT12".into(),
+                lightning_address: None,
+                lnurl: Some("https://example.com/.well-known/lnurlp/alice".into()),
+                bolt12: Some(checksumless.into()),
+                receiver_pubkey: None,
+            }],
+            updated_at: 1,
+            expires_at: Some(2),
+            sequence: None,
+            preferences: vec![],
+            nonce: None,
+            rotation: None,
+            method_verifications: Vec::new(),
+            hybrid_pubkey: None,
+            pqc_required: false,
+            revoked: false,
+            recovery_policy: None,
+            recovery: None,
+        };
+        assert!(validate_public_profile(&profile).is_ok());
+
+        profile.methods = vec![PaymentMethod::Lightning {
+            label: "Insecure LNURL".into(),
+            lightning_address: None,
+            lnurl: Some("http://example.com/.well-known/lnurlp/alice".into()),
+            bolt12: None,
+            receiver_pubkey: None,
+        }];
+        assert!(validate_public_profile(&profile).is_err());
     }
 }

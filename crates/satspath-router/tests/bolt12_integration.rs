@@ -7,7 +7,7 @@ use satspath_router::bolt12::{
     create_invoice_from_request, create_signed_invoice_request, decode_tlv_stream,
     encode_tlv_stream, parse_bolt12_invoice, parse_bolt12_invoice_request, parse_bolt12_offer,
     validate_bolt12_invoice_against_offer, write_tu64, BlindedHop, BlindedPath, Bolt12Offer,
-    TlvRecord, TLV_OFFER_AMOUNT, TLV_OFFER_NODE_ID, TLV_OFFER_PATHS,
+    TlvRecord, TLV_OFFER_AMOUNT, TLV_OFFER_DESCRIPTION, TLV_OFFER_NODE_ID, TLV_OFFER_PATHS,
 };
 use satspath_router::lightning::{
     is_lightning_available_for_amount, is_lightning_available_for_amount_sync,
@@ -277,6 +277,10 @@ async fn test_bolt12_amount_availability_and_route_selection() {
             tag: TLV_OFFER_AMOUNT,
             value: write_tu64(5_000_000),
         },
+        TlvRecord {
+            tag: TLV_OFFER_DESCRIPTION,
+            value: b"Fixed amount".to_vec(),
+        },
         issuer_id_record(),
     ]);
     let node_id = hex::encode(issuer_id_record().value);
@@ -384,6 +388,10 @@ async fn test_bolt12_amount_availability_overflow() {
         TlvRecord {
             tag: TLV_OFFER_AMOUNT,
             value: write_tu64(5_000_000),
+        },
+        TlvRecord {
+            tag: TLV_OFFER_DESCRIPTION,
+            value: b"Fixed amount".to_vec(),
         },
         issuer_id_record(),
     ]);

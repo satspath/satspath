@@ -61,7 +61,7 @@ impl<'a> From<&'a crate::types::PaymentMethod> for check::PaymentMethod<'a> {
 }
 
 /// Read the browser clock only on WASM; native tests use the system clock.
-fn current_time() -> i64 {
+pub(crate) fn current_time() -> i64 {
     #[cfg(target_arch = "wasm32")]
     {
         (js_sys::Date::now() / 1000.0) as i64

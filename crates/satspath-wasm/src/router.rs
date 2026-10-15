@@ -362,16 +362,21 @@ pub async fn quote(recipient: &str, amount_sats: u64) -> Result<QuoteResponse, S
         ..
     } = &route_quote.selected_method
     {
+        let now = crate::handoff::current_time().max(0) as u64;
         if let Some(addr) = lightning_address {
             if let Ok(invoice) = fetch_real_invoice(addr, amount_sats).await {
-                qr = invoice;
+                if validate_fetched_bolt11_invoice(&invoice, amount_sats, now) {
+                    qr = invoice;
+                }
             }
         } else if let Some(offer) = bolt12 {
             let proxy = "https://bolt12-proxy.satspath.dev";
             if let Ok(invoice) =
                 crate::bolt12::fetch_bolt12_invoice(offer, amount_sats, proxy).await
             {
-                qr = invoice;
+                if validate_fetched_bolt11_invoice(&invoice, amount_sats, now) {
+                    qr = invoice;
+                }
             }
         }
     }
@@ -398,6 +403,12 @@ fn build_recipient_info(profile: &crate::types::PaymentProfile, verified: bool) 
             "identifier-only; no inbox/domain ownership proof in this response".to_string(),
         fingerprint: Some(fingerprint_pubkey(&profile.identity_pubkey)),
     }
+}
+
+/// Verify a fetched BOLT11 invoice's signature, mainnet network, exact amount, and expiry
+/// before allowing it to replace a validated fallback QR payload.
+fn validate_fetched_bolt11_invoice(invoice: &str, amount_sats: u64, now: u64) -> bool {
+    satspath_handoff::bolt11(invoice, amount_sats, bitcoin::Network::Bitcoin, now).is_ok()
 }
 
 /// Fetch real BOLT11 invoice from LNURL-pay
@@ -570,6 +581,31 @@ mod tests {
             expires_at: Some(1),
         };
         assert!(build_qr_payload(&method, 1000).is_err());
+    }
+
+    #[test]
+    fn fetched_bolt11_invoice_must_pass_handoff_validation_before_replacing_qr() {
+        let invoice = "lnbc2500u1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpu9qrsgquk0rl77nj30yxdy8j9vdx85fkpmdla2087ne0xh8nhedh8w27kyke0lp53ut353s06fv3qfegext0eh0ymjpf39tuven09sam30g4vgpfna3rh";
+        assert!(validate_fetched_bolt11_invoice(
+            invoice,
+            250_000,
+            1_496_314_658
+        ));
+        assert!(!validate_fetched_bolt11_invoice(
+            invoice,
+            250_001,
+            1_496_314_658
+        ));
+        assert!(!validate_fetched_bolt11_invoice(
+            invoice,
+            250_000,
+            1_496_314_718
+        ));
+        assert!(!validate_fetched_bolt11_invoice(
+            "lnbc1invalid",
+            250_000,
+            1_496_314_658
+        ));
     }
 
     #[test]

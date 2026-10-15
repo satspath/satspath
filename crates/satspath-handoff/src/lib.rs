@@ -226,6 +226,18 @@ pub fn bolt11_network(s: &str) -> Option<Network> {
     }
 }
 
+/// Verify a static profile BOLT11 invoice's signature, network, positive whole-sat amount, and expiry.
+pub fn bolt11_profile(value: &str, network: Network, now: u64) -> Result<(), String> {
+    let invoice = Bolt11Invoice::from_str(value).map_err(|e| e.to_string())?;
+    let Some(msats) = invoice.amount_milli_satoshis() else {
+        return Err("invoice amount is required".into());
+    };
+    if msats % 1000 != 0 {
+        return Err("invoice amount must be a whole number of satoshis".into());
+    }
+    bolt11(value, msats / 1000, network, now)
+}
+
 /// Verify a decoded BOLT11 invoice's signature, network, exact amount, and expiry.
 pub fn bolt11(value: &str, sats: u64, network: Network, now: u64) -> Result<(), String> {
     amount(sats)?;
@@ -342,6 +354,9 @@ pub fn bolt12(value: &str, network: Option<Network>, now: u64) -> Result<(), Str
 
     let mut raw = raw_bytes.as_slice();
     let mut last_type = None;
+    let mut has_currency = false;
+    let mut has_amount = false;
+    let mut has_description = false;
     let mut has_destination = false;
     while !raw.is_empty() {
         let tag = bolt12_bigsize(&mut raw)?;
@@ -352,6 +367,9 @@ pub fn bolt12(value: &str, network: Option<Network>, now: u64) -> Result<(), Str
         let length =
             usize::try_from(bolt12_bigsize(&mut raw)?).map_err(|_| "BOLT12 TLV length overflow")?;
         let payload = bolt12_take(&mut raw, length)?;
+        if !matches!(tag, 1..=79 | 1_000_000_000..=1_999_999_999) {
+            return Err(format!("out-of-range BOLT12 offer TLV type: {tag}"));
+        }
         match tag {
             2 => {
                 if payload.is_empty() || !payload.len().is_multiple_of(32) {
@@ -369,6 +387,18 @@ pub fn bolt12(value: &str, network: Option<Network>, now: u64) -> Result<(), Str
                         return Err("BOLT12 offer chain network mismatch".into());
                     }
                 }
+            }
+            6 => {
+                has_currency = true;
+            }
+            8 => {
+                if payload.is_empty() || payload.len() > 8 || payload.first() == Some(&0) {
+                    return Err("invalid BOLT12 offer amount".into());
+                }
+                has_amount = true;
+            }
+            10 => {
+                has_description = true;
             }
             12 => {
                 // No required offer features are supported. Even bits are required;
@@ -396,12 +426,18 @@ pub fn bolt12(value: &str, network: Option<Network>, now: u64) -> Result<(), Str
                 public_key(payload)?;
                 has_destination = true;
             }
-            4 | 6 | 8 | 10 | 18 | 20 => {}
+            4 | 18 | 20 => {}
             _ if tag.is_multiple_of(2) => {
                 return Err(format!("unknown even BOLT12 TLV type: {tag}"))
             }
             _ => {}
         }
+    }
+    if has_amount && !has_description {
+        return Err("BOLT12 offer with amount requires description".into());
+    }
+    if has_currency && !has_amount {
+        return Err("BOLT12 offer with currency requires amount".into());
     }
     if !has_destination {
         return Err("BOLT12 offer missing invoice-request destination".into());
@@ -649,11 +685,34 @@ mod tests {
     fn bolt12_unknown_tlv_parity() {
         let key = hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
             .unwrap();
-        for (tag, accepted) in [(23, true), (24, false)] {
+        for (tag, accepted) in [
+            (23, true),
+            (24, false),
+            (79, true),
+            (80, false),
+            (81, false),
+        ] {
             let raw = [vec![22, 33], key.clone(), vec![tag, 0]].concat();
             let offer = bech32::encode("lno", raw.to_base32(), bech32::Variant::Bech32m).unwrap();
-            assert_eq!(bolt12(&offer, None, 0).is_ok(), accepted);
+            assert_eq!(bolt12(&offer, None, 0).is_ok(), accepted, "tag {tag}");
         }
+        // Tag 0 is outside the allowed offer range [1, 79] U [1_000_000_000, 1_999_999_999].
+        let zero_tag = [vec![0, 0, 22, 33], key.clone()].concat();
+        let offer_zero =
+            bech32::encode("lno", zero_tag.to_base32(), bech32::Variant::Bech32m).unwrap();
+        assert!(bolt12(&offer_zero, None, 0).is_err());
+
+        // Offer with amount requires description; offer with currency requires amount.
+        let with_amount_and_desc =
+            offer_with_fields("lno", &[8, 2, 0x03, 0xe8, 10, 4, b't', b'e', b's', b't']);
+        assert!(bolt12(&with_amount_and_desc, None, 0).is_ok());
+        let amount_without_desc = offer_with_fields("lno", &[8, 2, 0x03, 0xe8]);
+        assert!(bolt12(&amount_without_desc, None, 0).is_err());
+        let currency_without_amount = offer_with_fields(
+            "lno",
+            &[6, 3, b'u', b's', b'd', 10, 4, b't', b'e', b's', b't'],
+        );
+        assert!(bolt12(&currency_without_amount, None, 0).is_err());
     }
 
     /// Decimal parsing must preserve satoshis and reject ambiguous or excessive amounts.
