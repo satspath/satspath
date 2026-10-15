@@ -27,10 +27,7 @@ mod tests {
             r#"{{"alias":"test@example.com","identity_pubkey":"{pubkey_hex}","methods":[],"updated_at":1700000000}}"#
         );
 
-        let profile_value: serde_json::Value = serde_json::from_str(&profile_json).unwrap();
-        let canonical_bytes = canonical_json::to_string(&profile_value)
-            .unwrap()
-            .into_bytes();
+        let canonical_bytes = canonical_profile_json(&profile_json);
 
         const DOMAIN_SEP: &[u8] = b"SatsPathProfileV1";
         let mut hasher = Sha256::new();
@@ -39,8 +36,8 @@ mod tests {
         let digest = hasher.finalize();
 
         let msg = secp256k1::Message::from_digest_slice(&digest).unwrap();
-        let sig = secp.sign_schnorr(&msg, &keypair);
-        let sig_hex = hex::encode(sig.serialize());
+        let sig = secp.sign_schnorr_with_rng(&msg, &keypair, &mut rand_core::OsRng);
+        let sig_hex = hex::encode(sig.as_ref());
 
         format!(r#"{{"profile":{profile_json},"signature":"{sig_hex}"}}"#)
     }

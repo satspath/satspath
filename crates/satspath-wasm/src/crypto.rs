@@ -107,6 +107,7 @@ pub fn sign_profile_json(profile_json: &str, secret_key_hex: &str) -> String {
     hex::encode(sig.as_ref())
 }
 
+#[cfg(feature = "pqc")]
 #[wasm_bindgen]
 pub struct HybridIdentityKeypair {
     classical_pubkey_hex: String,
@@ -115,6 +116,7 @@ pub struct HybridIdentityKeypair {
     pqc_seed_hex: String,
 }
 
+#[cfg(feature = "pqc")]
 #[wasm_bindgen]
 impl HybridIdentityKeypair {
     #[wasm_bindgen(getter)]
@@ -136,6 +138,7 @@ impl HybridIdentityKeypair {
 }
 
 /// Generate a fresh hybrid keypair for the identity.
+#[cfg(feature = "pqc")]
 #[wasm_bindgen]
 pub fn generate_hybrid_identity_keypair() -> HybridIdentityKeypair {
     let kp = satspath_pqc::hybrid_sig::generate_hybrid_keypair();
@@ -149,6 +152,7 @@ pub fn generate_hybrid_identity_keypair() -> HybridIdentityKeypair {
 
 /// Sign a canonical JSON profile using Hybrid Signature (Schnorr + ML-DSA).
 /// Returns a JSON string of the `HybridSignature` object, or empty string on error.
+#[cfg(feature = "pqc")]
 #[wasm_bindgen]
 pub fn sign_hybrid_profile_json(
     profile_json: &str,
@@ -302,10 +306,54 @@ pub fn fingerprint_pubkey(pubkey_hex: &str) -> String {
     hex::encode(&bytes[1..5])
 }
 
+/// Serialize a [`serde_json::Value`] into deterministic RFC 8785 canonical JSON bytes
+/// without pulling in `regex` or heavy formatting dependencies.
 fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, String> {
-    canonical_json::to_string(value)
-        .map(|s| s.into_bytes())
-        .map_err(|e| e.to_string())
+    let mut buf = Vec::new();
+    write_canonical_value(value, &mut buf)?;
+    Ok(buf)
+}
+
+fn write_canonical_value(value: &Value, buf: &mut Vec<u8>) -> Result<(), String> {
+    match value {
+        Value::Null => buf.extend_from_slice(b"null"),
+        Value::Bool(true) => buf.extend_from_slice(b"true"),
+        Value::Bool(false) => buf.extend_from_slice(b"false"),
+        Value::Number(n) => {
+            let s = serde_json::to_string(n).map_err(|e| e.to_string())?;
+            buf.extend_from_slice(s.as_bytes());
+        }
+        Value::String(s) => {
+            let escaped = serde_json::to_string(s).map_err(|e| e.to_string())?;
+            buf.extend_from_slice(escaped.as_bytes());
+        }
+        Value::Array(arr) => {
+            buf.push(b'[');
+            for (idx, item) in arr.iter().enumerate() {
+                if idx > 0 {
+                    buf.push(b',');
+                }
+                write_canonical_value(item, buf)?;
+            }
+            buf.push(b']');
+        }
+        Value::Object(map) => {
+            buf.push(b'{');
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for (idx, k) in keys.iter().enumerate() {
+                if idx > 0 {
+                    buf.push(b',');
+                }
+                let key_escaped = serde_json::to_string(k).map_err(|e| e.to_string())?;
+                buf.extend_from_slice(key_escaped.as_bytes());
+                buf.push(b':');
+                write_canonical_value(&map[*k], buf)?;
+            }
+            buf.push(b'}');
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,24 +1,47 @@
-//! SSRF protection for WASM resolvers.
+//! Zero-dependency SSRF protection for WASM resolvers.
 
 /// Validate that a URL is safe to request (no SSRF risk).
-/// In a WASM context, we can't easily resolve DNS to check IPs before fetching,
-/// but we CAN block known bad hostnames and IP literals.
+///
+/// Enforces:
+/// 1. Must start with `https://`.
+/// 2. Must have a non-empty host without embedded userinfo (`@`).
+/// 3. Host must not be `localhost`, metadata endpoints, or private/reserved IPv4/IPv6 literals.
 pub fn validate_url(url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+    let trimmed = url.trim();
+    let Some((scheme, rest)) = trimmed.split_once("://") else {
+        return Err("Invalid URL: missing scheme".to_string());
+    };
 
-    // Must be HTTPS
-    if parsed.scheme() != "https" {
+    if !scheme.eq_ignore_ascii_case("https") {
         return Err(format!(
             "Blocked scheme '{}' — only HTTPS is allowed",
-            parsed.scheme()
+            scheme.to_ascii_lowercase()
         ));
     }
 
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "URL has no host".to_string())?;
-    let host_lower = host.to_ascii_lowercase();
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() {
+        return Err("URL has no host".to_string());
+    }
+    if authority.contains('@') {
+        return Err("Blocked URL: embedded credentials are not allowed".to_string());
+    }
 
+    let host = if authority.starts_with('[') {
+        let Some(end_bracket) = authority.find(']') else {
+            return Err("Invalid IPv6 host in URL".to_string());
+        };
+        &authority[..=end_bracket]
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
+
+    if host.is_empty() {
+        return Err("URL has no host".to_string());
+    }
+
+    let host_lower = host.to_ascii_lowercase();
     let blocked_hosts = [
         "localhost",
         "localhost.localdomain",
@@ -37,18 +60,15 @@ pub fn validate_url(url: &str) -> Result<(), String> {
 
     // Block IPv4 loopback, private, link-local, carrier-grade NAT
     if let Some(first_octet) = extract_first_octet(&host_lower) {
-        if first_octet == 127
-            || first_octet == 10
-            || first_octet == 172
-            || first_octet == 192
-            || first_octet == 169
-            || first_octet == 100
-        {
+        if matches!(
+            first_octet,
+            0 | 10 | 100 | 127 | 169 | 172 | 192 | 224..=255
+        ) {
             return Err(format!("Blocked IP: {host} (private/reserved range)"));
         }
     }
 
-    // Block IPv6 loopback
+    // Block IPv6 loopback and private/link-local ranges
     if host_lower == "[::1]"
         || host_lower.starts_with("[fe80:")
         || host_lower.starts_with("[fc00:")
@@ -77,7 +97,7 @@ mod tests {
     fn test_valid_urls() {
         assert!(validate_url("https://example.com").is_ok());
         assert!(validate_url("https://satspath.dev/profile.json").is_ok());
-        assert!(validate_url("https://9.9.9.9").is_ok()); // Public IP
+        assert!(validate_url("https://9.9.9.9").is_ok());
     }
 
     #[test]
@@ -91,10 +111,10 @@ mod tests {
     fn test_blocked_hosts() {
         assert!(validate_url("https://localhost").is_err());
         assert!(validate_url("https://127.0.0.1").is_err());
-        assert!(validate_url("https://169.254.169.254/latest/meta-data").is_err()); // Cloud metadata
+        assert!(validate_url("https://169.254.169.254/latest/meta-data").is_err());
         assert!(validate_url("https://metadata.google.internal").is_err());
-        assert!(validate_url("https://192.168.1.1").is_err()); // Private IPv4
+        assert!(validate_url("https://192.168.1.1").is_err());
         assert!(validate_url("https://10.0.0.1").is_err());
-        assert!(validate_url("https://[::1]").is_err()); // Loopback IPv6
+        assert!(validate_url("https://[::1]").is_err());
     }
 }

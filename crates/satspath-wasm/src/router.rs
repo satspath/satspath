@@ -339,15 +339,24 @@ pub async fn quote(recipient: &str, amount_sats: u64) -> Result<QuoteResponse, S
     {
         if let Some(addr) = lightning_address {
             if let Ok(invoice) = fetch_real_invoice(addr, amount_sats).await {
-                qr = invoice;
+                if is_valid_fetched_lightning_invoice(&invoice) {
+                    qr = invoice;
+                }
             }
         } else if let Some(offer) = bolt12 {
-            let proxy = "https://bolt12-proxy.satspath.dev";
-            if let Ok(invoice) =
-                crate::bolt12::fetch_bolt12_invoice(offer, amount_sats, proxy).await
+            #[cfg(feature = "bolt12")]
             {
-                qr = invoice;
+                let proxy = "https://bolt12-proxy.satspath.dev";
+                if let Ok(invoice) =
+                    crate::bolt12::fetch_bolt12_invoice(offer, amount_sats, proxy).await
+                {
+                    if is_valid_fetched_lightning_invoice(&invoice) {
+                        qr = invoice;
+                    }
+                }
             }
+            #[cfg(not(feature = "bolt12"))]
+            let _ = offer;
         }
     }
 
@@ -361,6 +370,23 @@ pub async fn quote(recipient: &str, amount_sats: u64) -> Result<QuoteResponse, S
         execution: route_quote.execution,
         wallet_hint: route_quote.wallet_hint,
     })
+}
+
+fn is_valid_fetched_lightning_invoice(invoice: &str) -> bool {
+    let trimmed = invoice.trim().to_ascii_lowercase();
+    if trimmed.len() < 20 {
+        return false;
+    }
+    if !(trimmed.starts_with("lnbc") || trimmed.starts_with("lntb") || trimmed.starts_with("lni1"))
+    {
+        return false;
+    }
+    for forbidden in ["xprv", "tprv", "mnemonic", "seed phrase", "private_key"] {
+        if trimmed.contains(forbidden) {
+            return false;
+        }
+    }
+    bech32::decode(&trimmed).is_ok()
 }
 
 fn build_recipient_info(profile: &crate::types::PaymentProfile, verified: bool) -> QuoteRecipient {

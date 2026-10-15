@@ -380,62 +380,71 @@ fn uri_to_profile(alias: &str, uri: String) -> SignedPaymentProfile {
     let mut methods = Vec::new();
 
     let clean_uri = uri.replace("BIP321:", "bitcoin:");
-    if let Ok(parsed) = url::Url::parse(&clean_uri.replace("bitcoin:", "https://")) {
-        if let Some(addr) = parsed.path_segments().and_then(|mut s| s.next()) {
-            if is_valid_address(addr) {
-                methods.push(PaymentMethod::Onchain {
-                    label: "Bitcoin (BIP-353)".to_string(),
-                    network: detect_network(addr),
-                    address: Some(addr.to_string()),
-                    silent_payment_pubkey: None,
-                    pubkey_hint: None,
-                    descriptor_hint: None,
-                    address_list: vec![],
-                });
-            }
+    if let Some(body) = clean_uri.strip_prefix("bitcoin:") {
+        let (addr_part, query_part) = match body.split_once('?') {
+            Some((a, q)) => (a.trim(), Some(q)),
+            None => (body.trim(), None),
+        };
+        let addr_clean = addr_part.trim_start_matches('/');
+        if !addr_clean.is_empty() && is_valid_address(addr_clean) {
+            methods.push(PaymentMethod::Onchain {
+                label: "Bitcoin (BIP-353)".to_string(),
+                network: detect_network(addr_clean),
+                address: Some(addr_clean.to_string()),
+                silent_payment_pubkey: None,
+                pubkey_hint: None,
+                descriptor_hint: None,
+                address_list: vec![],
+            });
         }
 
-        for (k, v) in parsed.query_pairs() {
-            match k.as_ref() {
-                "lightning" => methods.push(PaymentMethod::Lightning {
-                    label: "Lightning (BIP-353)".to_string(),
-                    lightning_address: Some(v.to_string()),
-                    lnurl: None,
-                    bolt12: None,
-                    receiver_pubkey: None,
-                }),
-                "lnurl" => methods.push(PaymentMethod::Lightning {
-                    label: "LNURL (BIP-353)".to_string(),
-                    lightning_address: None,
-                    lnurl: Some(v.to_string()),
-                    bolt12: None,
-                    receiver_pubkey: None,
-                }),
-                "bolt12" => methods.push(PaymentMethod::Lightning {
-                    label: "BOLT12 (BIP-353)".to_string(),
-                    lightning_address: None,
-                    lnurl: None,
-                    bolt12: Some(v.to_string()),
-                    receiver_pubkey: None,
-                }),
-                "ark_server" => {
-                    if let Some(pubkey) = parsed
-                        .query_pairs()
-                        .find(|(k, _)| k == "ark_pubkey")
-                        .map(|(_, v)| v.to_string())
-                    {
-                        methods.push(PaymentMethod::Ark {
-                            label: "Ark (BIP-353)".to_string(),
-                            server: v.to_string(),
-                            pubkey,
-                            vtxo_pointer: None,
-                            opaque_uri: None,
-                            proof: None,
-                            expires_at: None,
-                        });
+        if let Some(query) = query_part {
+            let pairs: Vec<(&str, &str)> = query
+                .split('&')
+                .filter_map(|kv| kv.split_once('='))
+                .collect();
+            for &(k, v) in &pairs {
+                match k {
+                    "lightning" => methods.push(PaymentMethod::Lightning {
+                        label: "Lightning (BIP-353)".to_string(),
+                        lightning_address: Some(v.to_string()),
+                        lnurl: None,
+                        bolt12: None,
+                        receiver_pubkey: None,
+                    }),
+                    "lnurl" => methods.push(PaymentMethod::Lightning {
+                        label: "LNURL (BIP-353)".to_string(),
+                        lightning_address: None,
+                        lnurl: Some(v.to_string()),
+                        bolt12: None,
+                        receiver_pubkey: None,
+                    }),
+                    "bolt12" | "lno" => methods.push(PaymentMethod::Lightning {
+                        label: "BOLT12 (BIP-353)".to_string(),
+                        lightning_address: None,
+                        lnurl: None,
+                        bolt12: Some(v.to_string()),
+                        receiver_pubkey: None,
+                    }),
+                    "ark_server" => {
+                        if let Some(pubkey) = pairs
+                            .iter()
+                            .find(|&&(key, _)| key == "ark_pubkey")
+                            .map(|&(_, val)| val.to_string())
+                        {
+                            methods.push(PaymentMethod::Ark {
+                                label: "Ark (BIP-353)".to_string(),
+                                server: v.to_string(),
+                                pubkey,
+                                vtxo_pointer: None,
+                                opaque_uri: None,
+                                proof: None,
+                                expires_at: None,
+                            });
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
