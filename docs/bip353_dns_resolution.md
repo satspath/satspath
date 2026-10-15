@@ -66,14 +66,19 @@ malicious resolver.
 
 | Mode               | Behavior                                                                                                                       |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `Strict` (default) | Require real DNSSEC validation; **fail closed** otherwise.                                                                     |
+| `Strict` (default) | Require cryptographic DNSSEC chain validation; **fail closed** otherwise. Never trusts upstream DoH `AD=true` flags alone.     |
 | `DevInsecure`      | Local testing only. Accept unvalidated records with loud warnings. Never the default; requires `--allow-insecure-dns-for-dev`. |
 
-This build does not ship a local DNSSEC validator, so `Strict` resolution **fails
-closed** with a clear message (option C of the BIP-353 DNSSEC guidance). A future
-release can plug in a validating resolver without changing the contract. The
-`--allow-insecure-dns-for-dev` flag prints a scary warning and must never be used
-on mainnet.
+### Current Status & Embedded DNSSEC Validator Requirements
+
+Following the revert of PR #146 (which relied on unverified DoH `AD` bits), `DnssecPolicy::Strict` intentionally **fails closed** whenever full cryptographic DNSSEC chain validation is unavailable:
+
+1. **No Trust in Upstream `AD` Flags:** An upstream DNS-over-HTTPS resolver setting `AD: true` in JSON is not cryptographic proof of DNSSEC validity.
+2. **No Synthetic Profile Fabrication:** A BIP-353 DNS lookup must never fabricate a synthetic `SignedPaymentProfile` signed by an ephemeral throwaway key.
+3. **Embedded DNSSEC Chain Validator Requirements (Issue #152):**
+   - Pin the official IANA Root Key Signing Key (KSK) trust anchor (`20326` / `38696`) in `satspath-core`.
+   - Perform in-process RFC 4034 / RFC 4035 verification of `DNSKEY`, `RRSIG`, and `DS` records from `.` → TLD → `<domain>` down to the target `<user>.user._bitcoin-payment.<domain>` `TXT` RRset.
+   - Verify canonical DNS wire-format RRset sorting, signature inception/expiration windows, and cryptographic signatures (RSA-SHA256 Alg 8, ECDSA P-256/P-384 Alg 13/14, Ed25519 Alg 15).
 
 ## Direct TXT model (Option A)
 

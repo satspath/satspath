@@ -1,0 +1,148 @@
+openapi: 3.0.3
+info:
+  title: SatsPath Daemon API (satspathd)
+  version: 0.2.0
+  description: >-
+    Non-custodial Bitcoin payment discovery, S2S v2 Key Transparency, Sparse
+    Merkle state map proofs, and multi-rail routing API.
+servers:
+  - url: https://localhost:9737
+    description: Local or TLS-terminated satspathd instance
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  headers:
+    X-Request-ID:
+      description: Correlation UUID for structured request tracing
+      schema:
+        type: string
+    Retry-After:
+      description: Seconds to wait before retrying after HTTP 429
+      schema:
+        type: integer
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    QuoteRequest:
+      type: object
+      required: [alias, amount_sats]
+      properties:
+        alias:
+          type: string
+          example: alice@satspath.dev
+        amount_sats:
+          type: integer
+          minimum: 1
+          example: 21000
+    QuoteResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, not_registered, no_route, invalid_signature]
+        qr:
+          type: string
+        fee_sats:
+          type: integer
+          nullable: true
+        eta:
+          type: string
+          nullable: true
+        reason:
+          type: string
+paths:
+  /health:
+    get:
+      summary: Deep dependency health check
+      responses:
+        "200":
+          description: All critical dependencies healthy
+        "503":
+          description: One or more critical dependencies unhealthy
+  /metrics:
+    get:
+      summary: Prometheus text exposition metrics
+      responses:
+        "200":
+          description: Prometheus metrics payload
+          content:
+            text/plain:
+              schema:
+                type: string
+  /.well-known/satspath-authority:
+    get:
+      summary: S2S v2 Namespace Authority Descriptor
+      responses:
+        "200":
+          description: Signed NamespaceDescriptor JSON
+  /v2/resolve:
+    get:
+      summary: Authoritative S2S v2 identifier resolution with Merkle & StateMap proofs
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: pinned_size
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: ResolutionEnvelope containing profile, event, inclusion proof, StateMapProof, and checkpoint
+        "429":
+          description: Rate limited
+          headers:
+            Retry-After:
+              $ref: "#/components/headers/Retry-After"
+  /v1/quote:
+    post:
+      summary: Resolve recipient, verify proofs, and compute optimal payment route handoff
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QuoteRequest"
+      responses:
+        "200":
+          description: QuoteResponse JSON contract
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuoteResponse"
+        "413":
+          description: Payload exceeds 64 KB limit
+        "429":
+          description: Rate limited
+  /v1/transparency/status:
+    get:
+      summary: Current Merkle transparency log and Sparse Merkle state map status
+      responses:
+        "200":
+          description: TransparencyStatus JSON
+  /v1/transparency/catena/chain:
+    get:
+      summary: Catena-style Bitcoin OP_RETURN anchor chain proof
+      responses:
+        "200":
+          description: CatenaChainProof JSON
+  /v1/profile:
+    post:
+      summary: Register or update a signed payment profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Profile updated and committed to transparency log
+        "401":
+          description: Missing or invalid Bearer token

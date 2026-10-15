@@ -15,8 +15,8 @@
 | `satspath-core`   | Types, crypto, resolvers, registry, profile signing | `PaymentMethod`, `SignedPaymentProfile`, `ChainResolver`, `Registry` |
 | `satspath-router` | Rail selection logic                                | `quote()`, `select_route()`, `RouteQuote`, `FeeEstimate`             |
 | `satspath-cli`    | CLI: `init`, `register`, `quote`, `pay`, `preview`  | —                                                                    |
-| `satspathd`       | HTTP daemon (`/v1/quote`, `/v1/pay`, `/v1/resolve`) | —                                                                    |
-| `satspath-wasm`   | WASM bindings (crypto only today)                   | `verify_signed_profile`, `canonical_profile_json`, `topic_for_alias` |
+| `satspathd`       | Authoritative HTTP/TLS daemon (`/v2/resolve`, `/v1/quote`, `/metrics`, `/health`) | `handlers/`, `rate_limit`, `telemetry/`, `p2p.rs` |
+| `satspath-wasm`   | Browser/PWA WASM bindings (crypto + resolver chain + multi-rail router) | `quote`, `resolve_alias`, `verify_signed_profile`, `canonical_profile_json`, `topic_for_alias` |
 
 ### Arkade SDK (TypeScript) — Existing Components
 
