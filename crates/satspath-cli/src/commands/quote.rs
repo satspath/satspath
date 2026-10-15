@@ -115,7 +115,7 @@ pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
 
             match ln_result {
                 Ok(invoice) => break (quote, Some(Ok(invoice))),
-                Err(_) if has_fallback => {
+                Err(err) if has_fallback => {
                     if let Some(pos) = routable
                         .profile
                         .methods
@@ -125,6 +125,7 @@ pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
                         routable.profile.methods.remove(pos);
                         continue;
                     }
+                    break (quote, Some(Err(err)));
                 }
                 Err(err) => break (quote, Some(Err(err))),
             }
