@@ -6,7 +6,7 @@ use satspath_core::{
     validation::{assert_no_private_material, validate_amount_sats},
     PaymentMethod, ProfileResolver, SatsPathError,
 };
-use satspath_router::{fees::fetch_fee_estimate, select_priority_route};
+use satspath_router::{fees::fetch_fee_estimate, handoff::validate_payload, select_priority_route};
 
 use crate::config::AppState;
 use crate::handlers::profile::ensure_signed_profile;
@@ -69,6 +69,8 @@ pub(crate) fn receive_view(state: &AppState, req: ReceiveRequest) -> Result<Rece
         // Note: Lightning Address/LNURL doesn't support amount in the static string.
     }
 
+    validate_payload(&method, &payload, &state.network, req.amount_sats)?;
+
     Ok(ReceiveView {
         alias: mask_identifier(&alias),
         rail: method.method_name().to_string(),
@@ -123,6 +125,11 @@ pub(crate) async fn send_response_with_resolver(
     body: SendRequest,
     resolver: &(impl ProfileResolver + Sync),
 ) -> SendResponse {
+    if let Err(e) = validate_amount_sats(body.amount_sats) {
+        return SendResponse::NoRoute {
+            reason: e.to_string(),
+        };
+    }
     match resolver.resolve_alias(&body.recipient).await {
         Ok(signed) => {
             if !matches!(
@@ -142,7 +149,16 @@ pub(crate) async fn send_response_with_resolver(
                 routing_ok,
             ) {
                 Some(decision) => {
-                    let payload = match send_payload_for(&decision.method, body.amount_sats) {
+                    let payload = match send_payload_for(&decision.method, body.amount_sats)
+                        .and_then(|payload| {
+                            validate_payload(
+                                &decision.method,
+                                &payload,
+                                &state.network,
+                                Some(body.amount_sats),
+                            )?;
+                            Ok(payload)
+                        }) {
                         Ok(p) => p,
                         Err(e) => {
                             return SendResponse::NoRoute {

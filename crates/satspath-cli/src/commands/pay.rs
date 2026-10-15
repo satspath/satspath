@@ -3,7 +3,6 @@ use anyhow::Result;
 use satspath_core::{
     create_invite_record,
     crypto::verify_signed_profile,
-    pointer::build_qr_payload,
     privacy::{mask_address, mask_identifier, mask_invoice, mask_pubkey},
     resolver::ProfileResolver,
     validation::{
@@ -126,9 +125,19 @@ pub async fn cmd_pay(
     };
     let pointer = payment_method_to_pointer(&quote.selected_method)?;
     validate_pointer_for_preview(&pointer, mainnet_preview, network)?;
-    let qr_payload =
-        build_qr_payload(&pointer, amount_sats).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let qr_payload = satspath_router::build_qr_payload(&quote.selected_method, amount_sats)?;
     assert_no_private_material(&qr_payload).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let configured_network = match network {
+        BitcoinNetwork::Mainnet => "mainnet",
+        BitcoinNetwork::Testnet => "testnet",
+        BitcoinNetwork::Regtest => "regtest",
+    };
+    satspath_router::handoff::validate_payload(
+        &quote.selected_method,
+        &qr_payload,
+        configured_network,
+        Some(amount_sats),
+    )?;
 
     if let Some(snap) = &quote.fee_snapshot {
         println!();

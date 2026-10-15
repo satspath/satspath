@@ -188,10 +188,11 @@ pub fn local_receive_qr(amount_sats: Option<u64>) -> Result<ReceiveQr> {
         })
         .ok_or_else(|| anyhow::anyhow!("no receive methods — run `satspath wallet add-methods`"))?;
 
+    let payload = receive_payload_for(method, amount_sats)?;
     Ok(ReceiveQr {
         alias: mask_identifier(&alias),
         rail: method.method_name().to_string(),
-        payload: receive_payload_for(method, amount_sats)?,
+        payload,
     })
 }
 
@@ -238,6 +239,7 @@ fn receive_payload_for(method: &PaymentMethod, amount_sats: Option<u64>) -> Resu
         _ => anyhow::bail!("selected method has no receive pointer"),
     };
     assert_no_private_material(&payload).map_err(|e| anyhow::anyhow!("{e}"))?;
+    satspath_router::handoff::validate_payload(method, &payload, "mainnet", amount_sats)?;
     Ok(payload)
 }
 
@@ -855,6 +857,39 @@ mod tests {
         assert!(methods
             .iter()
             .any(|m| matches!(m, PaymentMethod::Ark { .. })));
+    }
+
+    #[test]
+    fn local_receive_payloads_are_validated_before_display() {
+        let lightning = build_methods(&WalletState {
+            lightning_address: Some("alice@example.com".into()),
+            ..Default::default()
+        })
+        .remove(0);
+        assert_eq!(
+            receive_payload_for(&lightning, None).unwrap(),
+            "alice@example.com"
+        );
+        assert!(receive_payload_for(&lightning, Some(21_000)).is_err());
+
+        let onchain = build_methods(&WalletState {
+            onchain_address: Some("1BoatSLRHtKNngkdXEeobR76b53LETtpyT".into()),
+            ..Default::default()
+        })
+        .remove(0);
+        assert_eq!(
+            receive_payload_for(&onchain, Some(21_000)).unwrap(),
+            "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00021000"
+        );
+        assert!(receive_payload_for(&onchain, Some(0)).is_err());
+
+        let ark = build_methods(&WalletState {
+            ark_server: Some("https://ark.example.com".into()),
+            ark_pubkey: Some("02".repeat(33)),
+            ..Default::default()
+        })
+        .remove(0);
+        assert!(receive_payload_for(&ark, None).is_err());
     }
 
     #[test]
