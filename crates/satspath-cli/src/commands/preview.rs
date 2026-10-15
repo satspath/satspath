@@ -171,21 +171,46 @@ pub async fn build_mainnet_preview_response(
 
     validate_public_profile(&signed.profile).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let req = RouteRequest {
-        alias: recipient.to_string(),
-        amount_sats,
-        signed_profile: signed.clone(),
-        urgency: satspath_router::urgency::PaymentUrgency::Normal,
-        max_fee_sats: None,
-        max_fee_percent: None,
-    };
-    let quote = select_route(&req)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mut routable = signed.clone();
+    routable.profile.methods =
+        eligible_preview_methods(&signed.profile.methods, amount_sats, fetch_lnurl_invoice);
+    if routable.profile.methods.is_empty() {
+        anyhow::bail!("recipient exposes no eligible mainnet preview rail");
+    }
 
-    let ownership = ownership_status(&signed, &quote.selected_method);
-    let (selected_method, qr, mut warnings) =
-        method_preview(&quote, amount_sats, fetch_lnurl_invoice, &ownership).await?;
+    let (quote, ownership, selected_method, qr, mut warnings) = loop {
+        let req = RouteRequest {
+            alias: recipient.to_string(),
+            amount_sats,
+            signed_profile: routable.clone(),
+            urgency: satspath_router::urgency::PaymentUrgency::Normal,
+            max_fee_sats: None,
+            max_fee_percent: None,
+        };
+        let quote = select_route(&req)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let ownership = ownership_status(&signed, &quote.selected_method);
+        match method_preview(&quote, amount_sats, fetch_lnurl_invoice, &ownership).await {
+            Ok((selected_method, qr, warnings)) => {
+                break (quote, ownership, selected_method, qr, warnings);
+            }
+            Err(err) if routable.profile.methods.len() > 1 => {
+                if let Some(pos) = routable
+                    .profile
+                    .methods
+                    .iter()
+                    .position(|m| m == &quote.selected_method)
+                {
+                    routable.profile.methods.remove(pos);
+                    continue;
+                }
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        }
+    };
 
     assert_mainnet_preview_safe(&qr).map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -212,6 +237,35 @@ pub async fn build_mainnet_preview_response(
         invite: None,
         warnings,
     })
+}
+
+/// Retain only profile methods capable of producing a validated mainnet preview QR.
+fn eligible_preview_methods(
+    methods: &[PaymentMethod],
+    amount_sats: u64,
+    fetch_lnurl_invoice: bool,
+) -> Vec<PaymentMethod> {
+    methods
+        .iter()
+        .filter(|method| match method {
+            PaymentMethod::Onchain { network, .. } => {
+                *network == BitcoinNetwork::Mainnet
+                    && satspath_router::build_qr_payload(method, amount_sats).is_ok()
+            }
+            PaymentMethod::Lightning {
+                lightning_address: Some(address),
+                lnurl: None,
+                bolt12: None,
+                receiver_pubkey: Some(pubkey),
+                ..
+            } if fetch_lnurl_invoice => {
+                satspath_core::validation::validate_lightning_address(address).is_ok()
+                    && pubkey.parse::<secp256k1::PublicKey>().is_ok()
+            }
+            _ => false,
+        })
+        .cloned()
+        .collect()
 }
 
 /// Describe a profile that cannot be used to prepare a payment.
@@ -603,5 +657,48 @@ mod tests {
         assert!(method_preview(&quote, 21_000, false, "unverified")
             .await
             .is_err());
+    }
+
+    #[test]
+    fn eligible_preview_methods_filters_to_valid_mainnet_rails() {
+        let onchain = PaymentMethod::Onchain {
+            label: "Mainnet".into(),
+            network: BitcoinNetwork::Mainnet,
+            address: Some("1BoatSLRHtKNngkdXEeobR76b53LETtpyT".into()),
+            silent_payment_pubkey: None,
+            pubkey_hint: None,
+            descriptor_hint: None,
+            address_list: vec![],
+        };
+        let lightning_unverified = PaymentMethod::Lightning {
+            label: "LN".into(),
+            lightning_address: Some("rodrigo@getalby.com".into()),
+            lnurl: None,
+            bolt12: None,
+            receiver_pubkey: None,
+        };
+        let lightning_verified = PaymentMethod::Lightning {
+            label: "LN verified".into(),
+            lightning_address: Some("rodrigo@getalby.com".into()),
+            lnurl: None,
+            bolt12: None,
+            receiver_pubkey: Some(
+                "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".into(),
+            ),
+        };
+        let methods = vec![
+            lightning_unverified,
+            lightning_verified.clone(),
+            onchain.clone(),
+        ];
+
+        assert_eq!(
+            eligible_preview_methods(&methods, 21_000, false),
+            vec![onchain.clone()]
+        );
+        assert_eq!(
+            eligible_preview_methods(&methods, 21_000, true),
+            vec![lightning_verified, onchain]
+        );
     }
 }
