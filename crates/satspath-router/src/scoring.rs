@@ -76,6 +76,11 @@ pub fn score_routes(
         if satspath_core::handoff::validate_method(method, amount_sats).is_err() {
             continue;
         }
+        if matches!(method, PaymentMethod::Bolt12(_))
+            && !crate::lightning::is_lightning_available_for_amount_sync(method, amount_sats)
+        {
+            continue;
+        }
         match method {
             PaymentMethod::Lightning {
                 lightning_address,
@@ -84,6 +89,16 @@ pub fn score_routes(
                 receiver_pubkey,
                 ..
             } => {
+                if bolt12.is_some()
+                    && lightning_address.is_none()
+                    && lnurl.is_none()
+                    && !crate::lightning::is_lightning_available_for_amount_sync(
+                        method,
+                        amount_sats,
+                    )
+                {
+                    continue;
+                }
                 let fee = fee_snapshot
                     .lightning_fee_sats_estimate
                     .unwrap_or_else(|| std::cmp::max(1, amount_sats / 10_000));

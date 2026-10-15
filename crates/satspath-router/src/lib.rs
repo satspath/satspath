@@ -14,6 +14,9 @@ pub mod silent_payments;
 pub mod split_payments;
 pub mod urgency;
 
+#[cfg(test)]
+mod lightning_tests;
+
 pub use ark_routes::{plan_ark_route, ArkRoutePlan, SenderCapabilities};
 pub use bip353_preview::quote_from_bip353_resolution;
 pub use bolt12::{parse_bolt12_offer, Bolt12Invoice, Bolt12InvoiceRequest, Bolt12Offer};
@@ -27,8 +30,7 @@ pub use key_rotation::{
     verify_key_rotation,
 };
 pub use lightning::{
-    fetch_invoice, fetch_invoice_with_options, fetch_lnurl_metadata,
-    fetch_lnurl_metadata_with_options, is_lightning_available_for_amount_sync,
+    fetch_invoice, fetch_lnurl_metadata, is_lightning_available_for_amount_sync,
     validate_bolt11_invoice, LnurlPayMetadata, ValidatedInvoice,
 };
 pub use priority::{select_priority_route, PriorityDecision};

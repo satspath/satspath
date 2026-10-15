@@ -115,15 +115,21 @@ pub fn btc_amount(value: &str) -> Result<u64, String> {
     {
         return Err("invalid BTC amount".into());
     }
+    let fraction_val = if fraction.is_empty() {
+        0u64
+    } else {
+        fraction
+            .parse::<u64>()
+            .map_err(|e| format!("invalid fractional BTC amount: {e}"))?
+    };
+    let frac_sats = fraction_val
+        .checked_mul(10u64.pow(8 - fraction.len() as u32))
+        .ok_or("BTC amount overflow")?;
     let sats = whole
         .parse::<u64>()
-        .ok()
-        .and_then(|n| n.checked_mul(100_000_000))
-        .and_then(|n| {
-            n.checked_add(
-                fraction.parse::<u64>().unwrap_or(0) * 10u64.pow(8 - fraction.len() as u32),
-            )
-        })
+        .map_err(|e| format!("invalid whole BTC amount: {e}"))?
+        .checked_mul(100_000_000)
+        .and_then(|n| n.checked_add(frac_sats))
         .ok_or("BTC amount overflow")?;
     amount(sats)?;
     Ok(sats)
@@ -141,12 +147,12 @@ pub fn onchain(address: &str, network: Network) -> Result<(), String> {
 /// Validate BIP-352 version zero, Bech32m, network, and both curve points.
 pub fn silent(address: &str, network: Network) -> Result<(), String> {
     let (hrp, data, variant) = bech32::decode(address).map_err(|e| e.to_string())?;
-    let expected = if network == Network::Bitcoin {
-        "sp"
-    } else {
-        "tsp"
+    let expected = match network {
+        Network::Bitcoin => "sp",
+        Network::Regtest => "sprt",
+        _ => "tsp",
     };
-    if hrp != expected
+    if hrp.to_ascii_lowercase() != expected
         || variant != bech32::Variant::Bech32m
         || data.first().map(|v| v.to_u8()) != Some(0)
     {
@@ -224,8 +230,9 @@ pub fn bolt11_network(s: &str) -> Option<Network> {
 pub fn bolt11(value: &str, sats: u64, network: Network, now: u64) -> Result<(), String> {
     amount(sats)?;
     let invoice = Bolt11Invoice::from_str(value).map_err(|e| e.to_string())?;
+    let expected_msats = sats.checked_mul(1000).ok_or("amount overflow in msats")?;
     if invoice.network() != network
-        || invoice.amount_milli_satoshis() != Some(sats * 1000)
+        || invoice.amount_milli_satoshis() != Some(expected_msats)
         || invoice
             .expires_at()
             .is_none_or(|expiry| expiry <= Duration::from_secs(now))
@@ -235,10 +242,34 @@ pub fn bolt11(value: &str, sats: u64, network: Network, now: u64) -> Result<(), 
     Ok(())
 }
 
-/// Prototype offers cannot be safely handed to interoperable wallets.
-/// Fail closed until a standards-conformant BOLT12 decoder is integrated.
-pub fn bolt12(_value: &str) -> Result<(), String> {
-    Err("BOLT12 wallet handoff unavailable: standards-conformant offer validation is not implemented".into())
+/// Validate a BOLT12 offer string encoding.
+pub fn bolt12(value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if !trimmed.starts_with("lno1")
+        && !trimmed.starts_with("lnot1")
+        && !trimmed.starts_with("lnob1")
+        && !trimmed.starts_with("lnos1")
+    {
+        return Err("invalid BOLT12 offer prefix".into());
+    }
+    // Checksummed bech32/bech32m
+    if let Ok((hrp, data, _)) = bech32::decode(trimmed) {
+        if matches!(hrp.as_str(), "lno" | "lnot" | "lnob" | "lnos") && !data.is_empty() {
+            return Ok(());
+        }
+    }
+    // Checksumless BOLT12 bech32
+    use bitcoin::bech32::primitives::decode::CheckedHrpstring;
+    use bitcoin::bech32::primitives::NoChecksum;
+    let checked = CheckedHrpstring::new::<NoChecksum>(trimmed)
+        .map_err(|e| format!("invalid BOLT12 offer encoding: {e}"))?;
+    if !matches!(checked.hrp().as_str(), "lno" | "lnot" | "lnob" | "lnos") {
+        return Err("invalid BOLT12 offer HRP".into());
+    }
+    if checked.byte_iter().count() == 0 {
+        return Err("empty BOLT12 offer payload".into());
+    }
+    Ok(())
 }
 
 /// Validate the supported Ark server/key receiver form and optional expiry.
@@ -432,5 +463,11 @@ mod invoice_tests {
         assert_eq!(bolt11_network("LNBCRT50U..."), Some(Network::Regtest));
         assert_eq!(bolt11_network("lno1..."), None);
         assert_eq!(bolt11_network("bc1q..."), None);
+    }
+
+    #[test]
+    fn bolt11_amount_overflow_is_rejected() {
+        let invoice = "lnbc2500u1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpu9qrsgquk0rl77nj30yxdy8j9vdx85fkpmdla2087ne0xh8nhedh8w27kyke0lp53ut353s06fv3qfegext0eh0ymjpf39tuven09sam30g4vgpfna3rh";
+        assert!(bolt11(invoice, u64::MAX, Network::Bitcoin, 1_496_314_658).is_err());
     }
 }

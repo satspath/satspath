@@ -432,7 +432,7 @@ proptest! {
         }
     }
 
-    /// A validated fallback is selected regardless of the BOLT12 offer minimum.
+    /// A validated fallback is selected below the BOLT12 offer minimum.
     #[test]
     fn test_validated_fallback_is_selected_regardless_of_offer_minimum(minimum in 1_001u64..100_000u64) {
         let offer = valid_unblinded_bolt12_offer();
@@ -454,8 +454,13 @@ proptest! {
         );
         req.amount_sats = minimum;
         let at = select_route_with_fees(&req, &low_fees()).expect("offer at minimum");
-        prop_assert_eq!(at.selected_method, fallback);
-        prop_assert!(!satspath_router::lightning::is_lightning_available_for_amount_sync(&bolt12, minimum));
+        prop_assert_eq!(at.selected_method, bolt12.clone());
+        prop_assert!(satspath_router::lightning::is_lightning_available_for_amount_sync(&bolt12, minimum));
+        let scored_below = score_routes(minimum - 1, &req.signed_profile, &FeeSnapshot::default(), &RoutePreferences::default()).unwrap();
+        prop_assert!(
+            matches!(scored_below.payment_pointer, PaymentPointer::LightningAddress { .. }),
+            "fallback pointer expected"
+        );
     }
 
     // ── 1. Route Scoring Determinism & Contract Invariants ─────────────────
@@ -720,13 +725,13 @@ fn test_select_route_urgency_changes_onchain_and_ark_choice() {
     }
 }
 
-/// Prototype offer encodings must never be handed to wallets as valid BOLT12.
+/// Valid decoded offers can be handed off; malformed encodings must fail closed.
 #[test]
-fn test_prototype_offers_rejected_for_both_method_variants() {
-    for offer in [
-        valid_blinded_bolt12_offer(),
-        valid_unblinded_bolt12_offer(),
-        "lno1malformed".into(),
+fn test_offer_validation_for_both_method_variants() {
+    for (offer, valid) in [
+        (valid_blinded_bolt12_offer(), true),
+        (valid_unblinded_bolt12_offer(), true),
+        ("lno1malformed".into(), false),
     ] {
         for method in [
             PaymentMethod::Lightning {
@@ -747,15 +752,21 @@ fn test_prototype_offers_rejected_for_both_method_variants() {
             }),
         ] {
             let req = route_request(10_000, vec![method.clone()]);
-            assert!(score_routes(
-                req.amount_sats,
-                &req.signed_profile,
-                &FeeSnapshot::default(),
-                &RoutePreferences::default()
-            )
-            .is_err());
-            assert!(select_route_with_fees(&req, &low_fees()).is_err());
-            assert!(satspath_router::build_qr_payload(&method, req.amount_sats).is_err());
+            assert_eq!(
+                score_routes(
+                    req.amount_sats,
+                    &req.signed_profile,
+                    &FeeSnapshot::default(),
+                    &RoutePreferences::default()
+                )
+                .is_ok(),
+                valid
+            );
+            assert_eq!(select_route_with_fees(&req, &low_fees()).is_ok(), valid);
+            assert_eq!(
+                satspath_router::build_qr_payload(&method, req.amount_sats).is_ok(),
+                valid
+            );
         }
     }
 }

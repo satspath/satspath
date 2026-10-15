@@ -20,9 +20,6 @@ pub fn is_lightning_available(method: &PaymentMethod) -> bool {
 /// Check if Lightning is available for a specific amount by checking LNURL min_sendable.
 /// Returns true if the amount is >= min_sendable (or if no LNURL to check).
 pub async fn is_lightning_available_for_amount(method: &PaymentMethod, amount_sats: u64) -> bool {
-    if satspath_core::handoff::validate_method(method, amount_sats).is_err() {
-        return false;
-    }
     match method {
         PaymentMethod::Lightning {
             lightning_address: Some(addr),
@@ -50,11 +47,22 @@ pub async fn is_lightning_available_for_amount(method: &PaymentMethod, amount_sa
             bolt12: Some(offer_str),
             ..
         } => {
-            if satspath_handoff::bolt11_network(offer_str).is_some() {
-                true
+            if let Some(network) = satspath_handoff::bolt11_network(offer_str) {
+                satspath_handoff::bolt11(
+                    offer_str,
+                    amount_sats,
+                    network,
+                    chrono::Utc::now().timestamp().max(0) as u64,
+                )
+                .is_ok()
             } else {
                 crate::bolt12::parse_bolt12_offer(offer_str)
-                    .is_ok_and(|offer| offer.is_amount_valid(amount_sats * 1_000))
+                    .map(|offer| {
+                        amount_sats
+                            .checked_mul(1_000)
+                            .is_some_and(|amount_msats| offer.is_amount_valid(amount_msats))
+                    })
+                    .unwrap_or(false)
             }
         }
         PaymentMethod::Bolt12(offer_data) => {
@@ -64,7 +72,12 @@ pub async fn is_lightning_available_for_amount(method: &PaymentMethod, amount_sa
                 }
             }
             crate::bolt12::parse_bolt12_offer(&offer_data.offer)
-                .is_ok_and(|offer| offer.is_amount_valid(amount_sats * 1_000))
+                .map(|offer| {
+                    amount_sats
+                        .checked_mul(1_000)
+                        .is_some_and(|amount_msats| offer.is_amount_valid(amount_msats))
+                })
+                .unwrap_or(false)
         }
         _ => false,
     }
@@ -82,9 +95,6 @@ pub fn lightning_address(method: &PaymentMethod) -> Option<&str> {
 /// Check if Lightning is available for a specific amount (synchronous version).
 /// Uses a default minimum of 1000 sats (1,000,000 msats) if LNURL metadata unavailable.
 pub fn is_lightning_available_for_amount_sync(method: &PaymentMethod, amount_sats: u64) -> bool {
-    if satspath_core::handoff::validate_method(method, amount_sats).is_err() {
-        return false;
-    }
     const DEFAULT_MIN_SENDABLE_MSATS: u64 = 1_000_000; // 1000 sats
     match method {
         PaymentMethod::Lightning {
@@ -103,11 +113,22 @@ pub fn is_lightning_available_for_amount_sync(method: &PaymentMethod, amount_sat
             bolt12: Some(offer_str),
             ..
         } => {
-            if satspath_handoff::bolt11_network(offer_str).is_some() {
-                true
+            if let Some(network) = satspath_handoff::bolt11_network(offer_str) {
+                satspath_handoff::bolt11(
+                    offer_str,
+                    amount_sats,
+                    network,
+                    chrono::Utc::now().timestamp().max(0) as u64,
+                )
+                .is_ok()
             } else {
                 crate::bolt12::parse_bolt12_offer(offer_str)
-                    .is_ok_and(|offer| offer.is_amount_valid(amount_sats * 1_000))
+                    .map(|offer| {
+                        amount_sats
+                            .checked_mul(1_000)
+                            .is_some_and(|amount_msats| offer.is_amount_valid(amount_msats))
+                    })
+                    .unwrap_or(false)
             }
         }
         PaymentMethod::Bolt12(offer_data) => {
@@ -117,7 +138,12 @@ pub fn is_lightning_available_for_amount_sync(method: &PaymentMethod, amount_sat
                 }
             }
             crate::bolt12::parse_bolt12_offer(&offer_data.offer)
-                .is_ok_and(|offer| offer.is_amount_valid(amount_sats * 1_000))
+                .map(|offer| {
+                    amount_sats
+                        .checked_mul(1_000)
+                        .is_some_and(|amount_msats| offer.is_amount_valid(amount_msats))
+                })
+                .unwrap_or(false)
         }
         _ => false,
     }
@@ -173,8 +199,8 @@ pub async fn fetch_lnurl_metadata(lightning_address: &str) -> anyhow::Result<Lnu
 }
 
 /// Fetch LNURL metadata with explicit SSRF enforcement control (test-only transport path for mock servers).
-#[doc(hidden)]
-pub async fn fetch_lnurl_metadata_with_options(
+#[cfg(test)]
+pub(crate) async fn fetch_lnurl_metadata_with_options(
     lightning_address: &str,
     enforce_ssrf: bool,
 ) -> anyhow::Result<LnurlPayMetadata> {
@@ -240,8 +266,8 @@ pub async fn fetch_invoice(
 }
 
 /// Fetch invoice with explicit SSRF enforcement control (test-only transport path for mock servers).
-#[doc(hidden)]
-pub async fn fetch_invoice_with_options(
+#[cfg(test)]
+pub(crate) async fn fetch_invoice_with_options(
     meta: &LnurlPayMetadata,
     amount_sats: u64,
     comment: Option<&str>,

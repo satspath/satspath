@@ -88,14 +88,14 @@ impl HttpResolver {
     }
 
     /// Test-only resolution path for mock servers without production SSRF checks.
-    #[doc(hidden)]
-    pub async fn resolve_from_mock_url(&self, url: &str) -> Result<SignedPaymentProfile> {
+    #[cfg(test)]
+    pub(crate) async fn resolve_from_mock_url(&self, url: &str) -> Result<SignedPaymentProfile> {
         self.fetch_from_validated_url(url).await
     }
 
     /// Construct a resolver with a custom HTTP client (for test dependency injection).
-    #[doc(hidden)]
-    pub fn with_client(client: Client) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_client(client: Client) -> Self {
         Self { client }
     }
 
@@ -161,6 +161,7 @@ mod tests {
     use crate::profile::{PaymentMethod, PaymentProfile};
     use mockito::Server;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     struct StubResolver {
         addrs: Vec<std::net::SocketAddr>,
@@ -458,5 +459,59 @@ mod tests {
                 "expected ValidationError for {url}, got: {result:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_attack_memory_exhaustion_dos() {
+        use tokio_rustls::rustls::{pki_types::PrivatePkcs8KeyDer, ServerConfig};
+
+        // Route a public-looking hostname to a local TLS mock through a test-only client.
+        // Production construction retains DNS answer validation and cannot inject this client.
+        let cert = rcgen::generate_simple_self_signed(vec!["profile.example".into()]).unwrap();
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.cert.der().clone()],
+                PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()).into(),
+            )
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = acceptor.accept(stream).await.unwrap();
+            let mut request = [0; 4096];
+            let len = stream.read(&mut request).await.unwrap();
+            assert!(String::from_utf8_lossy(&request[..len]).contains("GET /profile"));
+            // One byte past the cap exercises the same boundary without a multi-MB buffer.
+            let body = "x".repeat(50 * 1024 + 1);
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            // The client intentionally stops reading after 50 KiB.
+            let _ = stream.write_all(body.as_bytes()).await;
+        });
+
+        let client = Client::builder()
+            .resolve("profile.example", address)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .add_root_certificate(reqwest::Certificate::from_der(cert.cert.der()).unwrap())
+            .build()
+            .unwrap();
+        let resolver = HttpResolver::with_client(client);
+        let result = resolver
+            .resolve_from_url("https://profile.example/profile")
+            .await;
+        assert!(result.is_err(), "Node must reject an oversized payload");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("DoS protection"),
+            "Expected DoS protection error, got: {err_msg}"
+        );
+        server.await.unwrap();
     }
 }

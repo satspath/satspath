@@ -1,7 +1,6 @@
+use crate::lightning::{fetch_invoice_with_options, fetch_lnurl_metadata_with_options};
+use crate::{fetch_invoice, LnurlPayMetadata};
 use mockito::Server;
-use satspath_router::{
-    fetch_invoice, fetch_invoice_with_options, fetch_lnurl_metadata_with_options, LnurlPayMetadata,
-};
 use serde_json::json;
 
 #[tokio::test]
@@ -190,7 +189,7 @@ async fn test_lnurl_callback_missing_or_empty_pr() {
 
 #[tokio::test]
 async fn test_invalid_lightning_address_format() {
-    use satspath_router::fetch_lnurl_metadata;
+    use crate::fetch_lnurl_metadata;
 
     // Missing domain
     let res1 = fetch_lnurl_metadata("alice").await;

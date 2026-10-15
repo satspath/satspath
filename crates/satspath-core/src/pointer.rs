@@ -78,9 +78,13 @@ fn validate_handoff(pointer: &PaymentPointer, sats: u64) -> Result<()> {
                 BitcoinNetwork::Testnet => bitcoin::Network::Testnet,
                 BitcoinNetwork::Regtest => bitcoin::Network::Regtest,
             };
-            if address.to_ascii_lowercase().starts_with("sp1")
-                || address.to_ascii_lowercase().starts_with("tsp1")
-            {
+            let is_silent = bech32::decode(address)
+                .map(|(hrp, _, _)| {
+                    let hrp_lower = hrp.to_ascii_lowercase();
+                    matches!(hrp_lower.as_str(), "sp" | "tsp" | "sprt")
+                })
+                .unwrap_or(false);
+            if is_silent {
                 check::silent(address, network)
             } else {
                 check::onchain(address, network)
@@ -172,6 +176,7 @@ fn sats_to_btc(amount_sats: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bech32::ToBase32;
 
     #[test]
     /// Verify that qr payload for bolt11 rejects malformed invoice.
@@ -195,6 +200,35 @@ mod tests {
             build_qr_payload(&pointer, 21_000).unwrap(),
             "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00021"
         );
+    }
+
+    #[test]
+    fn qr_payload_routes_silent_payment_by_hrp_and_network() {
+        let key = hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap();
+        let mut data = vec![bech32::u5::try_from_u8(0).unwrap()];
+        data.extend([key.clone(), key].concat().to_base32());
+        for (network, hrp) in [
+            (BitcoinNetwork::Mainnet, "sp"),
+            (BitcoinNetwork::Testnet, "tsp"),
+            (BitcoinNetwork::Regtest, "sprt"),
+        ] {
+            let address = bech32::encode(hrp, &data, bech32::Variant::Bech32m).unwrap();
+            let pointer = PaymentPointer::OnchainAddress {
+                network,
+                address: address.clone(),
+                claim_policy: None,
+            };
+            assert!(build_qr_payload(&pointer, 21_000).is_ok(), "{hrp}");
+            let wrong_network = PaymentPointer::OnchainAddress {
+                network: BitcoinNetwork::Mainnet,
+                address,
+                claim_policy: None,
+            };
+            if network != BitcoinNetwork::Mainnet {
+                assert!(build_qr_payload(&wrong_network, 21_000).is_err(), "{hrp}");
+            }
+        }
     }
 
     #[test]
