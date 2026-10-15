@@ -137,9 +137,15 @@ pub fn validate_payload(
 }
 
 /// Interpret the configured chain name, rejecting unknown networks.
+///
+/// `devnet` intentionally aliases to [`BitcoinNetwork::Testnet`] (and
+/// `Currency::BitcoinTestnet` in [`validate_bolt11`]) for local `satspathd`
+/// development. Testnet3, Testnet4, and Signet share the `tb` HRP under
+/// `bitcoin::Network::Testnet`, while Mainnet remains strictly isolated.
 fn configured_network(network: &str) -> Result<BitcoinNetwork> {
     match network.to_ascii_lowercase().as_str() {
         "mainnet" | "bitcoin" => Ok(BitcoinNetwork::Mainnet),
+        // Intentional alias: local `devnet` uses Testnet/Signet (`tb`) encodings.
         "testnet" | "devnet" => Ok(BitcoinNetwork::Testnet),
         "regtest" => Ok(BitcoinNetwork::Regtest),
         _ => bail!("unsupported daemon network for payment handoff"),
@@ -170,6 +176,7 @@ fn validate_bolt11(
 ) -> Result<()> {
     let expected_currency = match network.to_ascii_lowercase().as_str() {
         "mainnet" | "bitcoin" => Currency::Bitcoin,
+        // Keep `devnet` aligned with `configured_network` (`BitcoinNetwork::Testnet`).
         "testnet" | "devnet" => Currency::BitcoinTestnet,
         "regtest" => Currency::Regtest,
         _ => bail!("unsupported Lightning network for payment handoff"),

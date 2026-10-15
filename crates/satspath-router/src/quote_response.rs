@@ -170,13 +170,14 @@ pub async fn quote_verified_profile(
 ///   network- and amount-bound payload can be validated.
 pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> satspath_core::Result<String> {
     validate_amount_sats(amount_sats)?;
-    let payload = match method {
+    let (payload, network) = match method {
         PaymentMethod::Lightning { .. } => {
             return Err(SatsPathError::InvalidPaymentPointer(
                 "Lightning pointers cannot bind the amount; a verified invoice is required".into(),
             ));
         }
         PaymentMethod::Onchain {
+            network,
             address,
             silent_payment_pubkey,
             ..
@@ -189,7 +190,15 @@ pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> satspath_co
             let address = address.as_deref().ok_or_else(|| {
                 SatsPathError::InvalidPaymentPointer("on-chain method has no address".into())
             })?;
-            format!("bitcoin:{address}?amount={}", sats_to_btc(amount_sats))
+            let network = match network {
+                BitcoinNetwork::Mainnet => "mainnet",
+                BitcoinNetwork::Testnet => "testnet",
+                BitcoinNetwork::Regtest => "regtest",
+            };
+            (
+                format!("bitcoin:{address}?amount={}", sats_to_btc(amount_sats)),
+                network,
+            )
         }
         PaymentMethod::Ark { .. } | PaymentMethod::Bolt12(_) => {
             return Err(SatsPathError::InvalidPaymentPointer(
@@ -198,14 +207,6 @@ pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> satspath_co
         }
     };
 
-    let network = match method {
-        PaymentMethod::Onchain { network, .. } => match network {
-            BitcoinNetwork::Mainnet => "mainnet",
-            BitcoinNetwork::Testnet => "testnet",
-            BitcoinNetwork::Regtest => "regtest",
-        },
-        _ => unreachable!("unsupported methods returned before creating a payload"),
-    };
     validate_payload(method, &payload, network, Some(amount_sats))
         .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
     Ok(payload)

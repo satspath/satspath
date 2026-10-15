@@ -62,17 +62,76 @@ pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
     }
 
     print!("Fetching mempool fees + selecting rail... ");
-    let req = RouteRequest {
-        alias: alias.to_string(),
-        amount_sats,
-        signed_profile: signed.clone(),
-        urgency: satspath_router::urgency::PaymentUrgency::Normal,
-        max_fee_sats: None,
-        max_fee_percent: None,
+    let mut routable = signed.clone();
+    routable.profile.methods = eligible_quote_methods(&signed.profile.methods, amount_sats);
+    if routable.profile.methods.is_empty() {
+        if signed.profile.methods.iter().any(|m| {
+            matches!(
+                m,
+                PaymentMethod::Lightning {
+                    receiver_pubkey: None,
+                    ..
+                }
+            )
+        }) {
+            anyhow::bail!("Lightning invoice requires a verified receiver public key");
+        }
+        anyhow::bail!("recipient exposes no eligible mainnet wallet handoff rail");
+    }
+
+    let (quote, prefetched_ln_invoice) = loop {
+        let req = RouteRequest {
+            alias: alias.to_string(),
+            amount_sats,
+            signed_profile: routable.clone(),
+            urgency: satspath_router::urgency::PaymentUrgency::Normal,
+            max_fee_sats: None,
+            max_fee_percent: None,
+        };
+        let quote = select_route(&req)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        if matches!(quote.selected_method, PaymentMethod::Lightning { .. }) {
+            let has_fallback = routable.profile.methods.len() > 1;
+            let ln_result = async {
+                if matches!(
+                    quote.selected_method,
+                    PaymentMethod::Lightning {
+                        receiver_pubkey: None,
+                        ..
+                    }
+                ) {
+                    anyhow::bail!("Lightning invoice requires a verified receiver public key");
+                }
+                let ln_addr = lightning_address(&quote.selected_method)
+                    .ok_or_else(|| anyhow::anyhow!("no Lightning Address in method"))?;
+                let meta = fetch_lnurl_metadata(ln_addr).await?;
+                let invoice = fetch_invoice(&meta, amount_sats, None).await?;
+                validate_quote_qr(&quote.selected_method, &invoice, amount_sats)?;
+                Ok::<String, anyhow::Error>(invoice)
+            }
+            .await;
+
+            match ln_result {
+                Ok(invoice) => break (quote, Some(Ok(invoice))),
+                Err(_) if has_fallback => {
+                    if let Some(pos) = routable
+                        .profile
+                        .methods
+                        .iter()
+                        .position(|m| m == &quote.selected_method)
+                    {
+                        routable.profile.methods.remove(pos);
+                        continue;
+                    }
+                }
+                Err(err) => break (quote, Some(Err(err))),
+            }
+        }
+
+        break (quote, None);
     };
-    let quote = select_route(&req)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
     println!("done.");
 
     if let Some(snap) = &quote.fee_snapshot {
@@ -126,37 +185,22 @@ pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
             println!("  Preview only. No funds moved.");
         }
         PaymentMethod::Lightning { .. } => {
-            if matches!(
-                quote.selected_method,
-                PaymentMethod::Lightning {
-                    receiver_pubkey: None,
-                    ..
-                }
-            ) {
-                anyhow::bail!("Lightning invoice requires a verified receiver public key");
-            }
             let ln_addr = lightning_address(&quote.selected_method)
                 .ok_or_else(|| anyhow::anyhow!("no Lightning Address in method"))?;
 
             print!("  Fetching invoice from {}... ", mask_identifier(ln_addr));
-            match fetch_lnurl_metadata(ln_addr).await {
-                Ok(meta) => {
-                    match fetch_invoice(&meta, amount_sats, None).await {
-                        Ok(invoice) => {
-                            validate_quote_qr(&quote.selected_method, &invoice, amount_sats)?;
-                            println!("received.");
-                            println!();
-                            println!("  Scan to pay — Lightning ({} sats)", amount_sats);
-                            println!("  ─────────────────────────────────────────");
-                            print_qr(&invoice)?;
-                            println!("  {}...", mask_invoice(&invoice));
-                            println!("  Warning: this is a real invoice QR generated from public metadata.");
-                        }
-                        Err(e) => {
-                            println!("unavailable ({e}).");
-                            println!("  Preview only. No funds moved.");
-                        }
-                    }
+            match prefetched_ln_invoice.expect("Lightning quote always pre-evaluates invoice") {
+                Ok(invoice) => {
+                    validate_quote_qr(&quote.selected_method, &invoice, amount_sats)?;
+                    println!("received.");
+                    println!();
+                    println!("  Scan to pay — Lightning ({} sats)", amount_sats);
+                    println!("  ─────────────────────────────────────────");
+                    print_qr(&invoice)?;
+                    println!("  {}...", mask_invoice(&invoice));
+                    println!(
+                        "  Warning: this is a real invoice QR generated from public metadata."
+                    );
                 }
                 Err(e) => {
                     println!("unavailable ({e}).");
@@ -185,6 +229,35 @@ pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Filter profile methods down to rails that can produce a validated mainnet handoff.
+fn eligible_quote_methods(methods: &[PaymentMethod], amount_sats: u64) -> Vec<PaymentMethod> {
+    methods
+        .iter()
+        .filter(|method| match method {
+            PaymentMethod::Lightning {
+                lightning_address: Some(addr),
+                lnurl: None,
+                bolt12: None,
+                receiver_pubkey: Some(pubkey),
+                ..
+            } => {
+                satspath_core::validation::validate_lightning_address(addr).is_ok()
+                    && pubkey.parse::<secp256k1::PublicKey>().is_ok()
+            }
+            PaymentMethod::Onchain {
+                address: Some(address),
+                silent_payment_pubkey: None,
+                ..
+            } => {
+                let uri = bitcoin_uri(address, amount_sats);
+                validate_quote_qr(method, &uri, amount_sats).is_ok()
+            }
+            _ => false,
+        })
+        .cloned()
+        .collect()
 }
 
 /// Check a mainnet CLI quote against its selected method before displaying it.
@@ -232,5 +305,30 @@ mod tests {
             issuer_pubkey: String::new(),
         });
         assert!(validate_quote_qr(&bolt12, "lno1qoffer", 21_000).is_err());
+    }
+
+    #[test]
+    fn mixed_profile_skips_unverified_lightning_and_selects_eligible_onchain() {
+        let onchain = PaymentMethod::Onchain {
+            label: "On-chain".into(),
+            network: BitcoinNetwork::Mainnet,
+            address: Some("1BoatSLRHtKNngkdXEeobR76b53LETtpyT".into()),
+            silent_payment_pubkey: None,
+            pubkey_hint: None,
+            descriptor_hint: None,
+            address_list: vec![],
+        };
+        let methods = vec![
+            PaymentMethod::Lightning {
+                label: "Lightning".into(),
+                lightning_address: Some("alice@example.com".into()),
+                lnurl: None,
+                bolt12: None,
+                receiver_pubkey: None,
+            },
+            onchain.clone(),
+        ];
+        let eligible = eligible_quote_methods(&methods, 21_000);
+        assert_eq!(eligible, vec![onchain]);
     }
 }
