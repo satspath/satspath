@@ -44,7 +44,7 @@ Wallet handoff payload (BIP-21 URI or validated BOLT11 invoice where supported)
 Host wallet signs and executes the payment
 ```
 
-**Wallet handoffs:** Daemon, router `quote_with_resolver`/`quote_verified_profile`, and WASM quote paths emit on-chain BIP-21 QRs after address validation; their other QR fields can contain non-payable pointers. The default router `quote` and CLI `quote`/`preview --fetch-lnurl-invoice` paths can also emit BOLT11 invoices after validation. Amount-less Lightning pointers are not payable invoices; BOLT12 offers, Ark pointers, and Silent Payments remain experimental/limited and are not guaranteed payable wallet handoffs.
+**Wallet handoffs:** Daemon and router `quote_with_resolver`/`quote_verified_profile` do not fetch Lightning invoices: they emit validated on-chain BIP-21 QRs, public pointers, or an already-validated BOLT11 invoice. The default router `quote`, WASM quote, and CLI `quote`/`preview --fetch-lnurl-invoice` paths can fetch and emit BOLT11 invoices after validation. Amount-less Lightning pointers are not payable invoices; BOLT12 offers, Ark pointers, and Silent Payments remain experimental/limited and are not guaranteed payable wallet handoffs.
 
 ### Why Isn't Lightning Address Alone Enough?
 A Lightning Address (`user@domain.com`) exclusively targets a Lightning receiving node. If the receiver's node is offline, channel liquidity is exhausted, or the transaction amount exceeds capacity, the payment fails. SatsPath can consume Lightning Addresses while advertising on-chain addresses, BOLT12 offers, Silent Payments, and Ark pointers as dynamic fallbacks.
