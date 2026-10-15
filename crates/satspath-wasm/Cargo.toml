@@ -37,6 +37,9 @@ js-sys = "0.3"
 # getrandom for WASM
 getrandom = { version = "0.2", features = ["js"] }
 
+# Standards-compliant URL and query parsing
+url = { version = "2", default-features = false, features = ["serde"] }
+
 # Optional Post-Quantum Cryptography (feature-gated to keep default WASM bundle < 500KB)
 satspath-pqc = { path = "../satspath-pqc", optional = true }
 

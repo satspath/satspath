@@ -107,6 +107,7 @@ pub fn sign_profile_json(profile_json: &str, secret_key_hex: &str) -> String {
     hex::encode(sig.as_ref())
 }
 
+/// Classical and post-quantum identity keys exported when `pqc` is enabled.
 #[cfg(feature = "pqc")]
 #[wasm_bindgen]
 pub struct HybridIdentityKeypair {
@@ -119,18 +120,22 @@ pub struct HybridIdentityKeypair {
 #[cfg(feature = "pqc")]
 #[wasm_bindgen]
 impl HybridIdentityKeypair {
+    /// Return the compressed secp256k1 identity public key as hex.
     #[wasm_bindgen(getter)]
     pub fn classical_pubkey_hex(&self) -> String {
         self.classical_pubkey_hex.clone()
     }
+    /// Return the secp256k1 identity secret key as hex.
     #[wasm_bindgen(getter)]
     pub fn classical_secret_key_hex(&self) -> String {
         self.classical_secret_key_hex.clone()
     }
+    /// Return the encoded ML-DSA verification key as hex.
     #[wasm_bindgen(getter)]
     pub fn pqc_verification_key_hex(&self) -> String {
         self.pqc_verification_key_hex.clone()
     }
+    /// Return the seed used to reconstruct the post-quantum signing key as hex.
     #[wasm_bindgen(getter)]
     pub fn pqc_seed_hex(&self) -> String {
         self.pqc_seed_hex.clone()
@@ -306,14 +311,14 @@ pub fn fingerprint_pubkey(pubkey_hex: &str) -> String {
     hex::encode(&bytes[1..5])
 }
 
-/// Serialize a [`serde_json::Value`] into deterministic RFC 8785 canonical JSON bytes
-/// without pulling in `regex` or heavy formatting dependencies.
+/// Serialize a JSON value into deterministic bytes with sorted object keys.
 fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     write_canonical_value(value, &mut buf)?;
     Ok(buf)
 }
 
+/// Append a JSON value recursively, sorting object keys and omitting whitespace.
 fn write_canonical_value(value: &Value, buf: &mut Vec<u8>) -> Result<(), String> {
     match value {
         Value::Null => buf.extend_from_slice(b"null"),
