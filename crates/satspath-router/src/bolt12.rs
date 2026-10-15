@@ -1610,7 +1610,7 @@ mod tests {
                 }]);
                 let offer =
                     bech32::encode("lno", raw.to_base32(), bech32::Variant::Bech32m).unwrap();
-                satspath_handoff::bolt12(&offer).unwrap();
+                satspath_handoff::bolt12(&offer, None, 0).unwrap();
             }
         }
         path.blinded_hops[0].encrypted_payload = "ab".repeat(u16::MAX as usize + 1);
@@ -1641,7 +1641,7 @@ mod tests {
                 value: invalid,
             }]);
             let offer = bech32::encode("lno", raw.to_base32(), bech32::Variant::Bech32m).unwrap();
-            assert!(satspath_handoff::bolt12(&offer).is_err());
+            assert!(satspath_handoff::bolt12(&offer, None, 0).is_err());
         }
         for end in 0..valid.len() {
             assert!(BlindedPath::decode_bytes(&valid[..end]).is_err());

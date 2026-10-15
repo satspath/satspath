@@ -57,7 +57,14 @@ impl<'a> From<&'a crate::PaymentMethod> for check::PaymentMethod<'a> {
                 opaque_uri: opaque_uri.as_deref(),
                 expires_at: *expires_at,
             },
-            PaymentMethod::Bolt12(offer) => Self::Bolt12(&offer.offer),
+            PaymentMethod::Bolt12(offer) => Self::Bolt12(
+                &offer.offer,
+                Some(match offer.network {
+                    crate::BitcoinNetwork::Mainnet => Network::Bitcoin,
+                    crate::BitcoinNetwork::Testnet => Network::Testnet,
+                    crate::BitcoinNetwork::Regtest => Network::Regtest,
+                }),
+            ),
         }
     }
 }
@@ -65,6 +72,42 @@ impl<'a> From<&'a crate::PaymentMethod> for check::PaymentMethod<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bolt12_handoff_uses_declared_network_and_clock() {
+        use crate::{profile::Bolt12Offer, BitcoinNetwork};
+        use bech32::ToBase32;
+        use bitcoin::blockdata::constants::ChainHash;
+        let key = hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap();
+        for (declared, network, hrp) in [
+            (BitcoinNetwork::Mainnet, Network::Bitcoin, "lno"),
+            (BitcoinNetwork::Testnet, Network::Testnet, "lnot"),
+            (BitcoinNetwork::Regtest, Network::Regtest, "lnob"),
+        ] {
+            let chain = ChainHash::using_genesis_block(network);
+            let raw = [&[2, 32][..], chain.as_bytes(), &[14, 1, 101, 22, 33], &key].concat();
+            let offer = bech32::encode(hrp, raw.to_base32(), bech32::Variant::Bech32m).unwrap();
+            let mut method = crate::PaymentMethod::Bolt12(Bolt12Offer {
+                label: "offer".into(),
+                offer,
+                network: declared,
+                minimum_amount_sats: None,
+                expires_at: None,
+                issuer_pubkey: hex::encode(&key),
+            });
+            assert!(validate(&method, 1, 100).is_ok());
+            assert!(validate(&method, 1, 101).is_err());
+            if let crate::PaymentMethod::Bolt12(offer) = &mut method {
+                offer.network = if network == Network::Bitcoin {
+                    BitcoinNetwork::Testnet
+                } else {
+                    BitcoinNetwork::Mainnet
+                };
+            }
+            assert!(validate(&method, 1, 100).is_err());
+        }
+    }
 
     /// The public BOLT11 testnet vector must pass through the shared method validator.
     #[test]

@@ -74,7 +74,9 @@ impl ParsedBip321Uri {
                     Bip321Instruction::LightningBolt11 { invoice } => {
                         check::bolt11(invoice, sats, network, now)?
                     }
-                    Bip321Instruction::Bolt12Offer { offer } => check::bolt12(offer)?,
+                    Bip321Instruction::Bolt12Offer { offer } => {
+                        check::bolt12(offer, Some(network), now)?
+                    }
                     Bip321Instruction::SilentPayment { address } => {
                         check::silent(address, network)?
                     }
@@ -245,6 +247,43 @@ fn hex_nibble(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bolt12_handoff_checks_clock_features_and_network() {
+        use bech32::ToBase32;
+        use bitcoin::{blockdata::constants::ChainHash, Network};
+        let key = hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap();
+        for variant in [bech32::Variant::Bech32, bech32::Variant::Bech32m] {
+            for (hrp, fields, expected_error) in [
+                ("lno", vec![14, 1, 101], None),
+                ("lno", vec![14, 1, 100], Some("expired")),
+                ("lno", vec![12, 1, 2], None),
+                ("lno", vec![12, 1, 1], Some("required")),
+                ("lnot", vec![], Some("HRP")),
+                (
+                    "lno",
+                    [&[2, 32][..], ChainHash::BITCOIN.as_bytes()].concat(),
+                    None,
+                ),
+                (
+                    "lno",
+                    [&[2, 32][..], ChainHash::TESTNET3.as_bytes()].concat(),
+                    Some("chain"),
+                ),
+            ] {
+                let raw = [fields, vec![22, 33], key.clone()].concat();
+                let offer = bech32::encode(hrp, raw.to_base32(), variant).unwrap();
+                let parsed = parse_bip321(&format!("bitcoin:?lno={offer}")).unwrap();
+                let result = parsed.validate_handoff(1, Network::Bitcoin, 100);
+                if let Some(message) = expected_error {
+                    assert!(result.unwrap_err().to_string().contains(message), "{offer}");
+                } else {
+                    result.unwrap();
+                }
+            }
+        }
+    }
 
     /// Parsing rejects malformed amounts and addresses; handoff checks every embedded rail.
     #[test]

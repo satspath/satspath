@@ -69,7 +69,7 @@ fn validate_handoff(pointer: &PaymentPointer, sats: u64) -> Result<()> {
         PaymentPointer::Bolt11Invoice { invoice, .. } => check::bolt11_network(invoice)
             .ok_or_else(|| "unrecognized BOLT11 network".to_string())
             .and_then(|network| check::bolt11(invoice, sats, network, now.max(0) as u64)),
-        PaymentPointer::Bolt12Offer { offer } => check::bolt12(offer),
+        PaymentPointer::Bolt12Offer { offer } => check::bolt12(offer, None, now.max(0) as u64),
         PaymentPointer::OnchainAddress {
             network, address, ..
         } => {
@@ -177,6 +177,36 @@ fn sats_to_btc(amount_sats: u64) -> String {
 mod tests {
     use super::*;
     use bech32::ToBase32;
+
+    #[test]
+    fn bolt12_qr_payload_checks_expiry_and_features_without_a_network() {
+        let key = hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap();
+        for hrp in ["lno", "lnot", "lnob", "lnos"] {
+            for (fields, accepted) in [
+                (vec![], true),
+                (vec![14, 0], false),
+                (
+                    [vec![14, 8], u64::MAX.to_be_bytes().to_vec()].concat(),
+                    true,
+                ),
+                (vec![12, 1, 1], false),
+                (vec![12, 1, 2], true),
+            ] {
+                let raw = [fields, vec![22, 33], key.clone()].concat();
+                let offer = bech32::encode(hrp, raw.to_base32(), bech32::Variant::Bech32m).unwrap();
+                let pointer = PaymentPointer::Bolt12Offer {
+                    offer: offer.clone(),
+                };
+                let result = build_qr_payload(&pointer, 1);
+                if accepted {
+                    assert_eq!(result.unwrap(), offer);
+                } else {
+                    assert!(result.is_err(), "{offer}");
+                }
+            }
+        }
+    }
 
     #[test]
     /// Verify that qr payload for bolt11 rejects malformed invoice.

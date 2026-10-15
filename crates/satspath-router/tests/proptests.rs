@@ -540,9 +540,10 @@ proptest! {
             (Ok(q1), Ok(q2)) => {
                 prop_assert_eq!(q1, q2, "select_route_with_fees must return identical RouteQuote for identical inputs");
 
-                // Contract: When amount < 100,000 sats and an available Lightning method exists, Lightning is chosen
+                // Contract: Below 100,000 sats, a valid available Lightning method is chosen.
                 let has_available_ln = req.signed_profile.profile.methods.iter().any(|m| {
-                    satspath_router::lightning::is_lightning_available_for_amount_sync(m, amount_sats)
+                    satspath_core::handoff::validate_method(m, amount_sats).is_ok()
+                        && satspath_router::lightning::is_lightning_available_for_amount_sync(m, amount_sats)
                 });
                 if amount_sats < 100_000 && has_available_ln {
                     prop_assert!(

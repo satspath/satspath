@@ -27,7 +27,7 @@ pub enum PaymentMethod<'a> {
         opaque_uri: Option<&'a str>,
         expires_at: Option<i64>,
     },
-    Bolt12(&'a str),
+    Bolt12(&'a str, Option<Network>),
 }
 
 /// Validate every supplied receiver field before route selection or wallet handoff.
@@ -73,7 +73,7 @@ pub fn validate_method(method: PaymentMethod<'_>, sats: u64, now: i64) -> Result
                 if let Some(network) = bolt11_network(offer) {
                     bolt11(offer, sats, network, now.max(0) as u64)?;
                 } else {
-                    bolt12(offer)?;
+                    bolt12(offer, None, now.max(0) as u64)?;
                 }
             }
             Ok(())
@@ -92,7 +92,7 @@ pub fn validate_method(method: PaymentMethod<'_>, sats: u64, now: i64) -> Result
             expires_at,
             now,
         ),
-        PaymentMethod::Bolt12(offer) => bolt12(offer),
+        PaymentMethod::Bolt12(offer, network) => bolt12(offer, network, now.max(0) as u64),
     }
 }
 
@@ -297,8 +297,9 @@ fn bolt12_path(mut value: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate a BOLT12 offer encoding, ordered TLV stream, and payment destination.
-pub fn bolt12(value: &str) -> Result<(), String> {
+/// Validate a BOLT12 offer's encoding, destination, required features, and expiry.
+/// When supplied, the network must match the HRP and any explicit chain hashes.
+pub fn bolt12(value: &str, network: Option<Network>, now: u64) -> Result<(), String> {
     let trimmed = value.trim();
     if !trimmed.starts_with("lno1")
         && !trimmed.starts_with("lnot1")
@@ -327,6 +328,17 @@ pub fn bolt12(value: &str) -> Result<(), String> {
     if !matches!(hrp.as_str(), "lno" | "lnot" | "lnob" | "lnos") {
         return Err("invalid BOLT12 offer HRP".into());
     }
+    if let Some(network) = network {
+        let expected = match network {
+            Network::Bitcoin => "lno",
+            Network::Testnet | Network::Testnet4 => "lnot",
+            Network::Regtest => "lnob",
+            Network::Signet => "lnos",
+        };
+        if hrp != expected {
+            return Err("BOLT12 offer network HRP mismatch".into());
+        }
+    }
 
     let mut raw = raw_bytes.as_slice();
     let mut last_type = None;
@@ -341,6 +353,41 @@ pub fn bolt12(value: &str) -> Result<(), String> {
             usize::try_from(bolt12_bigsize(&mut raw)?).map_err(|_| "BOLT12 TLV length overflow")?;
         let payload = bolt12_take(&mut raw, length)?;
         match tag {
+            2 => {
+                if payload.is_empty() || !payload.len().is_multiple_of(32) {
+                    return Err("invalid BOLT12 offer chain hashes".into());
+                }
+                if let Some(network) = network {
+                    let chain =
+                        bitcoin::blockdata::constants::ChainHash::using_genesis_block(network);
+                    if !payload
+                        .as_chunks::<32>()
+                        .0
+                        .iter()
+                        .any(|hash| hash == chain.as_bytes())
+                    {
+                        return Err("BOLT12 offer chain network mismatch".into());
+                    }
+                }
+            }
+            12 => {
+                // No required offer features are supported. Even bits are required;
+                // unknown odd bits are optional and can be ignored.
+                if payload.iter().any(|byte| byte & 0x55 != 0) {
+                    return Err("unknown required BOLT12 offer feature".into());
+                }
+            }
+            14 => {
+                // BOLT truncated u64: at most eight big-endian bytes, no leading zero.
+                if payload.len() > 8 || payload.first() == Some(&0) {
+                    return Err("invalid BOLT12 offer absolute expiry".into());
+                }
+                let mut bytes = [0u8; 8];
+                bytes[8 - payload.len()..].copy_from_slice(payload);
+                if u64::from_be_bytes(bytes) <= now {
+                    return Err("BOLT12 offer expired".into());
+                }
+            }
             16 => {
                 bolt12_path(payload)?;
                 has_destination = true;
@@ -349,7 +396,7 @@ pub fn bolt12(value: &str) -> Result<(), String> {
                 public_key(payload)?;
                 has_destination = true;
             }
-            2 | 4 | 6 | 8 | 10 | 12 | 14 | 18 | 20 => {}
+            4 | 6 | 8 | 10 | 18 | 20 => {}
             _ if tag.is_multiple_of(2) => {
                 return Err(format!("unknown even BOLT12 TLV type: {tag}"))
             }
@@ -388,6 +435,149 @@ mod tests {
     use super::*;
     use bech32::ToBase32;
 
+    fn offer_with_fields(hrp: &str, fields: &[u8]) -> String {
+        let key = hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap();
+        let raw = [fields, &[22, 33], &key].concat();
+        bitcoin::bech32::encode::<bitcoin::bech32::primitives::NoChecksum>(
+            bitcoin::bech32::Hrp::parse(hrp).unwrap(),
+            &raw,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bolt12_expiry_is_canonical_and_strictly_in_the_future() {
+        for (expiry, accepted) in [
+            (vec![], false), // Empty tu64 is zero.
+            (vec![99], false),
+            (vec![100], false),
+            (vec![101], true),
+            (vec![1, 0], true),
+            (u64::MAX.to_be_bytes().to_vec(), true),
+            (vec![0, 101], false), // Non-minimal tu64.
+            (vec![1; 9], false),
+        ] {
+            let fields = [vec![14, expiry.len() as u8], expiry].concat();
+            let offer = offer_with_fields("lno", &fields);
+            assert_eq!(bolt12(&offer, None, 100).is_ok(), accepted, "{fields:?}");
+        }
+        assert!(bolt12(&offer_with_fields("lno", &[]), None, u64::MAX).is_ok());
+        assert!(bolt12(&offer_with_fields("lno", &[14, 0]), None, 0).is_err());
+    }
+
+    #[test]
+    fn bolt12_rejects_required_features_and_ignores_optional_features() {
+        assert!(bolt12(&offer_with_fields("lno", &[12, 0]), None, 100).is_ok());
+        for bit in 0..24 {
+            let mut fields = vec![12, 3, 0, 0, 0];
+            fields[4 - bit / 8] = 1 << (bit % 8);
+            let offer = offer_with_fields("lno", &fields);
+            assert_eq!(bolt12(&offer, None, 100).is_ok(), bit % 2 == 1, "bit {bit}");
+        }
+        assert!(bolt12(&offer_with_fields("lno", &[12, 1, 3]), None, 100).is_err());
+    }
+
+    #[test]
+    fn bolt12_network_checks_hrp_and_explicit_chain_membership() {
+        use bitcoin::blockdata::constants::ChainHash;
+        let networks = [
+            (Network::Bitcoin, "lno"),
+            (Network::Testnet, "lnot"),
+            (Network::Testnet4, "lnot"),
+            (Network::Regtest, "lnob"),
+            (Network::Signet, "lnos"),
+        ];
+        for (network, hrp) in networks {
+            let chain = ChainHash::using_genesis_block(network);
+            let fields = [&[2, 32][..], chain.as_bytes()].concat();
+            let offer = offer_with_fields(hrp, &fields);
+            assert!(bolt12(&offer, None, 100).is_ok());
+            assert!(bolt12(&offer_with_fields(hrp, &[]), None, 100).is_ok());
+            for (selected, _) in networks {
+                assert_eq!(
+                    bolt12(&offer, Some(selected), 100).is_ok(),
+                    network == selected,
+                    "{network:?} offer on {selected:?}"
+                );
+            }
+            let wrong_hrp = if hrp == "lno" { "lnot" } else { "lno" };
+            assert!(bolt12(&offer_with_fields(wrong_hrp, &fields), Some(network), 100).is_err());
+        }
+
+        let chains = [
+            &[2, 64][..],
+            ChainHash::BITCOIN.as_bytes(),
+            ChainHash::TESTNET3.as_bytes(),
+        ]
+        .concat();
+        assert!(bolt12(
+            &offer_with_fields("lnot", &chains),
+            Some(Network::Testnet),
+            100
+        )
+        .is_ok());
+        assert!(bolt12(
+            &offer_with_fields("lnob", &chains),
+            Some(Network::Regtest),
+            100
+        )
+        .is_err());
+        let mut reversed = ChainHash::BITCOIN.as_bytes().to_vec();
+        reversed.reverse();
+        let fields = [&[2, 32][..], &reversed].concat();
+        assert!(bolt12(
+            &offer_with_fields("lno", &fields),
+            Some(Network::Bitcoin),
+            100
+        )
+        .is_err());
+
+        for length in [0, 1, 31, 33, 63, 65] {
+            let fields = [vec![2, length], vec![1; length as usize]].concat();
+            let offer = offer_with_fields("lno", &fields);
+            assert!(bolt12(&offer, None, 100).is_err(), "length {length}");
+            assert!(bolt12(&offer, Some(Network::Bitcoin), 100).is_err());
+        }
+    }
+
+    #[test]
+    fn bolt12_method_validation_passes_clock_and_optional_network() {
+        let offer = offer_with_fields("lno", &[14, 1, 101]);
+        for now in [100, 101, 102] {
+            assert_eq!(
+                validate_method(
+                    PaymentMethod::Bolt12(&offer, Some(Network::Bitcoin)),
+                    1,
+                    now
+                )
+                .is_ok(),
+                now < 101
+            );
+            assert_eq!(
+                validate_method(
+                    PaymentMethod::Lightning {
+                        lightning_address: Some("alice@example.com"),
+                        lnurl: None,
+                        bolt12: Some(&offer),
+                        receiver_pubkey: None,
+                    },
+                    1,
+                    now
+                )
+                .is_ok(),
+                now < 101
+            );
+        }
+        assert!(validate_method(
+            PaymentMethod::Bolt12(&offer, Some(Network::Testnet)),
+            1,
+            100
+        )
+        .is_err());
+        assert!(validate_method(PaymentMethod::Bolt12(&offer, None), 1, 100).is_ok());
+    }
+
     #[test]
     fn bolt12_requires_an_ordered_tlv_destination() {
         let key = hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
@@ -401,8 +591,8 @@ mod tests {
             &node_record,
         )
         .unwrap();
-        assert!(bolt12(&encode(&node_record)).is_ok());
-        assert!(bolt12(&checksumless).is_ok());
+        assert!(bolt12(&encode(&node_record), None, 0).is_ok());
+        assert!(bolt12(&checksumless, None, 0).is_ok());
 
         let mut path = [
             key.as_slice(),
@@ -414,7 +604,7 @@ mod tests {
         .concat();
         let mut path_record = vec![16, path.len() as u8];
         path_record.append(&mut path);
-        assert!(bolt12(&encode(&path_record)).is_ok());
+        assert!(bolt12(&encode(&path_record), None, 0).is_ok());
 
         let mut duplicate = node_record.clone();
         duplicate.extend_from_slice(&node_record);
@@ -436,7 +626,7 @@ mod tests {
             encode(&[0xfd, 0, 22, 0]),
         ] {
             assert!(
-                bolt12(&invalid).is_err(),
+                bolt12(&invalid, None, 0).is_err(),
                 "accepted malformed offer: {invalid}"
             );
         }
@@ -447,7 +637,12 @@ mod tests {
         // LDK's parses_bech32_encoded_offers vector: a public-key introduction
         // followed by sciddir 1x2x3, direction 1.
         // https://github.com/lightningdevkit/rust-lightning/blob/e3439aa835be3193e2ab39699c4a3c24cc84164b/lightning/src/offers/offer.rs#L2463
-        assert!(bolt12(include_str!("../tests/data/ldk-offer-two-paths.txt")).is_ok());
+        assert!(bolt12(
+            include_str!("../tests/data/ldk-offer-two-paths.txt"),
+            None,
+            0
+        )
+        .is_ok());
     }
 
     #[test]
@@ -457,7 +652,7 @@ mod tests {
         for (tag, accepted) in [(23, true), (24, false)] {
             let raw = [vec![22, 33], key.clone(), vec![tag, 0]].concat();
             let offer = bech32::encode("lno", raw.to_base32(), bech32::Variant::Bech32m).unwrap();
-            assert_eq!(bolt12(&offer).is_ok(), accepted);
+            assert_eq!(bolt12(&offer, None, 0).is_ok(), accepted);
         }
     }
 
@@ -556,7 +751,7 @@ mod tests {
             100
         )
         .is_err());
-        assert!(bolt12("lno1malformed").is_err());
+        assert!(bolt12("lno1malformed", None, 0).is_err());
         assert!(bolt11("lnbc1malformed", 1000, Network::Bitcoin, 100).is_err());
     }
 }
