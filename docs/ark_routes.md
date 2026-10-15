@@ -33,7 +33,10 @@ fails closed for execution.
 ## Current Status
 
 - Ark route planning and scoring are implemented.
-- Live Ark ASP client connector (`LiveArkAspClient`) queries real ASP public keys, round intervals, dust limits, and fee schedules (`/v1/info`).
+- Live Ark ASP client connector (`LiveArkAspClient`) queries ASP public keys, round intervals, dust limits, and fee schedules (`/v1/info`).
 - VTXO covenant tree DAG verification (`verify_ark_vtxo_dag`) and non-custodial host-wallet settlement handoff structures (`ArkBoardingHandoff`, `ArkForfeitHandoff`, `ArkOorPaymentRequest`) are implemented in `crates/satspath-router/src/ark.rs`.
 - Ownership proof verification exists.
-- Mainnet execution by SatsPath is disabled; all signing and settlement execution is delegated to compatible host wallets (e.g. Arkade Money).
+- The client requires an intended `ArkNetwork`, rejects ASP network mismatches, and rejects mainnet (`bitcoin` / `mainnet`) unless the caller explicitly opts in with `with_mainnet_execution(true)`. Boarding addresses and BIP-21 amounts are checked against the handoff and ASP network.
+- All signing and transaction construction belong to the host wallet. Submission requires a wallet-prepared transaction and checkpoints (`/v1/tx/submit`) or BIP-322 intent proof and message (`/v1/batch/registerIntent`); handoff metadata is not an arkd request. Signed response data is returned to the wallet for subsequent protocol steps.
+- Submission wire types are pinned to [arkd v0.9.16](https://github.com/arkade-os/arkd/tree/e2d9ed443df7a0dfb3aa1e5c824de9541ff71047/api-spec/protobuf/ark/v1). The `ArkAspInfo` discovery model expects the SatsPath fee schedule; incompatible `/v1/info` schemas fail explicitly. Containerized arkd interoperability has not been verified, so Ark remains Preview.
+- DAG verification checks structure, receiver ownership metadata, and amounts; it does not verify transaction hashes or cosigning scripts.

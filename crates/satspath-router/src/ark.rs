@@ -5,6 +5,10 @@
 //! (Boarding, In-Round Forfeit, and Out-of-Round / Arkade OOR transfers) for live `arkd` ASPs.
 
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
+
+use bitcoin::{Address, Amount, Denomination, Network};
+use satspath_core::bip321::parse_bip321;
 
 use anyhow::{anyhow, Context, Result};
 use satspath_core::validation::{assert_no_private_material, validate_compressed_pubkey};
@@ -93,16 +97,12 @@ pub fn first_ark_method(methods: &[PaymentMethod]) -> Option<&PaymentMethod> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ArkFeeSchedule {
     /// Fixed base fee per VTXO transfer in satoshis.
-    #[serde(default)]
     pub base_fee_sats: u64,
     /// Proportional fee rate in parts-per-million (ppm).
-    #[serde(default)]
     pub ppm_rate: u64,
     /// Fixed fee in satoshis for onboarding an on-chain UTXO into the Ark.
-    #[serde(default)]
     pub onboard_fee_sats: u64,
     /// Fixed fee in satoshis for collaborative redemption (offboarding) to on-chain.
-    #[serde(default)]
     pub offboard_fee_sats: u64,
 }
 
@@ -125,7 +125,6 @@ pub struct ArkAspInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boarding_descriptor_template: Option<String>,
     /// ASP fee parameters.
-    #[serde(default)]
     pub fees: ArkFeeSchedule,
 }
 
@@ -189,27 +188,34 @@ pub struct ArkVtxoTreeNode {
     pub children: Vec<String>,
 }
 
-/// Cryptographically and structurally verify an Ark VTXO covenant tree DAG from `root_txid`
+/// Structurally verify an Ark VTXO covenant tree DAG from `root_txid`
 /// down to `target_vtxo_txid`.
 ///
 /// Enforces:
 /// - Acyclic parent-child linkage from `root_txid` to `target_vtxo_txid`.
 /// - Every node in the tree commits to `expected_asp_pubkey`.
 /// - Value conservation at every internal branch (`sum(children.amount_sats) <= parent.amount_sats`).
-/// - The target leaf VTXO has `amount_sats >= expected_amount_sats` and non-zero `expiry_sequence`.
+/// - The target is a leaf belonging to `expected_receiver_pubkey`, with
+///   `amount_sats >= expected_amount_sats` and non-zero `expiry_sequence`.
+///
+/// Transaction IDs and cosigning scripts are not cryptographically verified.
 ///
 /// # Errors
 /// Returns an error if the DAG is cyclic, disconnected, violates value conservation,
-/// mismatches the ASP public key, or under-funds the target VTXO.
+/// mismatches the ASP or receiver public key, selects a non-leaf target, or under-funds the target VTXO.
 pub fn verify_ark_vtxo_dag(
     nodes: &[ArkVtxoTreeNode],
     root_txid: &str,
     expected_asp_pubkey: &str,
+    expected_receiver_pubkey: &str,
     target_vtxo_txid: &str,
     expected_amount_sats: u64,
 ) -> Result<()> {
     validate_compressed_pubkey(expected_asp_pubkey)
         .map_err(|e| anyhow!("invalid expected ASP pubkey: {e}"))?;
+
+    validate_compressed_pubkey(expected_receiver_pubkey)
+        .map_err(|e| anyhow!("invalid expected receiver pubkey: {e}"))?;
 
     let mut map: HashMap<&str, &ArkVtxoTreeNode> = HashMap::with_capacity(nodes.len());
     for node in nodes {
@@ -245,6 +251,16 @@ pub fn verify_ark_vtxo_dag(
     let target = map
         .get(target_vtxo_txid)
         .ok_or_else(|| anyhow!("target VTXO node {target_vtxo_txid} not found in DAG"))?;
+    if !target.children.is_empty() {
+        anyhow::bail!("target VTXO must be a leaf");
+    }
+    if !target
+        .receiver_pubkey
+        .as_deref()
+        .is_some_and(|key| key.eq_ignore_ascii_case(expected_receiver_pubkey))
+    {
+        anyhow::bail!("target VTXO receiver pubkey mismatch");
+    }
     if target.amount_sats < expected_amount_sats {
         anyhow::bail!(
             "target VTXO amount {} sats is less than expected {} sats",
@@ -398,6 +414,7 @@ impl ArkSettlementHandoff {
     /// the ASP public key mismatches, or any field contains private key material.
     pub fn validate(&self, asp_info: &ArkAspInfo) -> Result<()> {
         asp_info.validate()?;
+        let asp_network = ArkNetwork::from_asp_name(&asp_info.network)?.bitcoin_network();
         let serialized = serde_json::to_string(self)?;
         assert_no_private_material(&serialized).map_err(|e| anyhow!("{e}"))?;
 
@@ -415,8 +432,48 @@ impl ArkSettlementHandoff {
                         asp_info.dust_limit_sats
                     );
                 }
-                if !b.bip21_uri.starts_with("bitcoin:") {
-                    anyhow::bail!("boarding handoff bip21_uri must start with 'bitcoin:'");
+                let address = Address::from_str(&b.boarding_address)
+                    .context("invalid boarding address")?
+                    .require_network(asp_network)
+                    .context("boarding address network mismatch")?;
+                let uri = parse_bip321(&b.bip21_uri)?;
+                let uri_address = Address::from_str(
+                    uri.address
+                        .as_deref()
+                        .context("boarding BIP-21 address missing")?,
+                )?
+                .require_network(asp_network)
+                .context("boarding BIP-21 address network mismatch")?;
+                if uri_address != address {
+                    anyhow::bail!("boarding BIP-21 address mismatch");
+                }
+                // The shared URI parser retains only the last amount. Reject duplicate
+                // amounts here so wallets cannot interpret a different payment value.
+                let amount_count = b.bip21_uri.split_once('?').map_or(0, |(_, query)| {
+                    query
+                        .split('&')
+                        .filter(|pair| {
+                            pair.split('=')
+                                .next()
+                                .is_some_and(|key| key.eq_ignore_ascii_case("amount"))
+                        })
+                        .count()
+                });
+                if amount_count != 1 {
+                    anyhow::bail!("boarding BIP-21 must contain exactly one amount");
+                }
+                let amount = Amount::from_str_in(
+                    uri.amount_btc
+                        .as_deref()
+                        .context("boarding BIP-21 amount missing")?,
+                    Denomination::Bitcoin,
+                )
+                .context("invalid boarding BIP-21 amount")?;
+                if amount.to_sat() != b.amount_sats {
+                    anyhow::bail!("boarding BIP-21 amount mismatch");
+                }
+                if b.exit_delay != asp_info.unilateral_exit_delay {
+                    anyhow::bail!("boarding exit delay mismatch");
                 }
             }
             Self::InRoundForfeit(f) => {
@@ -469,10 +526,173 @@ pub struct ArkRoundSubmissionReceipt {
     pub vtxo_txid: Option<String>,
 }
 
+impl ArkRoundSubmissionReceipt {
+    /// Reject incomplete or malformed submission acknowledgements.
+    pub fn validate(&self) -> Result<()> {
+        if self.submission_id.trim().is_empty() {
+            anyhow::bail!("Ark submission ID cannot be empty");
+        }
+        if !matches!(
+            self.status.as_str(),
+            "registered" | "cosigned" | "broadcast"
+        ) {
+            anyhow::bail!("unsupported Ark submission status");
+        }
+        if let Some(txid) = &self.vtxo_txid {
+            if txid.len() != 64 || hex::decode(txid).is_err() {
+                anyhow::bail!("invalid Ark submission VTXO txid");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Intended Ark chain. Mutinynet remains distinct from public signet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArkNetwork {
+    Bitcoin,
+    Testnet,
+    Signet,
+    Regtest,
+    Mutinynet,
+}
+
+impl ArkNetwork {
+    fn from_asp_name(name: &str) -> Result<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "bitcoin" | "mainnet" => Ok(Self::Bitcoin),
+            "testnet" => Ok(Self::Testnet),
+            "signet" => Ok(Self::Signet),
+            "regtest" => Ok(Self::Regtest),
+            "mutinynet" => Ok(Self::Mutinynet),
+            _ => anyhow::bail!("unsupported ASP network: {name}"),
+        }
+    }
+
+    fn bitcoin_network(self) -> Network {
+        match self {
+            Self::Bitcoin => Network::Bitcoin,
+            Self::Testnet => Network::Testnet,
+            Self::Signet | Self::Mutinynet => Network::Signet,
+            Self::Regtest => Network::Regtest,
+        }
+    }
+}
+
+// Wire contract pinned to arkade-os/arkd v0.9.16 (e2d9ed443df7a0dfb3aa1e5c824de9541ff71047),
+// api-spec/protobuf/ark/v1/{service,types}.proto. Payloads are prepared by the host wallet.
+/// Request for POST /v1/tx/submit. SatsPath never constructs or signs these transactions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArkSubmitTxRequest {
+    pub signed_ark_tx: String,
+    pub checkpoint_txs: Vec<String>,
+}
+
+/// Cosigned transaction data that must be returned to the host wallet for finalization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArkSubmitTxResponse {
+    pub ark_txid: String,
+    pub final_ark_tx: String,
+    pub signed_checkpoint_txs: Vec<String>,
+}
+
+/// Host-wallet BIP-322 intent proof and its message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArkIntent {
+    pub proof: String,
+    pub message: String,
+}
+
+/// Request for POST /v1/batch/registerIntent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArkRegisterIntentRequest {
+    pub intent: ArkIntent,
+}
+
+/// Intent registration acknowledgement from arkd.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArkRegisterIntentResponse {
+    pub intent_id: String,
+}
+
+/// Endpoint-specific data supplied by the host wallet in addition to routing metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArkSettlementSubmission {
+    Transaction(ArkSubmitTxRequest),
+    Intent(ArkRegisterIntentRequest),
+}
+
+/// Endpoint-specific response, preserving signed data required by the host wallet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArkSettlementSubmissionResponse {
+    Transaction(ArkSubmitTxResponse),
+    Intent(ArkRegisterIntentResponse),
+}
+
+impl ArkSettlementSubmissionResponse {
+    /// Build a validated routing receipt without discarding the wallet response.
+    pub fn receipt(&self) -> Result<ArkRoundSubmissionReceipt> {
+        let receipt = match self {
+            Self::Transaction(tx) => {
+                if tx.final_ark_tx.trim().is_empty()
+                    || tx.signed_checkpoint_txs.is_empty()
+                    || tx
+                        .signed_checkpoint_txs
+                        .iter()
+                        .any(|tx| tx.trim().is_empty())
+                {
+                    anyhow::bail!("incomplete Ark transaction submission response");
+                }
+                ArkRoundSubmissionReceipt {
+                    submission_id: tx.ark_txid.clone(),
+                    status: "cosigned".to_string(),
+                    vtxo_txid: Some(tx.ark_txid.clone()),
+                }
+            }
+            Self::Intent(intent) => ArkRoundSubmissionReceipt {
+                submission_id: intent.intent_id.clone(),
+                status: "registered".to_string(),
+                vtxo_txid: None,
+            },
+        };
+        receipt.validate()?;
+        Ok(receipt)
+    }
+}
+
+#[cfg(feature = "std")]
+fn normalized_server_url(server_url: &str) -> Result<url::Url> {
+    let mut url = url::Url::parse(server_url).context("invalid Ark server URL")?;
+    if !matches!(url.scheme(), "https" | "http")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        anyhow::bail!("invalid Ark server base URL");
+    }
+    let path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&path);
+    Ok(url)
+}
+
 /// Live Ark Service Provider HTTP connector (`arkd` REST client).
+///
+/// The local HTTP bypass is unavailable in production builds:
+/// ```compile_fail
+/// use satspath_router::ark::{ArkNetwork, LiveArkAspClient};
+/// let client = LiveArkAspClient::new_for_test("http://127.0.0.1:7070", ArkNetwork::Regtest);
+/// ```
 #[derive(Debug, Clone)]
 pub struct LiveArkAspClient {
     server_url: String,
+    expected_network: ArkNetwork,
+    mainnet_execution_enabled: bool,
+    #[cfg(test)]
     allow_http_for_test: bool,
 }
 
@@ -496,19 +716,41 @@ async fn read_bounded_bytes(mut resp: reqwest::Response, max_bytes: usize) -> Re
 
 impl LiveArkAspClient {
     /// Construct a new live Ark ASP client for `server_url` (HTTPS required).
-    pub fn new(server_url: impl Into<String>) -> Self {
+    pub fn new(server_url: impl Into<String>, expected_network: ArkNetwork) -> Self {
         Self {
             server_url: server_url.into().trim_end_matches('/').to_string(),
+            expected_network,
+            mainnet_execution_enabled: false,
+            #[cfg(test)]
             allow_http_for_test: false,
         }
     }
 
     /// Construct a live Ark ASP client allowing HTTP for local/containerized `arkd` integration tests.
-    pub fn new_for_test(server_url: impl Into<String>) -> Self {
+    #[cfg(test)]
+    fn new_for_test(server_url: impl Into<String>, expected_network: ArkNetwork) -> Self {
         Self {
-            server_url: server_url.into().trim_end_matches('/').to_string(),
             allow_http_for_test: true,
+            ..Self::new(server_url, expected_network)
         }
+    }
+
+    /// Explicitly opt in to forwarding host-wallet submissions on mainnet.
+    /// Disabled by default; this does not authorize SatsPath to sign or construct transactions.
+    pub fn with_mainnet_execution(mut self, enabled: bool) -> Self {
+        self.mainnet_execution_enabled = enabled;
+        self
+    }
+
+    fn validate_network(&self, info: &ArkAspInfo) -> Result<()> {
+        let network = ArkNetwork::from_asp_name(&info.network)?;
+        if network != self.expected_network {
+            anyhow::bail!("Ark ASP network does not match intended router network");
+        }
+        if network == ArkNetwork::Bitcoin && !self.mainnet_execution_enabled {
+            anyhow::bail!("Ark mainnet execution requires explicit opt-in");
+        }
+        Ok(())
     }
 
     /// Return the configured ASP base URL.
@@ -518,15 +760,15 @@ impl LiveArkAspClient {
 
     /// Validate an endpoint URL before issuing a request.
     fn validate_endpoint(&self, url: &str) -> Result<()> {
+        #[cfg(test)]
         if self.allow_http_for_test {
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 anyhow::bail!("unsupported scheme in ASP URL: {url}");
             }
-            Ok(())
-        } else {
-            satspath_core::ssrf::validate_url(url, false)
-                .map_err(|e| anyhow!("blocked Ark ASP URL: {e}"))
+            return Ok(());
         }
+        satspath_core::ssrf::validate_url(url, false)
+            .map_err(|e| anyhow!("blocked Ark ASP URL: {e}"))
     }
 
     /// Query `GET {server_url}/v1/info` on the live Ark ASP node and validate the returned parameters.
@@ -550,6 +792,7 @@ impl LiveArkAspClient {
         let body = read_bounded_bytes(resp, 64 * 1024).await?;
         let info: ArkAspInfo = serde_json::from_slice(&body).context("decoding ArkAspInfo JSON")?;
         info.validate()?;
+        self.validate_network(&info)?;
         Ok(info)
     }
 
@@ -582,20 +825,50 @@ impl LiveArkAspClient {
         Ok((info, handoff))
     }
 
-    /// Submit a validated [`ArkSettlementHandoff`] to the ASP (`/v1/round/register` or `/v1/oor/submit`).
+    /// Forward host-wallet payloads to the pinned arkd v1 submission API.
+    /// Handoff metadata alone cannot form a valid transaction or BIP-322 intent proof.
     #[cfg(feature = "std")]
     pub async fn submit_settlement_handoff(
         &self,
         asp_info: &ArkAspInfo,
         handoff: &ArkSettlementHandoff,
-    ) -> Result<ArkRoundSubmissionReceipt> {
+        submission: &ArkSettlementSubmission,
+    ) -> Result<ArkSettlementSubmissionResponse> {
+        self.validate_network(asp_info)?;
         handoff.validate(asp_info)?;
-        let path = match handoff {
-            ArkSettlementHandoff::OutOfRound(_) => "/v1/oor/submit",
-            ArkSettlementHandoff::InRoundForfeit(_) | ArkSettlementHandoff::Boarding(_) => {
-                "/v1/round/register"
-            }
+        let handoff_server = match handoff {
+            ArkSettlementHandoff::Boarding(b) => &b.server_url,
+            ArkSettlementHandoff::InRoundForfeit(f) => &f.server_url,
+            ArkSettlementHandoff::OutOfRound(oor) => &oor.server_url,
         };
+        if normalized_server_url(handoff_server)? != normalized_server_url(&self.server_url)? {
+            anyhow::bail!("handoff ASP server does not match configured client ASP");
+        }
+        let (path, payload) = match (handoff, submission) {
+            (ArkSettlementHandoff::OutOfRound(_), ArkSettlementSubmission::Transaction(tx)) => {
+                if tx.signed_ark_tx.trim().is_empty()
+                    || tx.checkpoint_txs.is_empty()
+                    || tx.checkpoint_txs.iter().any(|tx| tx.trim().is_empty())
+                {
+                    anyhow::bail!("wallet-prepared Ark transaction and checkpoints are required");
+                }
+                ("/v1/tx/submit", serde_json::to_value(tx)?)
+            }
+            (
+                ArkSettlementHandoff::Boarding(_) | ArkSettlementHandoff::InRoundForfeit(_),
+                ArkSettlementSubmission::Intent(request),
+            ) => {
+                if request.intent.proof.trim().is_empty()
+                    || request.intent.message.trim().is_empty()
+                {
+                    anyhow::bail!("wallet-prepared Ark intent proof and message are required");
+                }
+                ("/v1/batch/registerIntent", serde_json::to_value(request)?)
+            }
+            _ => anyhow::bail!("Ark submission payload does not match settlement mode"),
+        };
+        assert_no_private_material(&serde_json::to_string(&payload)?)
+            .map_err(|e| anyhow!("{e}"))?;
         let url = format!("{}{path}", self.server_url);
         self.validate_endpoint(&url)?;
 
@@ -605,16 +878,28 @@ impl LiveArkAspClient {
             .build()?;
         let resp = client
             .post(&url)
-            .json(handoff)
+            .json(&payload)
             .send()
             .await
-            .context("submitting Ark settlement handoff to ASP")?;
+            .context("submitting Ark settlement to ASP")?;
         if !resp.status().is_success() {
             anyhow::bail!("Ark ASP submission returned HTTP {}", resp.status());
         }
         let body = read_bounded_bytes(resp, 64 * 1024).await?;
-        let receipt: ArkRoundSubmissionReceipt =
-            serde_json::from_slice(&body).context("decoding ArkRoundSubmissionReceipt JSON")?;
-        Ok(receipt)
+        let response = match submission {
+            ArkSettlementSubmission::Transaction(_) => {
+                ArkSettlementSubmissionResponse::Transaction(
+                    serde_json::from_slice(&body).context("decoding arkd SubmitTxResponse")?,
+                )
+            }
+            ArkSettlementSubmission::Intent(_) => ArkSettlementSubmissionResponse::Intent(
+                serde_json::from_slice(&body).context("decoding arkd RegisterIntentResponse")?,
+            ),
+        };
+        response.receipt()?;
+        Ok(response)
     }
 }
+
+#[cfg(test)]
+mod tests;
