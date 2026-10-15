@@ -308,7 +308,7 @@ pub async fn quote(recipient: &str, amount_sats: u64) -> Result<QuoteResponse, S
     let signed_json = chain_resolver.resolve_alias(recipient).await?;
 
     // Parse the JSON string to get the profile
-    let signed: SignedPaymentProfile =
+    let mut signed: SignedPaymentProfile =
         serde_json::from_str(&signed_json).map_err(|e| e.to_string())?;
 
     // 2. Verify signature
@@ -331,7 +331,26 @@ pub async fn quote(recipient: &str, amount_sats: u64) -> Result<QuoteResponse, S
         }
     }
 
-    // 4. Route selection
+    // 4. Filter to methods that can produce a validated payable QR before routing.
+    let mut last_payload_err = None;
+    signed
+        .profile
+        .methods
+        .retain(|method| match build_qr_payload(method, amount_sats) {
+            Ok(_) => true,
+            Err(reason) => {
+                last_payload_err = Some(reason);
+                false
+            }
+        });
+    if signed.profile.methods.is_empty() {
+        return Ok(QuoteResponse::NoRoute {
+            reason: last_payload_err
+                .unwrap_or_else(|| "No usable rail found in profile.".to_string()),
+        });
+    }
+
+    // 5. Route selection
     let route_req = RouteRequest {
         alias: recipient.to_string(),
         amount_sats: amount_sats,

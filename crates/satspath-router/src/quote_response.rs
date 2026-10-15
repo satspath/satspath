@@ -277,7 +277,7 @@ where
 }
 
 async fn route_verified_signed(
-    signed: satspath_core::SignedPaymentProfile,
+    mut signed: satspath_core::SignedPaymentProfile,
     recipient: &str,
     recipient_hash: &str,
     amount_sats: u64,
@@ -289,6 +289,29 @@ async fn route_verified_signed(
     if check_profile_expiry(&signed.profile).is_err() {
         return QuoteResponse::NoRoute {
             reason: "Profile expired.".into(),
+        };
+    }
+
+    // Filter to methods that can produce a validated payable QR before routing,
+    // so an unpayable preferred rail (e.g. static Lightning pointer) does not
+    // shadow a valid on-chain handoff.
+    let mut last_payload_err = None;
+    signed
+        .profile
+        .methods
+        .retain(|method| match build_qr_payload(method, amount_sats) {
+            Ok(_) => true,
+            Err(e) => {
+                last_payload_err = Some(e);
+                false
+            }
+        });
+    if signed.profile.methods.is_empty() {
+        return QuoteResponse::NoRoute {
+            reason: match last_payload_err {
+                Some(e) => format!("could not build payment payload: {e}"),
+                None => "No usable rail found in profile.".into(),
+            },
         };
     }
 
@@ -495,6 +518,35 @@ mod tests {
         let resp = quote_inner(&resolver, "rodrigo@satspath.dev", 1000, Some(cheap_fees())).await;
 
         assert!(matches!(resp, QuoteResponse::NoRoute { .. }));
+    }
+
+    #[tokio::test]
+    async fn lightning_plus_onchain_profile_routes_to_onchain_qr() {
+        let (profile, secret) = base_profile(
+            "rodrigo@satspath.dev",
+            vec![
+                lightning_method("rodrigo@getalby.com"),
+                onchain_method("1BoatSLRHtKNngkdXEeobR76b53LETtpyT"),
+            ],
+        );
+        let resolver = MockResolver {
+            signed: Some(sign(profile, &secret)),
+        };
+        let resp = quote_inner(&resolver, "rodrigo@satspath.dev", 1000, Some(cheap_fees())).await;
+        match resp {
+            QuoteResponse::Ok {
+                selected_method,
+                qr,
+                ..
+            } => {
+                assert!(matches!(selected_method, PaymentMethod::Onchain { .. }));
+                assert_eq!(
+                    qr,
+                    "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00001000"
+                );
+            }
+            other => panic!("expected Ok with on-chain QR, got {}", other.status()),
+        }
     }
 
     // 8–9: unknown user → not_registered with invite fields.

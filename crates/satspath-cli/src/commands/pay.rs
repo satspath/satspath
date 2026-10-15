@@ -103,10 +103,27 @@ pub async fn cmd_pay(
     println!("  Signature valid.");
 
     println!("Selecting public payment route...");
+    let mut routable = signed.clone();
+    let mut last_payload_err = None;
+    routable.profile.methods.retain(|method| {
+        match satspath_router::build_qr_payload(method, amount_sats) {
+            Ok(_) => true,
+            Err(e) => {
+                last_payload_err = Some(e);
+                false
+            }
+        }
+    });
+    if routable.profile.methods.is_empty() {
+        if let Some(err) = last_payload_err {
+            return Err(anyhow::anyhow!("{}", err));
+        }
+        anyhow::bail!("No usable rail found in profile.");
+    }
     let req = RouteRequest {
         alias: alias.to_string(),
         amount_sats,
-        signed_profile: signed.clone(),
+        signed_profile: routable,
         urgency: satspath_router::urgency::PaymentUrgency::Normal,
         max_fee_sats: None,
         max_fee_percent: None,
