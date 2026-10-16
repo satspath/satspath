@@ -399,12 +399,8 @@ impl DnsTxtResolver for DohTxtResolver {
     /// restrictions return `ValidationError`; DNS, transport, JSON parsing, and
     /// response bodies over 64 KiB return `NetworkError`.
     async fn query_txt(&self, fqdn: &str) -> Result<Vec<DnsTxtRecord>> {
-        let client = crate::ssrf::build_pinned_http_client(
-            &self.endpoint,
-            std::time::Duration::from_secs(10),
-            false,
-        )
-        .await?;
+        crate::ssrf::validate_url(&self.endpoint, false)?;
+        let client = crate::outbound::http_client(std::time::Duration::from_secs(10));
         let resp = client
             .get(&self.endpoint)
             .query(&[("name", fqdn), ("type", "TXT")])
@@ -412,8 +408,9 @@ impl DnsTxtResolver for DohTxtResolver {
             .send()
             .await
             .map_err(|e| SatsPathError::NetworkError(e.to_string()))?;
-        let body = crate::ssrf::read_bounded_response(resp, 64 * 1024).await?;
-        let json: serde_json::Value = serde_json::from_slice(&body)
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| SatsPathError::NetworkError(e.to_string()))?;
 
         let mut out = Vec::new();
