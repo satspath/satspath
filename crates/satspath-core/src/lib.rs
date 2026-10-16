@@ -121,10 +121,23 @@ pub use resolvers::{bip353::Bip353Resolver, http::HttpResolver, nostr::NostrReso
 #[cfg(feature = "std")]
 pub fn default_data_dir() -> std::path::PathBuf {
     if let Ok(dir) = std::env::var("SATSPATH_DIR") {
-        return std::path::PathBuf::from(dir);
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return std::path::PathBuf::from(trimmed);
+        }
     }
     if let Ok(home) = std::env::var("HOME") {
-        return std::path::PathBuf::from(home).join(".satspath");
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return std::path::PathBuf::from(trimmed).join(".satspath");
+        }
+    }
+    #[cfg(windows)]
+    if let Ok(userprofile) = std::env::var("USERPROFILE") {
+        let trimmed = userprofile.trim();
+        if !trimmed.is_empty() {
+            return std::path::PathBuf::from(trimmed).join(".satspath");
+        }
     }
     std::path::PathBuf::from(".satspath")
 }

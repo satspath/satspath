@@ -95,6 +95,7 @@ impl HttpResolver {
     }
 
     /// Test-only resolution path for mock servers without production SSRF checks.
+    #[doc(hidden)]
     pub async fn resolve_from_mock_url(&self, url: &str) -> Result<SignedPaymentProfile> {
         let signed = self.fetch_verified_profile(url).await?;
         if signed.profile.revoked {

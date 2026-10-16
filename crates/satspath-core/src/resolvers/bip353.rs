@@ -264,6 +264,12 @@ pub fn verify_dnssec_zone_chain(
             parent_validated_keys = zone_dnskeys;
         } else {
             let parent_zone = &chain[idx - 1].zone_name;
+            if !parent_zone.zone_of(&link.zone_name) {
+                return Err(SatsPathError::NetworkError(format!(
+                    "DNSSEC validation failed: zone `{}` is not a subdomain of parent zone `{}`",
+                    link.zone_name, parent_zone
+                )));
+            }
             if link.parent_ds_records.is_empty() || link.parent_ds_rrsigs.is_empty() {
                 return Err(SatsPathError::DnssecUnavailable);
             }
@@ -325,6 +331,12 @@ pub fn verify_dnssec_zone_chain(
     }
 
     let leaf_zone = &chain.last().expect("chain is non-empty").zone_name;
+    if !leaf_zone.zone_of(txt_owner) {
+        return Err(SatsPathError::NetworkError(format!(
+            "DNSSEC validation failed: TXT owner `{}` is not within leaf zone `{}`",
+            txt_owner, leaf_zone
+        )));
+    }
     verify_rrset_signatures(
         txt_owner,
         leaf_zone,
@@ -552,6 +564,7 @@ pub struct Bip353Resolver {
     dnssec_required: bool,
     dns: Arc<dyn DnsTxtResolver + Send + Sync>,
     continuity_dir: std::path::PathBuf,
+    allow_private_profile_url: bool,
 }
 
 impl Default for Bip353Resolver {
@@ -581,7 +594,15 @@ impl Bip353Resolver {
             dnssec_required: true,
             dns,
             continuity_dir: continuity_dir.into(),
+            allow_private_profile_url: false,
         }
+    }
+
+    /// Allow private or loopback IP sp-profile URLs (for integration testing with mock servers).
+    #[doc(hidden)]
+    pub fn with_allow_private_profile_url(mut self, allow: bool) -> Self {
+        self.allow_private_profile_url = allow;
+        self
     }
 
     /// Store TOFU pins, sequences and revocations in this application's data directory.
@@ -620,9 +641,17 @@ impl DnsTxtResolver for Bip353Resolver {
 /// `OwnershipProofInvalid` when the fetched profile fails ownership verification.
 /// DNS, URI parsing, HTTP profile validation, and ownership-check errors propagate.
 /// Continuity and revocation enforcement are left to the caller.
-async fn resolve_alias_with(
+pub async fn resolve_alias_with(
     resolver: &(impl DnsTxtResolver + Sync + ?Sized),
     alias: &str,
+) -> Result<SignedPaymentProfile> {
+    resolve_alias_with_allow_private(resolver, alias, false).await
+}
+
+pub async fn resolve_alias_with_allow_private(
+    resolver: &(impl DnsTxtResolver + Sync + ?Sized),
+    alias: &str,
+    allow_private: bool,
 ) -> Result<SignedPaymentProfile> {
     if !alias.starts_with('₿') {
         return Err(SatsPathError::AliasNotFound(alias.to_string()));
@@ -636,6 +665,9 @@ async fn resolve_alias_with(
     if let Some(profile_url) = parsed.sp_profile {
         #[cfg(feature = "std")]
         {
+            if !allow_private {
+                crate::ssrf::validate_url(&profile_url, false)?;
+            }
             let http_resolver = crate::resolvers::http::HttpResolver::new();
             let signed = http_resolver.fetch_verified_profile(&profile_url).await?;
 
@@ -687,7 +719,12 @@ impl ProfileResolver for Bip353Resolver {
             &self.continuity_dir,
             &format!("{}@{}", name.user, name.domain),
         )?;
-        let signed = resolve_alias_with(self.dns.as_ref(), alias).await?;
+        let signed = resolve_alias_with_allow_private(
+            self.dns.as_ref(),
+            alias,
+            self.allow_private_profile_url,
+        )
+        .await?;
         super::continuity::accept_profile(&self.continuity_dir, &signed)?;
         Ok(signed)
     }

@@ -706,8 +706,22 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
             ttl_seconds: Some(600),
         },
     );
+    // Default resolver (allow_private = false) rejects loopback / private sp-profile with SsrfViolation
+    let continuity_ssrf = tempfile::tempdir().unwrap();
+    let resolver_ssrf =
+        Bip353Resolver::with_dns_resolver(Arc::new(dns.clone()), continuity_ssrf.path());
+    let ssrf_err = resolver_ssrf
+        .resolve_alias("₿rodrigo@satspath.dev")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(ssrf_err, SatsPathError::ValidationError(_)),
+        "expected ValidationError for unconfigured private sp-profile, got: {ssrf_err:?}"
+    );
+
     let continuity = tempfile::tempdir().unwrap();
-    let resolver = Bip353Resolver::with_dns_resolver(Arc::new(dns), continuity.path());
+    let resolver = Bip353Resolver::with_dns_resolver(Arc::new(dns), continuity.path())
+        .with_allow_private_profile_url(true);
     let resolved_profile = resolver
         .resolve_alias("₿rodrigo@satspath.dev")
         .await
@@ -731,7 +745,8 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
     );
     let continuity_match = tempfile::tempdir().unwrap();
     let resolver_hash_match =
-        Bip353Resolver::with_dns_resolver(Arc::new(dns_hash_match), continuity_match.path());
+        Bip353Resolver::with_dns_resolver(Arc::new(dns_hash_match), continuity_match.path())
+            .with_allow_private_profile_url(true);
     let res_hash = resolver_hash_match
         .resolve_alias("₿rodrigo@satspath.dev")
         .await
@@ -754,7 +769,8 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
     );
     let continuity_mismatch = tempfile::tempdir().unwrap();
     let resolver_hash_mismatch =
-        Bip353Resolver::with_dns_resolver(Arc::new(dns_hash_mismatch), continuity_mismatch.path());
+        Bip353Resolver::with_dns_resolver(Arc::new(dns_hash_mismatch), continuity_mismatch.path())
+            .with_allow_private_profile_url(true);
     let mismatch_err = resolver_hash_mismatch
         .resolve_alias("₿rodrigo@satspath.dev")
         .await

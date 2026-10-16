@@ -206,6 +206,9 @@ pub(crate) fn resolve_v2_envelope(
     })
 }
 
+static HICKORY_RESOLVER: std::sync::LazyLock<HickoryDnssecTxtResolver> =
+    std::sync::LazyLock::new(HickoryDnssecTxtResolver::new);
+
 /// Resolve a BIP-353 DNS payment instruction using `HickoryDnssecTxtResolver` in `Strict` mode
 /// or `DohTxtResolver` when `allow_insecure_dns_for_dev` is explicitly enabled.
 /// Returns the resolution and parsed instruction on success; resolution and URI
@@ -220,8 +223,7 @@ pub(crate) async fn dns_resolve_response(body: DnsResolveRequest) -> DnsResolveR
         let resolver = DohTxtResolver::new();
         resolve_bip353_with(&resolver, &body.name, policy, now()).await
     } else {
-        let resolver = HickoryDnssecTxtResolver::new();
-        resolve_bip353_with(&resolver, &body.name, policy, now()).await
+        resolve_bip353_with(&*HICKORY_RESOLVER, &body.name, policy, now()).await
     };
     match resolution_result {
         Ok(resolution) => match parse_bip321(&resolution.bitcoin_uri) {

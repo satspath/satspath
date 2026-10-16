@@ -323,7 +323,7 @@ pub fn verify_bip353_ownership(
     }
 
     // A SatsPath profile pointer is sufficient linkage once any hash commitment passes.
-    if parsed.sp_profile.is_some() || parsed.sp_profile_hash.is_some() {
+    if parsed.sp_profile.is_some() {
         return Ok(true);
     }
 
