@@ -71,7 +71,7 @@ pub async fn cmd_pay(
     };
 
     println!("Resolving identifier {}...", display_alias);
-    let resolver = get_resolver()?;
+    let resolver = get_resolver(alias)?;
     let signed = match resolver.resolve_alias(alias).await {
         Ok(signed) => signed,
         Err(SatsPathError::AliasNotFound(_)) => {

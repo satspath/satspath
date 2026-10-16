@@ -13,6 +13,7 @@ use crate::config::AppState;
 use crate::handlers::transparency::transparency_log;
 use crate::types::{now, DnsResolveRequest, DnsResolveResponse};
 
+
 pub(crate) fn resolve_profile(state: &AppState, alias: &str) -> Result<ResolvedTransparentProfile> {
     let store = TransactionalTransparencyStore::open(&state.home)?;
     verify_stored_profile(state, alias, store, true)

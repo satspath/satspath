@@ -38,7 +38,7 @@ pub async fn cmd_quote_json(alias: &str, amount_sats: u64) -> Result<()> {
 /// Resolve and print a route only when its wallet QR passes mainnet validation.
 pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
     validate_amount_sats(amount_sats)?;
-    let resolver = get_resolver()?;
+    let resolver = get_resolver(alias)?;
 
     println!("Resolving identifier '{}'...", mask_identifier(alias));
     let signed = resolver
