@@ -312,6 +312,10 @@ pub fn fingerprint_pubkey(pubkey_hex: &str) -> String {
 }
 
 /// Serialize a JSON value into deterministic bytes with sorted object keys.
+///
+/// Returns compact UTF-8 JSON, sorting keys lexicographically at every nesting
+/// level and preserving array order. Strings and numbers use `serde_json`
+/// formatting. Propagates serialization errors as strings.
 fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     write_canonical_value(value, &mut buf)?;
@@ -319,6 +323,10 @@ fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, String> {
 }
 
 /// Append a JSON value recursively, sorting object keys and omitting whitespace.
+///
+/// Preserves existing bytes in `buf` and array order. Uses lexicographic key
+/// ordering and `serde_json` formatting for strings and numbers. Propagates
+/// serialization errors as strings without rolling back bytes already appended.
 fn write_canonical_value(value: &Value, buf: &mut Vec<u8>) -> Result<(), String> {
     match value {
         Value::Null => buf.extend_from_slice(b"null"),

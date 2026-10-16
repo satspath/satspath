@@ -285,7 +285,18 @@ pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> Result<Stri
 
 // ===== High-level quote function =====
 
-/// Full quote pipeline: resolve → verify → route → build QR
+/// Resolve a recipient alias and quote a payment of `amount_sats` satoshis.
+///
+/// Returns the selected method, estimated fees and timing, and a QR payload.
+/// Fee-fetch failures use fallback estimates. For Lightning, attempts invoice
+/// fetching via LNURL-pay when a Lightning address is present; otherwise, a
+/// BOLT12 offer is fetched through the proxy only with the `bolt12` feature.
+/// Invoice-fetch failures preserve the original QR payload.
+///
+/// Signature rejection returns `Ok(QuoteResponse::InvalidSignature)`; an expired
+/// profile that passes verification returns `Ok(QuoteResponse::NoRoute)`.
+/// Resolution, JSON parsing or serialization, route selection, and QR-building
+/// errors propagate as `Err` strings.
 pub async fn quote(recipient: &str, amount_sats: u64) -> Result<QuoteResponse, String> {
     // 1. Resolve
     let chain_resolver = ChainResolver::new();
