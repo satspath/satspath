@@ -285,7 +285,19 @@ pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> Result<Stri
 
 // ===== High-level quote function =====
 
-/// Full quote pipeline: resolve → verify → route → build QR
+/// Resolve a recipient alias and quote a payment amount in satoshis with a QR payload.
+///
+/// Returns `InvalidSignature` when signature verification fails, or `NoRoute` if
+/// the verified profile has expired. Otherwise, selects a route using normal
+/// urgency and live fee estimates, falling back to default fees on fetch errors.
+///
+/// For Lightning, attempts to replace the QR payload with an invoice fetched via
+/// the Lightning address, or, if absent and `bolt12` is enabled, via a BOLT12 proxy.
+/// Invoice fetch errors leave the original QR payload intact. Disabling `bolt12`
+/// skips the proxy request without excluding BOLT12 offers from route selection.
+///
+/// Returns an error if resolution, profile JSON parsing or serialization, route
+/// selection, or QR payload construction fails, including when no usable rail exists.
 pub async fn quote(recipient: &str, amount_sats: u64) -> Result<QuoteResponse, String> {
     // 1. Resolve
     let chain_resolver = ChainResolver::new();
