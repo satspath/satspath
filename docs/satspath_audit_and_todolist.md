@@ -37,7 +37,7 @@ All core Rust crates (`satspath-core`, `satspath-router`, `satspath-cli`, `satsp
 | :--- | :--- | :--- |
 | `ChainResolver` (compositor with anti-substitution verification) | [`resolver.rs`](../crates/satspath-core/src/resolver.rs) | Complete |
 | `HttpResolver` (HTTPS `.well-known/satspath-authority` + S2S v2) | [`http.rs`](../crates/satspath-core/src/resolvers/http.rs) | Complete (SSRF-hardened) |
-| `Bip353Resolver` (BIP-353 DNS TXT with `DnssecPolicy::Strict` fail-closed default) | [`bip353.rs`](../crates/satspath-core/src/resolvers/bip353.rs) | Complete |
+| `Bip353Resolver` (BIP-353 DNS TXT with `DnssecPolicy::Strict` fail-closed default) | [`bip353.rs`](../crates/satspath-core/src/resolvers/bip353.rs) | Preview — authenticated signed-profile retrieval pending |
 | `NostrResolver` (NIP-05 + kind `30078` author binding) | [`nostr.rs`](../crates/satspath-core/src/resolvers/nostr.rs) | Complete |
 | `PearResolver` (Optional Hyperswarm P2P sidecar bridge) | [`pear.rs`](../crates/satspath-core/src/resolvers/pear.rs) | Optional / Legacy |
 

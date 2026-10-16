@@ -33,13 +33,15 @@ The current codebase (`crates/`) implements and tests the following capabilities
 ## 2. Completed vs Pending v0.2 Milestones
 
 ### Completed in Recent Releases
+
 - [x] **Authenticated Current-State Map (`SparseMerkleTree`):** 256-bit Sparse Merkle Tree inclusion/non-inclusion proofs bound to `TransparencyCheckpoint.map_root`.
 - [x] **Catena-Style Bitcoin On-Chain Anchoring:** UTXO-chained `OP_RETURN` commitments (`SatsPathCatenaAnchorV1`) with equivocation detection and bounded chain verification.
-- [x] **Checkpoint Gossip Protocol:** Nostr/P2P gossip observation comparison (`GOSSIP_KIND = 30079`) and `SplitViewEvidence` generation.
+- [x] **Checkpoint Gossip Protocol:** Nostr/P2P gossip observation comparison (`GOSSIP_KIND = 3978`) and `SplitViewEvidence` generation.
 - [x] **Modular `satspathd` Refactor, Rate Limiting & Telemetry:** Split daemon into `handlers/`, `rate_limit.rs`, `server.rs`, and `telemetry/` with Prometheus `/metrics` and deep health checks.
 - [x] **Protocol Parser Fuzzing Suite:** `cargo-fuzz` targets for profiles, BIP-321 URIs, BOLT12 TLVs, and Merkle proofs (`.github/workflows/fuzz.yml`).
 
 ### Active / Pending v0.2 Targets
+
 - [ ] **Embedded Cryptographic DNSSEC Validator (#152):** Perform in-process RFC 4034/4035 `DNSKEY`/`RRSIG`/`DS` chain verification anchored to the root KSK in `satspath-core`.
 - [ ] **Standards-Compliant BOLT12 & CLN/LDK Interoperability (#153):** Full checksumless Bech32 decoding, all-TLV Merkle root signing, and Onion Message invoice requests.
 - [ ] **Official BIP-352 Test Vector Conformance (#154):** Validate full input filtering, Taproot parity, NUMS exclusion, and label derivation against the official BIP-352 JSON test vectors.

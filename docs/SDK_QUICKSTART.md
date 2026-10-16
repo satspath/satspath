@@ -59,7 +59,9 @@ import * as bip39 from "bip39";
 
 await init();
 
-// The seed remains strictly inside the host wallet boundary.
+// TEST ONLY: This public BIP-39 test vector is not a real identity seed.
+// Never register an identity derived from this phrase.
+// Production: use the host wallet seed source inside its trusted boundary.
 const mnemonic =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const seed = bip39.mnemonicToSeedSync(mnemonic);
@@ -105,7 +107,7 @@ export async function resolveAndQuote(recipientAlias: string, amountSats: bigint
 
 ## 4. Native Rust Integration (`satspath-router` + `satspath-core`)
 
-Host wallets written in Rust (such as BDK or LDK mobile/desktop wallets) can resolve aliases, verify cryptographic signatures, and consume `QuoteResponse` handoffs directly:
+Host wallets written in Rust (such as BDK or LDK mobile/desktop wallets) can resolve aliases, verify cryptographic signatures, and consume `QuoteResponse` handoffs directly. This example returns `Some(payload)` for BIP-21 and Ark handoffs; the caller must pass that payload to its wallet flow. `None` means Lightning was paid or an invite was returned:
 
 ```rust
 use satspath_core::crypto::verify_signed_profile;
@@ -118,7 +120,7 @@ pub async fn prepare_wallet_handoff(
     recipient_alias: &str,
     amount_sats: u64,
     wallet: &dyn WalletExecutor,
-) -> satspath_core::Result<()> {
+) -> satspath_core::Result<Option<String>> {
     // 1. Resolve alias, verify Schnorr signature + expiry, and select optimal rail
     let response = quote_with_resolver(resolver, recipient_alias, amount_sats).await;
 
@@ -140,10 +142,17 @@ pub async fn prepare_wallet_handoff(
             let policy = ExecutionGatePolicy::testnet_default();
             policy.check_execution_safety(wallet.network(), amount_sats, true)?;
 
-            if qr.starts_with("lnbc") || qr.starts_with("lntb") {
+            if qr.starts_with("lnbc") || qr.starts_with("lntb") || qr.starts_with("lnbcrt") {
                 let _receipt = wallet.pay_bolt11(&qr, Some(amount_sats * 1_000)).await?;
+                Ok(None)
+            } else if qr.starts_with("bitcoin:") || qr.starts_with("ark:") || qr.starts_with("ark1") {
+                // Return BIP-21 / Ark payloads to the caller's host wallet flow.
+                Ok(Some(qr))
+            } else {
+                Err(satspath_core::SatsPathError::ValidationError(
+                    "Unsupported payment payload".into(),
+                ))
             }
-            Ok(())
         }
         QuoteResponse::InvalidSignature { recipient } => Err(
             satspath_core::SatsPathError::ValidationError(format!(
@@ -156,7 +165,7 @@ pub async fn prepare_wallet_handoff(
         }
         QuoteResponse::NotRegistered { invite } => {
             println!("Recipient not registered; share invite URL: {}", invite.claim_url);
-            Ok(())
+            Ok(None)
         }
     }
 }
