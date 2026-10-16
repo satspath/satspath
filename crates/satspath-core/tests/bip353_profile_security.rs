@@ -68,8 +68,8 @@ async fn resolve_signed(
             ttl_seconds: Some(60),
         },
     );
-    let resolver = Bip353Resolver::with_dns_resolver(Arc::new(dns), dir)
-        .with_allow_private_profile_url(true);
+    let resolver =
+        Bip353Resolver::with_dns_resolver(Arc::new(dns), dir).with_allow_private_profile_url(true);
     if check_fallback {
         ChainResolver::new()
             .push(resolver)
