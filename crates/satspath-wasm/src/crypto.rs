@@ -107,14 +107,11 @@ pub fn sign_profile_json(profile_json: &str, secret_key_hex: &str) -> String {
     hex::encode(sig.as_ref())
 }
 
-/// Classical and post-quantum identity keys exported when `pqc` is enabled.
+/// Opaque classical and post-quantum signing keys, available when `pqc` is enabled.
 #[cfg(feature = "pqc")]
 #[wasm_bindgen]
 pub struct HybridIdentityKeypair {
-    classical_pubkey_hex: String,
-    classical_secret_key_hex: String,
-    pqc_verification_key_hex: String,
-    pqc_seed_hex: String,
+    keypair: satspath_pqc::hybrid_sig::HybridSigningKeyPair,
 }
 
 #[cfg(feature = "pqc")]
@@ -123,22 +120,12 @@ impl HybridIdentityKeypair {
     /// Return the compressed secp256k1 identity public key as hex.
     #[wasm_bindgen(getter)]
     pub fn classical_pubkey_hex(&self) -> String {
-        self.classical_pubkey_hex.clone()
-    }
-    /// Return the secp256k1 identity secret key as hex.
-    #[wasm_bindgen(getter)]
-    pub fn classical_secret_key_hex(&self) -> String {
-        self.classical_secret_key_hex.clone()
+        hex::encode(self.keypair.classical_pk.serialize())
     }
     /// Return the encoded ML-DSA verification key as hex.
     #[wasm_bindgen(getter)]
     pub fn pqc_verification_key_hex(&self) -> String {
-        self.pqc_verification_key_hex.clone()
-    }
-    /// Return the seed used to reconstruct the post-quantum signing key as hex.
-    #[wasm_bindgen(getter)]
-    pub fn pqc_seed_hex(&self) -> String {
-        self.pqc_seed_hex.clone()
+        hex::encode(self.keypair.pqc_vk.encode())
     }
 }
 
@@ -146,45 +133,23 @@ impl HybridIdentityKeypair {
 #[cfg(feature = "pqc")]
 #[wasm_bindgen]
 pub fn generate_hybrid_identity_keypair() -> HybridIdentityKeypair {
-    let kp = satspath_pqc::hybrid_sig::generate_hybrid_keypair();
     HybridIdentityKeypair {
-        classical_pubkey_hex: hex::encode(kp.classical_pk.serialize()),
-        classical_secret_key_hex: hex::encode(kp.classical_sk.secret_bytes()),
-        pqc_verification_key_hex: hex::encode(kp.pqc_vk.encode()),
-        pqc_seed_hex: hex::encode(kp.pqc_seed()),
+        keypair: satspath_pqc::hybrid_sig::generate_hybrid_keypair(),
     }
 }
 
 /// Sign a canonical JSON profile using Hybrid Signature (Schnorr + ML-DSA).
+/// Borrows an opaque keypair so signing material stays inside WASM.
 /// Returns a JSON string of the `HybridSignature` object, or empty string on error.
 #[cfg(feature = "pqc")]
 #[wasm_bindgen]
-pub fn sign_hybrid_profile_json(
-    profile_json: &str,
-    classical_sk_hex: &str,
-    pqc_seed_hex: &str,
-) -> String {
-    let sk_bytes = match hex::decode(classical_sk_hex) {
-        Ok(b) => b,
-        Err(_) => return String::new(),
-    };
-    let seed_bytes = match hex::decode(pqc_seed_hex) {
-        Ok(b) => b,
-        Err(_) => return String::new(),
-    };
-
-    let kp =
-        match satspath_pqc::hybrid_sig::HybridSigningKeyPair::from_seeds(&sk_bytes, &seed_bytes) {
-            Some(k) => k,
-            None => return String::new(),
-        };
-
+pub fn sign_hybrid_profile_json(profile_json: &str, keypair: &HybridIdentityKeypair) -> String {
     let canonical_bytes = canonical_profile_json(profile_json);
     if canonical_bytes.is_empty() {
         return String::new();
     }
 
-    let sig = satspath_pqc::hybrid_sig::hybrid_sign(&canonical_bytes, &kp);
+    let sig = satspath_pqc::hybrid_sig::hybrid_sign(&canonical_bytes, &keypair.keypair);
     serde_json::to_string(&sig).unwrap_or_default()
 }
 
@@ -311,11 +276,10 @@ pub fn fingerprint_pubkey(pubkey_hex: &str) -> String {
     hex::encode(&bytes[1..5])
 }
 
-/// Serialize a JSON value into deterministic bytes with sorted object keys.
+/// Serialize a JSON value into deterministic UTF-8 bytes with sorted object keys.
 ///
-/// Returns compact UTF-8 JSON, sorting keys lexicographically at every nesting
-/// level and preserving array order. Strings and numbers use `serde_json`
-/// formatting. Propagates serialization errors as strings.
+/// Omits whitespace and preserves array order. Propagates serialization errors
+/// from [`write_canonical_value`] as strings.
 fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     write_canonical_value(value, &mut buf)?;
@@ -324,9 +288,9 @@ fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, String> {
 
 /// Append a JSON value recursively, sorting object keys and omitting whitespace.
 ///
-/// Preserves existing bytes in `buf` and array order. Uses lexicographic key
-/// ordering and `serde_json` formatting for strings and numbers. Propagates
-/// serialization errors as strings without rolling back bytes already appended.
+/// Preserves existing bytes in `buf` and array order; keys use Rust string ordering.
+/// Propagates JSON serialization errors as strings, leaving any bytes already
+/// appended in `buf` on error.
 fn write_canonical_value(value: &Value, buf: &mut Vec<u8>) -> Result<(), String> {
     match value {
         Value::Null => buf.extend_from_slice(b"null"),
@@ -372,6 +336,34 @@ fn write_canonical_value(value: &Value, buf: &mut Vec<u8>) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn hybrid_signing_uses_opaque_keypair() {
+        use satspath_pqc::{
+            hybrid_sig::hybrid_verify,
+            types::{HybridPublicKey, HybridSignature, PqcSuite},
+        };
+
+        let keypair = generate_hybrid_identity_keypair();
+        let public_key = HybridPublicKey {
+            classical_pubkey: keypair.classical_pubkey_hex(),
+            pqc_verification_key: keypair.pqc_verification_key_hex(),
+            suite: PqcSuite::MlDsa65Schnorr,
+        };
+
+        assert!(sign_hybrid_profile_json("invalid json", &keypair).is_empty());
+        for profile in [r#"{"b":1,"a":2}"#, r#"{"a":3,"b":1}"#] {
+            let signature: HybridSignature =
+                serde_json::from_str(&sign_hybrid_profile_json(profile, &keypair)).unwrap();
+            assert!(hybrid_verify(
+                &canonical_profile_json(profile),
+                &signature,
+                &public_key,
+            ));
+            assert!(!hybrid_verify(b"tampered", &signature, &public_key));
+        }
+    }
 
     #[test]
     fn fingerprint_matches_rust() {

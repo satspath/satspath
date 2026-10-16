@@ -2,11 +2,13 @@ pub mod ark;
 pub mod bip321;
 pub mod bip353;
 pub mod bip353_publish;
+pub mod bolt12;
 pub mod codec;
 pub mod crypto;
 pub mod dns;
 pub mod errors;
 pub mod execution;
+pub mod handoff;
 pub mod ownership;
 pub mod peer_registry;
 pub mod platform;
@@ -21,6 +23,8 @@ pub mod split;
 pub mod transparency;
 pub mod validation;
 
+#[cfg(feature = "std")]
+pub mod outbound;
 #[cfg(feature = "std")]
 pub mod resolver;
 #[cfg(feature = "std")]
@@ -88,11 +92,11 @@ pub use transparency::next_identifier_sequence;
 #[cfg(feature = "std")]
 pub use transparency::TransactionalTransparencyStore;
 pub use transparency::{
-    validate_catena_successor, BitcoinAnchor as TransparencyBitcoinAnchor, CheckpointStore,
-    ConsistencyStatus, IdentifierAttestation, IdentifierVerificationMethod, MerkleConsistencyProof,
-    MerkleInclusionProof, NameAction, NameEvent, OperatorKeyRotation, PinnedCheckpoint,
-    TransparencyCheckpoint, TransparencyError, TransparencyLog, TransparencyLogIdentity,
-    TransparencyStatus, TrustedVerifier,
+    inclusion_proof, validate_catena_successor, BitcoinAnchor as TransparencyBitcoinAnchor,
+    CheckpointStore, ConsistencyStatus, IdentifierAttestation, IdentifierVerificationMethod,
+    MerkleConsistencyProof, MerkleInclusionProof, NameAction, NameEvent, OperatorKeyRotation,
+    PinnedCheckpoint, TransparencyCheckpoint, TransparencyError, TransparencyLog,
+    TransparencyLogIdentity, TransparencyStatus, TrustedVerifier,
 };
 
 #[cfg(feature = "std")]
