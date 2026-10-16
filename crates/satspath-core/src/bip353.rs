@@ -367,6 +367,7 @@ impl DohTxtResolver {
 
 #[async_trait]
 impl DnsTxtResolver for DohTxtResolver {
+    /// Fetch TXT answers over the validated DoH connection.
     async fn query_txt(&self, fqdn: &str) -> Result<Vec<DnsTxtRecord>> {
         crate::ssrf::validate_url(&self.endpoint, false)?;
         let client = crate::outbound::http_client(std::time::Duration::from_secs(10));

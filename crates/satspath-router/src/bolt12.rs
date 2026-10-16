@@ -626,4 +626,89 @@ mod tests {
         let err = BlindedPath::decode_bytes(&malformed_path).unwrap_err();
         assert!(err.to_string().contains("excessive num_hops"));
     }
+
+    #[test]
+    fn test_blinded_path_wire_boundaries() {
+        let key = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let mut path = BlindedPath {
+            introduction_node_id: key.into(),
+            blinding_point: Some(key.into()),
+            blinded_hops: vec![BlindedHop {
+                blinded_node_id: key.into(),
+                encrypted_payload: String::new(),
+            }],
+        };
+        for intro in [key, "000000010000020003", "010000010000020003"] {
+            path.introduction_node_id = intro.into();
+            for length in [0, 252, 253, 256, u16::MAX as usize] {
+                path.blinded_hops[0].encrypted_payload = "ab".repeat(length);
+                let bytes = path.encode_bytes().unwrap();
+                let hop_start = intro.len() / 2 + 33 + 1;
+                assert_eq!(
+                    &bytes[hop_start + 33..hop_start + 35],
+                    &(length as u16).to_be_bytes()
+                );
+                assert_eq!(BlindedPath::decode_bytes(&bytes).unwrap(), path);
+                // Check the handoff validator against the same fixed-width payload.
+                let raw = encode_tlv_stream(&[TlvRecord {
+                    tag: TLV_OFFER_PATHS,
+                    value: bytes,
+                }]);
+                let offer =
+                    bech32::encode("lno", raw.to_base32(), bech32::Variant::Bech32m).unwrap();
+                satspath_handoff::bolt12(&offer, None, 0).unwrap();
+            }
+        }
+        path.blinded_hops[0].encrypted_payload = "ab".repeat(u16::MAX as usize + 1);
+        assert!(path.encode_bytes().is_err());
+        path.blinded_hops.clear();
+        assert!(path.encode_bytes().is_err());
+    }
+
+    #[test]
+    fn test_blinded_path_rejects_invalid_keys_and_truncation() {
+        let key = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let path = BlindedPath {
+            introduction_node_id: key.into(),
+            blinding_point: Some(key.into()),
+            blinded_hops: vec![BlindedHop {
+                blinded_node_id: key.into(),
+                encrypted_payload: "abcd".into(),
+            }],
+        };
+        let valid = path.encode_bytes().unwrap();
+        for offset in [0, 33, 67] {
+            let mut invalid = valid.clone();
+            // Compressed prefix with an x coordinate which is not on secp256k1.
+            invalid[offset + 1..offset + 33].fill(0xff);
+            assert!(BlindedPath::decode_bytes(&invalid).is_err());
+            let raw = encode_tlv_stream(&[TlvRecord {
+                tag: TLV_OFFER_PATHS,
+                value: invalid,
+            }]);
+            let offer = bech32::encode("lno", raw.to_base32(), bech32::Variant::Bech32m).unwrap();
+            assert!(satspath_handoff::bolt12(&offer, None, 0).is_err());
+        }
+        for end in 0..valid.len() {
+            assert!(BlindedPath::decode_bytes(&valid[..end]).is_err());
+        }
+        for invalid in [
+            "04".repeat(33),
+            "00".repeat(33),
+            "02".to_string() + &"ff".repeat(32),
+        ] {
+            let mut modified = path.clone();
+            modified.introduction_node_id = invalid.clone();
+            assert!(modified.encode_bytes().is_err());
+            modified = path.clone();
+            modified.blinding_point = Some(invalid.clone());
+            assert!(modified.encode_bytes().is_err());
+            modified = path.clone();
+            modified.blinded_hops[0].blinded_node_id = invalid;
+            assert!(modified.encode_bytes().is_err());
+        }
+        let mut missing_key = path;
+        missing_key.blinding_point = None;
+        assert!(missing_key.encode_bytes().is_err());
+    }
 }

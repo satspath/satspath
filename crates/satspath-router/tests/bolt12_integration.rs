@@ -14,11 +14,12 @@ use satspath_router::bolt12::{
     BlindedPath, Bolt12Offer, IntroductionNode, ReferenceNodeOnionTransport, TlvRecord,
     TLV_OFFER_AMOUNT, TLV_OFFER_DESCRIPTION, TLV_OFFER_NODE_ID, TLV_OFFER_PATHS, TLV_SIGNATURE,
 };
-use satspath_router::lightning::is_lightning_available_for_amount;
+use satspath_router::lightning::{
+    is_lightning_available_for_amount, is_lightning_available_for_amount_sync,
+};
 use satspath_router::scoring::{score_routes, FeeSnapshot, PaymentRail, RoutePreferences};
 use satspath_router::{
-    is_lightning_available_for_amount_sync, select_route, select_route_with_fees, FeeEstimate,
-    PaymentUrgency, RouteRequest, SwapDirective,
+    select_route, select_route_with_fees, FeeEstimate, PaymentUrgency, RouteRequest, SwapDirective,
 };
 use secp256k1::rand::RngCore;
 use signer::TestSigner;
@@ -221,6 +222,32 @@ async fn test_bolt12_routing_selection_and_directive() {
 }
 
 #[tokio::test]
+/// Verify that bolt12 routing rejects undecoded offer.
+async fn test_bolt12_routing_rejects_undecoded_offer() {
+    let offer_str = "lno1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+    let method = PaymentMethod::Bolt12(CoreBolt12Offer {
+        label: "Primary BOLT12".to_string(),
+        offer: offer_str.to_string(),
+        network: BitcoinNetwork::Mainnet,
+        minimum_amount_sats: Some(1_000),
+        expires_at: None,
+        issuer_pubkey: "02".to_string() + &"11".repeat(32),
+    });
+
+    let profile = dummy_signed_profile("alice@satspath.com", vec![method.clone()]);
+    let req = RouteRequest {
+        alias: "alice@satspath.com".to_string(),
+        amount_sats: 50_000,
+        signed_profile: profile,
+        urgency: PaymentUrgency::Normal,
+        max_fee_sats: None,
+        max_fee_percent: None,
+    };
+
+    assert!(select_route(&req).await.is_err());
+}
+
+#[tokio::test]
 async fn test_bolt12_amount_availability_and_route_selection() {
     let invalid_bech32 = "lno1pq...";
     assert!(bech32::decode(invalid_bech32).is_err());
@@ -263,6 +290,10 @@ async fn test_bolt12_amount_availability_and_route_selection() {
         TlvRecord {
             tag: TLV_OFFER_AMOUNT,
             value: write_tu64(5_000_000),
+        },
+        TlvRecord {
+            tag: TLV_OFFER_DESCRIPTION,
+            value: b"Fixed amount".to_vec(),
         },
         issuer_id_record(),
     ]);
@@ -365,12 +396,77 @@ async fn test_bolt12_amount_availability_and_route_selection() {
 }
 
 #[tokio::test]
+async fn profile_bolt12_expiry_is_enforced_before_route_selection() {
+    let offer = encode_offer(&[issuer_id_record()]);
+    let now = chrono::Utc::now().timestamp();
+    let fallback = PaymentMethod::Lightning {
+        label: "Fallback LNURL".into(),
+        lightning_address: None,
+        lnurl: Some("https://example.com/lnurl".into()),
+        bolt12: None,
+        receiver_pubkey: None,
+    };
+    let fees = FeeEstimate {
+        fastest_fee: 1,
+        half_hour_fee: 1,
+        hour_fee: 1,
+        economy_fee: 1,
+        minimum_fee: 1,
+    };
+
+    for (expires_at, expected) in [
+        (Some(now - 1), false),
+        (Some(now), false),
+        (Some(now + 3_600), true),
+        (None, true),
+    ] {
+        let method = PaymentMethod::Bolt12(CoreBolt12Offer {
+            label: "BOLT12".into(),
+            offer: offer.clone(),
+            network: BitcoinNetwork::Mainnet,
+            minimum_amount_sats: None,
+            expires_at,
+            issuer_pubkey: hex::encode(issuer_id_record().value),
+        });
+        assert_eq!(
+            is_lightning_available_for_amount_sync(&method, 5_000),
+            expected
+        );
+        assert_eq!(
+            is_lightning_available_for_amount(&method, 5_000).await,
+            expected
+        );
+        let req = RouteRequest {
+            alias: "alice@example.com".into(),
+            amount_sats: 5_000,
+            signed_profile: dummy_signed_profile(
+                "alice@example.com",
+                vec![method.clone(), fallback.clone()],
+            ),
+            urgency: PaymentUrgency::Normal,
+            max_fee_sats: None,
+            max_fee_percent: None,
+        };
+        let selected = if expected { &method } else { &fallback };
+        assert_eq!(
+            &select_route_with_fees(&req, &fees).unwrap().selected_method,
+            selected
+        );
+        assert_eq!(&select_route(&req).await.unwrap().selected_method, selected);
+    }
+}
+
+#[tokio::test]
 async fn test_bolt12_amount_availability_overflow() {
     let amountless = encode_offer(&[issuer_id_record()]);
     let fixed_amount = encode_offer(&[
         TlvRecord {
             tag: TLV_OFFER_AMOUNT,
             value: write_tu64(5_000_000),
+        },
+        TlvRecord {
+            tag: TLV_OFFER_DESCRIPTION,
+            value: b"Fixed amount".to_vec(),
         },
         issuer_id_record(),
     ]);
@@ -477,15 +573,44 @@ fn test_bolt12_scoring_blinded_path_privacy_bonus() {
 
     let decision = score_routes(25_000, &profile, &fee_snap, &prefs).unwrap();
     assert_eq!(decision.selected.rail, PaymentRail::Lightning);
-    // Privacy score receives bonus (score = 9 for blinded paths vs 7 for standard)
     assert!(decision.selected.privacy_score >= 8);
 }
 
 #[test]
-fn test_ldk_reference_concatenated_blinded_paths_and_sciddir() {
+fn test_bolt12_scoring_rejects_undecoded_offer() {
+    let method = PaymentMethod::Lightning {
+        label: "Malformed offer".into(),
+        lightning_address: None,
+        lnurl: None,
+        bolt12: Some("lno1pq...".into()),
+        receiver_pubkey: None,
+    };
+    let profile = dummy_signed_profile("merchant@satspath.com", vec![method]);
+    assert!(score_routes(
+        25_000,
+        &profile,
+        &FeeSnapshot::default(),
+        &RoutePreferences::default()
+    )
+    .is_err());
+}
+
+#[test]
+fn ldk_concatenated_blinded_paths_roundtrip() {
     // Official LDK test vector with two concatenated blinded paths (one pubkey intro, one sciddir intro)
-    let encoded = "lno1pgx9getnwss8vetrw3hhyucsl5qj5qeyv5l2cs6y3qqzesrth7mlzrlp3xg7xhulusczm04x6g6nms9trspqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqqsqqqqqqqqqqqqqqqqqqqqqqqqqqpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqsqpqg3zyg3zyg3zygpqqqqzqqqqgqqxqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqqgqqqqqqqqqqqqqqqqqqqqqqqqqqqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgqqsg3zyg3zyg3zygtzzqhwcuj966ma9n9nqwqtl032xeyv6755yeflt235pmww58egx6rxry";
+    let encoded = include_str!("../../satspath-handoff/tests/data/ldk-offer-two-paths.txt").trim();
     satspath_core::validation::validate_bolt12_offer(encoded).unwrap();
+    satspath_core::handoff::validate_method(
+        &PaymentMethod::Lightning {
+            label: "LDK offer".into(),
+            lightning_address: None,
+            lnurl: None,
+            bolt12: Some(encoded.into()),
+            receiver_pubkey: None,
+        },
+        1,
+    )
+    .unwrap();
 
     let offer = parse_bolt12_offer(encoded).unwrap();
     let paths = offer.blinded_paths.as_ref().unwrap();
@@ -518,10 +643,39 @@ fn test_ldk_reference_concatenated_blinded_paths_and_sciddir() {
     );
     assert_eq!(route.blinded_hops.len(), 2);
 
-    // Roundtrip wire bytes
     for path in paths {
-        let bytes = path.encode_bytes().unwrap();
-        assert_eq!(&BlindedPath::decode_bytes(&bytes).unwrap(), path);
+        assert_eq!(path.blinding_point, Some("02".repeat(33)));
+        assert_eq!(path.hop_count(), 2);
+        assert_eq!(path.blinded_hops[0].blinded_node_id, "02".repeat(33));
+        assert_eq!(path.blinded_hops[0].encrypted_payload, "00".repeat(16));
+    }
+    assert_eq!(paths[0].blinded_hops[1].encrypted_payload, "11".repeat(8));
+    assert_eq!(paths[1].blinded_hops[1].encrypted_payload, "22".repeat(8));
+
+    use bitcoin::bech32::primitives::{decode::CheckedHrpstring, NoChecksum};
+    let raw: Vec<u8> = CheckedHrpstring::new::<NoChecksum>(encoded)
+        .unwrap()
+        .byte_iter()
+        .collect();
+    let path_record = decode_tlv_stream(&raw)
+        .unwrap()
+        .into_iter()
+        .find(|record| record.tag == TLV_OFFER_PATHS)
+        .unwrap();
+    let reencoded: Vec<u8> = paths
+        .iter()
+        .flat_map(|path| path.encode_bytes().unwrap())
+        .collect();
+    assert_eq!(reencoded, path_record.value);
+    assert!(
+        BlindedPath::decode_bytes(&reencoded).is_err(),
+        "single-path decoding must reject trailing paths"
+    );
+    for path in paths {
+        assert_eq!(
+            BlindedPath::decode_bytes(&path.encode_bytes().unwrap()).unwrap(),
+            *path
+        );
     }
 }
 
@@ -701,14 +855,25 @@ fn all_networks_roundtrip_and_reject_mismatched_handoffs() {
         (BitcoinNetwork::Regtest, "lnob", "lnrb", "lnib"),
         (BitcoinNetwork::Signet, "lnos", "lnrs", "lnis"),
     ] {
-        let encoded = encode_bolt12_bech32_checksumless(
-            o,
-            &encode_tlv_stream(&[TlvRecord {
-                tag: TLV_OFFER_NODE_ID,
-                value: signer.public_key().serialize().to_vec(),
-            }]),
-        )
-        .unwrap();
+        let btc_net = match network {
+            BitcoinNetwork::Mainnet => bitcoin::Network::Bitcoin,
+            BitcoinNetwork::Testnet => bitcoin::Network::Testnet,
+            BitcoinNetwork::Regtest => bitcoin::Network::Regtest,
+            BitcoinNetwork::Signet => bitcoin::Network::Signet,
+        };
+        let mut records = vec![TlvRecord {
+            tag: TLV_OFFER_NODE_ID,
+            value: signer.public_key().serialize().to_vec(),
+        }];
+        if network != BitcoinNetwork::Mainnet {
+            records.push(TlvRecord {
+                tag: 2, // TLV_OFFER_CHAINS
+                value: bitcoin::blockdata::constants::ChainHash::using_genesis_block(btc_net)
+                    .as_bytes()
+                    .to_vec(),
+            });
+        }
+        let encoded = encode_bolt12_bech32_checksumless(o, &encode_tlv_stream(&records)).unwrap();
         validate_bolt12_offer_for_network(&encoded, network).unwrap();
         let other = if network == BitcoinNetwork::Mainnet {
             BitcoinNetwork::Testnet
