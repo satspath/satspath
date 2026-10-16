@@ -93,7 +93,7 @@ pub fn first_ark_method(methods: &[PaymentMethod]) -> Option<&PaymentMethod> {
 // Live Ark ASP Metadata, Fee Schedule & Settlement Handoff Structures
 // ============================================================================
 
-/// Fee schedule advertised by an Ark Service Provider (`arkd`).
+/// SatsPath fee schedule, when supplied by a source with matching semantics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ArkFeeSchedule {
     /// Fixed base fee per VTXO transfer in satoshis.
@@ -106,17 +106,17 @@ pub struct ArkFeeSchedule {
     pub offboard_fee_sats: u64,
 }
 
-/// Live parameters returned by an Ark Service Provider (`GET /v1/info`).
+/// Validated ASP parameters mapped from discovery data with defined semantics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArkAspInfo {
     /// ASP 33-byte compressed secp256k1 public key (hex).
     pub pubkey: String,
     /// Network identifier (`"bitcoin"`, `"testnet"`, `"signet"`, `"regtest"`, or `"mutinynet"`).
     pub network: String,
-    /// Interval between scheduled VTXO covenant rounds in seconds.
-    pub round_interval_secs: u64,
-    /// VTXO tree lifetime before expiry (in seconds or blocks).
-    pub vtxo_tree_expiry: u64,
+    /// Interval between rounds, if known. arkd session duration is not an interval.
+    pub round_interval_secs: Option<u64>,
+    /// VTXO tree lifetime, if known. arkd session duration is not an expiry.
+    pub vtxo_tree_expiry: Option<u64>,
     /// Unilateral exit timelock delay (CSV blocks/seconds).
     pub unilateral_exit_delay: u64,
     /// Minimum VTXO output amount (dust limit) in satoshis.
@@ -124,8 +124,8 @@ pub struct ArkAspInfo {
     /// Optional Taproot boarding descriptor template advertised by the ASP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boarding_descriptor_template: Option<String>,
-    /// ASP fee parameters.
-    pub fees: ArkFeeSchedule,
+    /// Fixed/ppm fee parameters, if known. arkd fee expressions do not map to this schedule.
+    pub fees: Option<ArkFeeSchedule>,
 }
 
 impl ArkAspInfo {
@@ -133,15 +133,15 @@ impl ArkAspInfo {
     ///
     /// # Errors
     /// Returns an error if the ASP `pubkey` is not a valid 33-byte compressed secp256k1 key,
-    /// if `round_interval_secs` or `vtxo_tree_expiry` is zero, if the network is unknown,
+    /// if a known `round_interval_secs` or `vtxo_tree_expiry` is zero, if the network is unknown,
     /// or if private material is present.
     pub fn validate(&self) -> Result<()> {
         validate_compressed_pubkey(&self.pubkey)
             .map_err(|e| anyhow!("invalid ASP public key: {e}"))?;
-        if self.round_interval_secs == 0 {
+        if self.round_interval_secs == Some(0) {
             anyhow::bail!("ASP round_interval_secs must be greater than 0");
         }
-        if self.vtxo_tree_expiry == 0 {
+        if self.vtxo_tree_expiry == Some(0) {
             anyhow::bail!("ASP vtxo_tree_expiry must be greater than 0");
         }
         if self.unilateral_exit_delay == 0 {
@@ -161,9 +161,92 @@ impl ArkAspInfo {
     }
 
     /// Estimate the total fee in satoshis for an Ark VTXO transfer of `amount_sats`.
-    pub fn estimate_transfer_fee(&self, amount_sats: u64) -> u64 {
-        let proportional = amount_sats.saturating_mul(self.fees.ppm_rate) / 1_000_000;
-        self.fees.base_fee_sats.saturating_add(proportional)
+    pub fn estimate_transfer_fee(&self, amount_sats: u64) -> Result<u64> {
+        let fees = self
+            .fees
+            .as_ref()
+            .context("ASP transfer fee schedule unavailable")?;
+        let proportional = amount_sats.saturating_mul(fees.ppm_rate) / 1_000_000;
+        Ok(fees.base_fee_sats.saturating_add(proportional))
+    }
+}
+
+/// Subset of arkd v0.9.16 GetInfoResponse used for discovery.
+/// Fee expressions are decoded but cannot be translated into a fixed/ppm schedule.
+#[cfg(feature = "std")]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArkdInfoResponse {
+    signer_pubkey: String,
+    network: String,
+    #[serde(deserialize_with = "deserialize_arkd_int64")]
+    unilateral_exit_delay: i64,
+    #[serde(deserialize_with = "deserialize_arkd_int64")]
+    dust: i64,
+    #[serde(rename = "fees")]
+    _fees: ArkdFeeInfo,
+}
+
+#[cfg(feature = "std")]
+#[derive(Deserialize)]
+struct ArkdFeeInfo {
+    #[serde(rename = "intentFee")]
+    _intent_fee: ArkdIntentFeeInfo,
+    #[serde(rename = "txFeeRate")]
+    _tx_fee_rate: String,
+}
+
+#[cfg(feature = "std")]
+#[derive(Deserialize)]
+struct ArkdIntentFeeInfo {
+    #[serde(rename = "offchainInput")]
+    _offchain_input: String,
+    #[serde(rename = "offchainOutput")]
+    _offchain_output: String,
+    #[serde(rename = "onchainInput")]
+    _onchain_input: String,
+    #[serde(rename = "onchainOutput")]
+    _onchain_output: String,
+}
+
+/// Protobuf JSON encodes int64 as strings, while some gateways emit numbers.
+#[cfg(feature = "std")]
+fn deserialize_arkd_int64<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<i64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Int64 {
+        Number(i64),
+        String(String),
+    }
+    match Int64::deserialize(deserializer)? {
+        Int64::Number(value) => Ok(value),
+        Int64::String(value) => value.parse().map_err(serde::de::Error::custom),
+    }
+}
+
+#[cfg(feature = "std")]
+impl TryFrom<ArkdInfoResponse> for ArkAspInfo {
+    type Error = anyhow::Error;
+
+    fn try_from(wire: ArkdInfoResponse) -> Result<Self> {
+        Ok(Self {
+            pubkey: wire.signer_pubkey,
+            network: wire.network,
+            round_interval_secs: None,
+            vtxo_tree_expiry: None,
+            unilateral_exit_delay: wire
+                .unilateral_exit_delay
+                .try_into()
+                .context("ASP unilateralExitDelay must be non-negative")?,
+            dust_limit_sats: wire
+                .dust
+                .try_into()
+                .context("ASP dust must be non-negative")?,
+            boarding_descriptor_template: None,
+            fees: None,
+        })
     }
 }
 
@@ -790,7 +873,9 @@ impl LiveArkAspClient {
             anyhow::bail!("Ark ASP /v1/info returned HTTP {}", resp.status());
         }
         let body = read_bounded_bytes(resp, 64 * 1024).await?;
-        let info: ArkAspInfo = serde_json::from_slice(&body).context("decoding ArkAspInfo JSON")?;
+        let wire: ArkdInfoResponse =
+            serde_json::from_slice(&body).context("decoding arkd info JSON")?;
+        let info = ArkAspInfo::try_from(wire)?;
         info.validate()?;
         self.validate_network(&info)?;
         Ok(info)
@@ -805,7 +890,10 @@ impl LiveArkAspClient {
         amount_sats: u64,
     ) -> Result<(ArkAspInfo, ArkSettlementHandoff)> {
         let info = self.get_asp_info().await?;
-        let fee_sats = info.estimate_transfer_fee(amount_sats);
+        let vtxo_tree_expiry = info
+            .vtxo_tree_expiry
+            .context("ASP VTXO tree expiry unavailable")?;
+        let fee_sats = info.estimate_transfer_fee(amount_sats)?;
         let ark_uri = format!(
             "ark:{receiver_pubkey}?server={}&amount={amount_sats}&asp_pubkey={}",
             urlencoding::encode(&self.server_url),
@@ -818,7 +906,7 @@ impl LiveArkAspClient {
             receiver_pubkey: receiver_pubkey.to_string(),
             amount_sats,
             fee_sats,
-            vtxo_tree_expiry: info.vtxo_tree_expiry,
+            vtxo_tree_expiry,
             ark_uri,
         });
         handoff.validate(&info)?;

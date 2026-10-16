@@ -10,35 +10,141 @@ fn sample_asp_info() -> ArkAspInfo {
     ArkAspInfo {
         pubkey: ASP_PUBKEY.to_string(),
         network: "signet".to_string(),
-        round_interval_secs: 10,
-        vtxo_tree_expiry: 604_800,
+        round_interval_secs: Some(10),
+        vtxo_tree_expiry: Some(604_800),
         unilateral_exit_delay: 512,
         dust_limit_sats: 330,
         boarding_descriptor_template: Some(
             "tr(ASP_KEY,{and_v(v:pk(ASP_KEY),pk(USER_KEY)),older(512)})".to_string(),
         ),
-        fees: ArkFeeSchedule {
+        fees: Some(ArkFeeSchedule {
             base_fee_sats: 15,
             ppm_rate: 500, // 0.05%
             onboard_fee_sats: 250,
             offboard_fee_sats: 350,
+        }),
+    }
+}
+
+fn arkd_info() -> serde_json::Value {
+    serde_json::json!({
+        "signerPubkey": ASP_PUBKEY,
+        "network": "signet",
+        "sessionDuration": "10",
+        "unilateralExitDelay": "512",
+        "dust": "330",
+        "fees": {
+            "intentFee": {
+                "offchainInput": "0",
+                "offchainOutput": "amount * 0.001",
+                "onchainInput": "250",
+                "onchainOutput": "350",
+            },
+            "txFeeRate": "1.5",
         },
+    })
+}
+
+#[tokio::test]
+async fn arkd_discovery_maps_known_fields_and_rejects_oor_without_expiry() {
+    for (as_strings, include_duration) in [(true, true), (false, true), (true, false)] {
+        let mut wire = arkd_info();
+        if !as_strings {
+            wire["unilateralExitDelay"] = serde_json::json!(512);
+            wire["dust"] = serde_json::json!(330);
+            wire["sessionDuration"] = serde_json::json!(604_800);
+        }
+        if !include_duration {
+            wire.as_object_mut().unwrap().remove("sessionDuration");
+        }
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/info")
+            .with_status(200)
+            .with_body(wire.to_string())
+            .expect(2)
+            .create_async()
+            .await;
+        let client = LiveArkAspClient::new_for_test(server.url(), ArkNetwork::Signet);
+        let info = client.get_asp_info().await.unwrap();
+        assert_eq!(info.pubkey, ASP_PUBKEY);
+        assert_eq!(info.network, "signet");
+        assert_eq!(info.unilateral_exit_delay, 512);
+        assert_eq!(info.dust_limit_sats, 330);
+        assert_eq!(info.round_interval_secs, None);
+        assert_eq!(info.vtxo_tree_expiry, None);
+        assert_eq!(info.boarding_descriptor_template, None);
+        assert_eq!(info.fees, None);
+        assert!(info.estimate_transfer_fee(100_000).is_err());
+        let error = client
+            .build_oor_handoff(&format!("{}:0", "aa".repeat(32)), RECEIVER_PUBKEY, 100_000)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("expiry unavailable"), "{error}");
+        mock.assert_async().await;
     }
 }
 
 #[tokio::test]
-async fn test_live_ark_asp_connector_info_oor_and_forfeit_round_submission() {
-    let mut server = mockito::Server::new_async().await;
-    let asp_info = sample_asp_info();
+async fn arkd_discovery_rejects_invalid_wire_data() {
+    let mut cases = vec![serde_json::to_value(sample_asp_info()).unwrap()];
+    for (field, value) in [
+        ("signerPubkey", serde_json::json!("invalid")),
+        ("unilateralExitDelay", serde_json::json!(0)),
+        ("unilateralExitDelay", serde_json::json!("-1")),
+        (
+            "unilateralExitDelay",
+            serde_json::json!("9223372036854775808"),
+        ),
+        ("dust", serde_json::json!(-1)),
+        ("dust", serde_json::json!(1.5)),
+        ("dust", serde_json::json!("invalid")),
+        (
+            "fees",
+            serde_json::json!({"base_fee_sats": 0, "ppm_rate": 0}),
+        ),
+    ] {
+        let mut wire = arkd_info();
+        wire[field] = value;
+        cases.push(wire);
+    }
+    for field in ["signerPubkey", "unilateralExitDelay", "dust", "fees"] {
+        let mut wire = arkd_info();
+        wire.as_object_mut().unwrap().remove(field);
+        cases.push(wire);
+    }
+    for wire in cases {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/info")
+            .with_status(200)
+            .with_body(wire.to_string())
+            .create_async()
+            .await;
+        let client = LiveArkAspClient::new_for_test(server.url(), ArkNetwork::Signet);
+        assert!(client.get_asp_info().await.is_err(), "{wire}");
+        mock.assert_async().await;
+    }
+}
 
-    let info_mock = server
-        .mock("GET", "/v1/info")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(serde_json::to_string(&asp_info).unwrap())
-        .expect(2)
-        .create_async()
-        .await;
+#[test]
+fn asp_info_validates_optional_timing_and_explicit_fee_schedule() {
+    let mut info = sample_asp_info();
+    assert_eq!(info.estimate_transfer_fee(100_000).unwrap(), 65);
+    info.round_interval_secs = None;
+    info.vtxo_tree_expiry = None;
+    info.validate().unwrap();
+    info.round_interval_secs = Some(0);
+    assert!(info.validate().is_err());
+    info.round_interval_secs = Some(10);
+    info.vtxo_tree_expiry = Some(0);
+    assert!(info.validate().is_err());
+}
+
+#[tokio::test]
+async fn test_live_ark_asp_connector_oor_and_forfeit_round_submission() {
+    let mut server = mockito::Server::new_async().await;
+    let info = sample_asp_info();
 
     let oor_response = ArkSubmitTxResponse {
         ark_txid: "11".repeat(32),
@@ -84,17 +190,9 @@ async fn test_live_ark_asp_connector_info_oor_and_forfeit_round_submission() {
 
     let client = LiveArkAspClient::new_for_test(server.url(), ArkNetwork::Signet);
 
-    // 1. Fetch live ASP info
-    let fetched_info = client.get_asp_info().await.unwrap();
-    assert_eq!(fetched_info, asp_info);
-    assert_eq!(fetched_info.estimate_transfer_fee(100_000), 15 + 50); // 15 base + 50 ppm
-
-    // 2. Build and submit an Out-of-Round (OOR) payment handoff
+    // Submit a wallet-provided OOR handoff with independently known parameters.
     let sender_vtxo = format!("{}:0", "aa".repeat(32));
-    let (info, oor_handoff) = client
-        .build_oor_handoff(&sender_vtxo, RECEIVER_PUBKEY, 100_000)
-        .await
-        .unwrap();
+    let oor_handoff = sample_oor(client.server_url());
     let submitted_oor = client
         .submit_settlement_handoff(&info, &oor_handoff, &tx_request)
         .await
@@ -146,7 +244,6 @@ async fn test_live_ark_asp_connector_info_oor_and_forfeit_round_submission() {
         "intent_42"
     );
 
-    info_mock.assert_async().await;
     oor_mock.assert_async().await;
     round_mock.assert_async().await;
 }
@@ -365,15 +462,14 @@ fn test_ark_vtxo_covenant_tree_dag_verification() {
 }
 
 #[test]
-fn missing_or_renamed_fee_fields_fail_deserialization() {
+fn unavailable_fee_schedule_is_distinct_from_explicit_zero_fees() {
     let info = serde_json::to_value(sample_asp_info()).unwrap();
     assert!(serde_json::from_value::<ArkAspInfo>(info.clone()).is_ok());
     let mut missing = info.clone();
     missing.as_object_mut().unwrap().remove("fees");
-    assert!(serde_json::from_value::<ArkAspInfo>(missing)
-        .unwrap_err()
-        .to_string()
-        .contains("fees"));
+    let unknown = serde_json::from_value::<ArkAspInfo>(missing).unwrap();
+    assert_eq!(unknown.fees, None);
+    assert!(unknown.estimate_transfer_fee(100_000).is_err());
     for field in [
         "base_fee_sats",
         "ppm_rate",
@@ -403,7 +499,8 @@ fn missing_or_renamed_fee_fields_fail_deserialization() {
     assert_eq!(
         serde_json::from_value::<ArkAspInfo>(zero)
             .unwrap()
-            .estimate_transfer_fee(100_000),
+            .estimate_transfer_fee(100_000)
+            .unwrap(),
         0
     );
 }
@@ -423,8 +520,8 @@ async fn asp_info_rejects_wrong_network_and_requires_mainnet_opt_in() {
         ("bitcoin", ArkNetwork::Signet, true, false),
     ] {
         let mut server = mockito::Server::new_async().await;
-        let mut info = sample_asp_info();
-        info.network = advertised.to_string();
+        let mut info = arkd_info();
+        info["network"] = serde_json::json!(advertised);
         let mock = server
             .mock("GET", "/v1/info")
             .with_status(200)
