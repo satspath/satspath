@@ -1,13 +1,13 @@
 # SatsPath Performance Benchmarks
 
-This document records reference performance measurements for SatsPath's cryptographic primitives, canonical serialization, Key Transparency Merkle / Sparse Merkle Tree proofs, SSRF validation, multi-rail route selection, and WebAssembly (`satspath-wasm`) vs native execution.
+This document records reference performance measurements for SatsPath's cryptographic primitives, canonical serialization, Key Transparency Merkle / Sparse Merkle Tree proofs, multi-rail route selection, and WebAssembly (`satspath-wasm`) vs native execution.
 
 ## Running Benchmarks
 
 ### Native Rust (`criterion`)
 
 ```bash
-# Core cryptography, RFC 8785 canonical JSON, Merkle & Sparse Merkle Tree proofs, SSRF validation
+# Core cryptography, RFC 8785 canonical JSON, Merkle & Sparse Merkle Tree proofs
 cargo bench -p satspath-core --bench core_benches
 
 # Multi-rail route selection and route scoring
@@ -33,8 +33,6 @@ wasm-pack build --target web --release
 | `canonical_profile_bytes` | **~4.8 µs** | RFC 8785 deterministic JSON serialization (3-rail profile) |
 | `sign_profile_schnorr` | **~38.5 µs** | Canonical JSON + SHA-256 (`SatsPathProfileV1`) + BIP-340 Schnorr sign |
 | `verify_signed_profile_schnorr` | **~44.2 µs** | Canonical JSON + SHA-256 (`SatsPathProfileV1`) + BIP-340 Schnorr verify |
-| `validate_url_valid` | **~310 ns** | SSRF URL & host policy check |
-| `validate_url_ipv4_loopback` | **~240 ns** | Immediate loopback rejection |
 
 ### 2. Transparency Log & Merkle Operations (`satspath-core`)
 

@@ -12,6 +12,7 @@ use satspath_router::router::{select_route_with_fees, RouteRequest};
 use satspath_router::scoring::{score_routes, FeeSnapshot, RoutePreferences};
 use satspath_router::urgency::PaymentUrgency;
 
+/// Sign a profile offering Lightning, on-chain, and Ark methods for routing benchmarks.
 fn build_multi_rail_signed_profile() -> SignedPaymentProfile {
     let kp = generate_identity_keypair();
     let profile = PaymentProfile {
@@ -65,6 +66,7 @@ fn build_multi_rail_signed_profile() -> SignedPaymentProfile {
     sign_profile(profile, &kp.secret_key).expect("sign_profile")
 }
 
+/// Benchmark route selection across fee scenarios and scoring of multiple payment rails.
 fn bench_route_selection(c: &mut Criterion) {
     let signed_profile = build_multi_rail_signed_profile();
 

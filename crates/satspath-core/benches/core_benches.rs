@@ -1,5 +1,5 @@
 //! Criterion benchmark suite for `satspath-core` cryptography, canonical serialization,
-//! transparency Merkle / Sparse Merkle Tree operations, and SSRF validation (Issue #102).
+//! transparency Merkle / Sparse Merkle Tree operations (Issue #102).
 
 use std::hint::black_box;
 
@@ -9,12 +9,12 @@ use satspath_core::crypto::{
 };
 use satspath_core::pointer::BitcoinNetwork;
 use satspath_core::profile::{PaymentMethod, PaymentProfile};
-use satspath_core::ssrf::validate_url;
 use satspath_core::transparency::{
     consistency_proof, inclusion_proof, leaf_hash, merkle_root, verify_consistency,
     verify_inclusion_proof, IdentifierStatus, SparseMerkleTree, StateMapValue,
 };
 
+/// Build a three-rail payment profile for serialization and cryptography benchmarks.
 fn sample_profile(pubkey_hex: String) -> PaymentProfile {
     PaymentProfile {
         alias: "satoshi@satspath.dev".to_string(),
@@ -151,46 +151,9 @@ fn bench_merkle_transparency(c: &mut Criterion) {
     });
 }
 
-/// Benchmark SSRF URL validation across valid and blocked targets.
-fn bench_ssrf_validator(c: &mut Criterion) {
-    let valid_url = "https://rodrigo.satspath.dev/profile.json";
-    let ipv4_loopback = "http://127.0.0.1:8080/profile.json";
-    let ipv6_loopback = "http://[::1]/profile";
-    let internal_meta = "http://169.254.169.254/latest/meta-data/";
-
-    c.bench_function("validate_url_valid", |b| {
-        b.iter(|| {
-            let res = validate_url(black_box(valid_url), true);
-            black_box(res)
-        })
-    });
-
-    c.bench_function("validate_url_ipv4_loopback", |b| {
-        b.iter(|| {
-            let res = validate_url(black_box(ipv4_loopback), true);
-            black_box(res)
-        })
-    });
-
-    c.bench_function("validate_url_ipv6_loopback", |b| {
-        b.iter(|| {
-            let res = validate_url(black_box(ipv6_loopback), true);
-            black_box(res)
-        })
-    });
-
-    c.bench_function("validate_url_internal_meta", |b| {
-        b.iter(|| {
-            let res = validate_url(black_box(internal_meta), true);
-            black_box(res)
-        })
-    });
-}
-
 criterion_group!(
     benches,
     bench_crypto_and_canonical_json,
-    bench_merkle_transparency,
-    bench_ssrf_validator
+    bench_merkle_transparency
 );
 criterion_main!(benches);
