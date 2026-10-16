@@ -60,8 +60,8 @@ fn export_then_import_across_registries() {
     assert!(ok, "import failed: {err}{out}");
     assert!(out.contains("signature valid"), "import output: {out}");
 
-    let (show, _e, ok) = run(b.path(), &["show", "rodrigo@satspath.dev"]);
-    assert!(ok);
+    let (show, err, ok) = run(b.path(), &["show", "rodrigo@satspath.dev"]);
+    assert!(ok, "locally imported profile must resolve offline: {err}");
     assert!(
         show.contains("Signature valid: yes"),
         "machine B should verify the imported profile:\n{show}"

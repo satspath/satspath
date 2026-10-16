@@ -101,7 +101,7 @@ impl QuoteResponse {
 
 /// Resolve, verify, route, and build a payment payload for `recipient`.
 ///
-/// Builds the default resolver chain (local registry → BIP-353 → HTTP → Nostr)
+/// Uses the local registry for known aliases, otherwise the public resolver chain.
 /// Only amount-bound, validated on-chain payloads are emitted. Lightning and
 /// experimental rails return `no_route` until a network-bound invoice handoff
 /// can be validated here; an amount-less pointer is never a payable QR.
@@ -110,7 +110,14 @@ impl QuoteResponse {
 /// registered / no route / invalid signature) — the frontend never sees a Rust
 /// error type.
 pub async fn quote(recipient: &str, amount_sats: u64) -> QuoteResponse {
-    let resolver = default_resolver();
+    let resolver = match default_resolver(recipient) {
+        Ok(resolver) => resolver,
+        Err(error) => {
+            return QuoteResponse::NoRoute {
+                reason: error.to_string(),
+            }
+        }
+    };
     quote_inner(&resolver, recipient, amount_sats, None).await
 }
 
@@ -235,7 +242,8 @@ where
     }
     let recipient_hash = identifier_hash(recipient);
 
-    // 1. Resolve. Anything unresolvable becomes an invite — never a hard error.
+    // 1. Resolve. Only a definitive absence becomes an invite. A blocked
+    // transport or resolver disagreement must never be silently downgraded.
     let resolve_span = tracing::info_span!("satspath.resolve", identifier_hash = %recipient_hash);
     let signed = match resolver
         .resolve_alias(recipient)
@@ -243,11 +251,28 @@ where
         .await
     {
         Ok(signed) => signed,
-        Err(_) => {
+        Err(SatsPathError::AliasNotFound(_)) => {
             return QuoteResponse::NotRegistered {
                 // No sender key in preview mode; invite is unsigned (no sender identity binding)
                 // TTL: 24 hours
                 invite: create_invite(recipient, amount_sats, None, 24 * 3600),
+            };
+        }
+        Err(SatsPathError::InvalidSignature) => {
+            return QuoteResponse::InvalidSignature {
+                recipient: QuoteRecipient {
+                    alias: recipient.to_string(),
+                    verified: false,
+                    profile_signature_verified: false,
+                    identifier_verified: false,
+                    identifier_verification: "invalid profile signature".into(),
+                    fingerprint: None,
+                },
+            };
+        }
+        Err(error) => {
+            return QuoteResponse::NoRoute {
+                reason: error.to_string(),
             };
         }
     };
@@ -372,17 +397,20 @@ fn recipient_of(profile: &PaymentProfile, verified: bool) -> QuoteRecipient {
     }
 }
 
-/// The default resolver chain, mirroring the CLI: local registry, then public
-/// resolvers. Registry lives in the always-gitignored `.satspath/`.
-fn default_resolver() -> ChainResolver {
+/// Local profiles have one authoritative source; absent aliases use public
+/// sources which must agree. Registry lives in the gitignored `.satspath/`.
+fn default_resolver(recipient: &str) -> satspath_core::Result<ChainResolver> {
     let mut chain = ChainResolver::new();
-    let reg_dir = satspath_core::default_data_dir();
-    if let Ok(registry) = Registry::open(&reg_dir) {
-        chain = chain.push(registry);
+    let local = std::path::Path::new(".satspath");
+    if local.exists() {
+        let registry = Registry::open(local)?;
+        if registry.is_registered(recipient) {
+            return Ok(chain.push_authoritative("local-registry", registry));
+        }
     }
     chain = chain.push(Bip353Resolver::default());
     chain = chain.push(HttpResolver::new());
-    chain.push(NostrResolver::new())
+    Ok(chain.push(NostrResolver::new()))
 }
 
 #[cfg(test)]
@@ -416,6 +444,29 @@ mod tests {
 
     struct MockResolver {
         signed: Option<SignedPaymentProfile>,
+    }
+
+    struct OutageResolver;
+
+    #[async_trait]
+    impl ProfileResolver for OutageResolver {
+        async fn resolve_alias(&self, _: &str) -> satspath_core::Result<SignedPaymentProfile> {
+            Err(SatsPathError::NetworkError("resolver unavailable".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_outage_never_becomes_invite_or_payment() {
+        let response = quote_inner(
+            &OutageResolver,
+            "alice@example.com",
+            1_000,
+            Some(cheap_fees()),
+        )
+        .await;
+        assert!(
+            matches!(response, QuoteResponse::NoRoute { reason } if reason.contains("resolver unavailable"))
+        );
     }
 
     #[async_trait]

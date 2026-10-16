@@ -15,18 +15,22 @@ use crate::config::AppState;
 use crate::handlers::transparency::transparency_log;
 use crate::types::{now, DnsResolveRequest, DnsResolveResponse};
 
-/// Build the registry, BIP-353, HTTP, and Nostr resolver chain in that order.
-/// Skips the registry if it cannot be opened. BIP-353 continuity is stored under `home`.
-pub(crate) fn resolver_chain(home: &std::path::Path) -> ChainResolver {
+pub(crate) fn resolver_chain(
+    home: &std::path::Path,
+    alias: &str,
+) -> satspath_core::Result<ChainResolver> {
     use satspath_core::registry::Registry;
-    let mut chain = ChainResolver::new();
-    if let Ok(registry) = Registry::open(home) {
-        chain = chain.push(registry);
+    let chain = ChainResolver::new();
+    if home.exists() {
+        let registry = Registry::open(home)?;
+        if registry.is_registered(alias) {
+            return Ok(chain.push_authoritative("local-registry", registry));
+        }
     }
-    chain
-        .push(Bip353Resolver::new(home))
+    Ok(chain
+        .push(Bip353Resolver::default())
         .push(HttpResolver::new())
-        .push(NostrResolver::new())
+        .push(NostrResolver::new()))
 }
 
 pub(crate) fn resolve_profile(state: &AppState, alias: &str) -> Result<ResolvedTransparentProfile> {
