@@ -1051,6 +1051,7 @@ fn validate_handoff_bolt11(
         BitcoinNetwork::Mainnet => Currency::Bitcoin,
         BitcoinNetwork::Testnet => Currency::BitcoinTestnet,
         BitcoinNetwork::Regtest => Currency::Regtest,
+        BitcoinNetwork::Signet => Currency::Signet,
     };
     if invoice.currency() != currency {
         return Err(SatsPathError::ValidationError(format!(
