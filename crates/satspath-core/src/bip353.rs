@@ -368,7 +368,8 @@ impl DohTxtResolver {
 #[async_trait]
 impl DnsTxtResolver for DohTxtResolver {
     async fn query_txt(&self, fqdn: &str) -> Result<Vec<DnsTxtRecord>> {
-        let client = crate::ssrf::pinned_http_client(&self.endpoint, false).await?;
+        crate::ssrf::validate_url(&self.endpoint, false)?;
+        let client = crate::outbound::http_client(std::time::Duration::from_secs(10));
         let resp = client
             .get(&self.endpoint)
             .query(&[("name", fqdn), ("type", "TXT")])
