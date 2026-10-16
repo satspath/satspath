@@ -221,6 +221,8 @@ impl ProfileResolver for NostrResolver {
                         best_profile = Some(signed);
                     }
                 }
+                Err(e @ SatsPathError::RegistryError(_))
+                | Err(e @ SatsPathError::InvalidSignature) => return Err(e),
                 Err(e) => last_error = Some(e),
             }
         }
@@ -244,7 +246,9 @@ impl ProfileResolver for NostrResolver {
     }
 }
 
-fn signed_profile_from_event(
+/// Parse an untrusted relay frame without network calls. The same parser is
+/// exercised by the live resolver and by CI's adversarial corpus.
+pub fn signed_profile_from_event(
     raw: &str,
     sub_id: &str,
     expected_pubkey: &str,
@@ -298,6 +302,12 @@ fn signed_profile_from_event(
         return Err(SatsPathError::InvalidSignature);
     }
     check_profile_expiry(&signed.profile)?;
+    if signed.profile.revoked {
+        return Err(SatsPathError::RegistryError(format!(
+            "Alias {} has been revoked",
+            signed.profile.alias
+        )));
+    }
     Ok(Some(signed))
 }
 
@@ -577,5 +587,27 @@ mod tests {
 
         let parsed = signed_profile_from_event(&raw, "sub", nostr_pk, "alice@example.com");
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn revoked_signed_event_is_not_a_fallback_candidate() {
+        let mut profile = signed("alice@example.com");
+        profile.profile.revoked = true;
+        let key = secp256k1::SecretKey::from_slice(&[1; 32]).unwrap();
+        profile.profile.identity_pubkey =
+            secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &key).to_string();
+        let profile = crate::crypto::sign_profile(profile.profile, &key).unwrap();
+        let nostr_pk = &profile.profile.identity_pubkey[2..];
+        let raw = json!(["EVENT", "sub", {
+            "kind": SATSPATH_PROFILE_KIND,
+            "pubkey": nostr_pk,
+            "tags": [["d", "satspath-profile:alice@example.com"]],
+            "content": serde_json::to_string(&profile).unwrap()
+        }])
+        .to_string();
+        assert!(matches!(
+            signed_profile_from_event(&raw, "sub", nostr_pk, "alice@example.com"),
+            Err(SatsPathError::RegistryError(_))
+        ));
     }
 }

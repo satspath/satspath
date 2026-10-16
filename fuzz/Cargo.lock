@@ -1390,6 +1390,7 @@ dependencies = [
  "rand 0.8.8",
  "reqwest",
  "rusqlite",
+ "satspath-handoff",
  "secp256k1",
  "serde",
  "serde_json",
@@ -1407,11 +1408,25 @@ name = "satspath-fuzz"
 version = "0.0.0"
 dependencies = [
  "canonical_json",
+ "hex",
  "libfuzzer-sys",
  "satspath-core",
  "satspath-router",
+ "secp256k1",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "satspath-handoff"
+version = "0.1.0"
+dependencies = [
+ "bech32 0.9.1",
+ "bitcoin",
+ "hex",
+ "lightning-invoice",
+ "secp256k1",
+ "url",
 ]
 
 [[package]]
@@ -1427,6 +1442,7 @@ dependencies = [
  "rand 0.8.8",
  "reqwest",
  "satspath-core",
+ "satspath-handoff",
  "secp256k1",
  "serde",
  "serde_json",
@@ -1434,6 +1450,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "url",
  "urlencoding",
 ]
 
