@@ -103,6 +103,12 @@ fn bench_route_selection(c: &mut Criterion) {
         max_fee_percent: None,
     };
 
+    assert!(matches!(
+        select_route_with_fees(&req_small_ln, &low_fees)
+            .unwrap()
+            .selected_method,
+        PaymentMethod::Lightning { .. }
+    ));
     c.bench_function("select_route_lightning_under_threshold", |b| {
         b.iter(|| {
             black_box(
@@ -111,6 +117,12 @@ fn bench_route_selection(c: &mut Criterion) {
         })
     });
 
+    assert!(matches!(
+        select_route_with_fees(&req_large_amount, &low_fees)
+            .unwrap()
+            .selected_method,
+        PaymentMethod::Onchain { .. }
+    ));
     c.bench_function("select_route_onchain_low_fee", |b| {
         b.iter(|| {
             black_box(
@@ -119,6 +131,12 @@ fn bench_route_selection(c: &mut Criterion) {
         })
     });
 
+    assert!(matches!(
+        select_route_with_fees(&req_large_amount, &high_fees)
+            .unwrap()
+            .selected_method,
+        PaymentMethod::Ark { .. }
+    ));
     c.bench_function("select_route_ark_fallback_high_fee", |b| {
         b.iter(|| {
             black_box(
