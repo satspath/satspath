@@ -61,16 +61,26 @@ pub struct RouteDecision {
     pub explanation: String,
 }
 
+/// Score only validated methods and select an available route within the fee limit.
 pub fn score_routes(
     amount_sats: u64,
     profile: &SignedPaymentProfile,
     fee_snapshot: &FeeSnapshot,
     preferences: &RoutePreferences,
 ) -> Result<RouteDecision> {
+    satspath_core::validation::validate_amount_sats(amount_sats)?;
     let mut candidates = Vec::new();
     let mut pointers = Vec::new();
 
     for method in &profile.profile.methods {
+        if satspath_core::handoff::validate_method(method, amount_sats).is_err() {
+            continue;
+        }
+        if matches!(method, PaymentMethod::Bolt12(_))
+            && !crate::lightning::is_lightning_available_for_amount_sync(method, amount_sats)
+        {
+            continue;
+        }
         match method {
             PaymentMethod::Lightning {
                 lightning_address,
@@ -79,10 +89,21 @@ pub fn score_routes(
                 receiver_pubkey,
                 ..
             } => {
+                if bolt12.is_some()
+                    && lightning_address.is_none()
+                    && lnurl.is_none()
+                    && !crate::lightning::is_lightning_available_for_amount_sync(
+                        method,
+                        amount_sats,
+                    )
+                {
+                    continue;
+                }
                 let fee = fee_snapshot
                     .lightning_fee_sats_estimate
                     .unwrap_or_else(|| std::cmp::max(1, amount_sats / 10_000));
-                let available = lightning_address.is_some() || lnurl.is_some() || bolt12.is_some();
+                let mut available =
+                    lightning_address.is_some() || lnurl.is_some() || bolt12.is_some();
                 let mut privacy_score = 7;
                 let pointer = if let Some(address) = lightning_address {
                     PaymentPointer::LightningAddress {
@@ -100,6 +121,10 @@ pub fn score_routes(
                         amount_sats: Some(amount_sats),
                     }
                 } else if let Some(offer_str) = bolt12.as_deref() {
+                    available = crate::lightning::is_lightning_available_for_amount_sync(
+                        method,
+                        amount_sats,
+                    );
                     let parsed = crate::bolt12::parse_bolt12_offer(offer_str).ok();
                     let has_blinded = parsed
                         .as_ref()
@@ -183,7 +208,10 @@ pub fn score_routes(
                     privacy_score,
                     reliability_score: 9,
                     requires_user_action: true,
-                    available: true,
+                    available: crate::lightning::is_lightning_available_for_amount_sync(
+                        method,
+                        amount_sats,
+                    ),
                     reason: "BOLT12 offer available for Lightning payment.".into(),
                 });
                 pointers.push(PaymentPointer::Bolt12Offer {
@@ -304,7 +332,7 @@ fn candidate_score(
 }
 
 fn bolt11_like(value: Option<&str>) -> Option<&str> {
-    value.filter(|invoice| invoice.starts_with("lnbc") || invoice.starts_with("lntb"))
+    value.filter(|invoice| satspath_handoff::bolt11_network(invoice).is_some())
 }
 
 fn policy_complexity_hint(descriptor_hint: Option<&str>) -> u8 {
@@ -437,5 +465,15 @@ mod tests {
         let decision =
             score_routes(1_000, &profile, &FeeSnapshot::default(), &preferences).unwrap();
         assert_eq!(decision.selected.rail, PaymentRail::Ark);
+    }
+
+    #[test]
+    fn bolt11_like_classification() {
+        assert!(bolt11_like(Some("lnbc1...")).is_some());
+        assert!(bolt11_like(Some("LNBC1...")).is_some());
+        assert!(bolt11_like(Some("lntb1...")).is_some());
+        assert!(bolt11_like(Some("lnbcrt1...")).is_some());
+        assert!(bolt11_like(Some("lno1...")).is_none());
+        assert!(bolt11_like(None).is_none());
     }
 }

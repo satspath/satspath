@@ -21,6 +21,7 @@ static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 #[cfg(feature = "bolt12")]
 pub mod bolt12;
 mod crypto;
+pub mod handoff;
 mod helpers;
 mod resolver;
 mod router;

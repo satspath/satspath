@@ -16,6 +16,8 @@ pqc = ["dep:satspath-pqc"]
 small_alloc = ["dep:wee_alloc"]
 
 [dependencies]
+bitcoin = { workspace = true }
+satspath-handoff = { path = "../satspath-handoff" }
 # WASM bindings
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
