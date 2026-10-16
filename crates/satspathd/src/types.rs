@@ -376,6 +376,7 @@ pub(crate) fn bitcoin_network(network: &str) -> satspath_core::BitcoinNetwork {
     match network.to_ascii_lowercase().as_str() {
         "mainnet" | "bitcoin" => BitcoinNetwork::Mainnet,
         "regtest" => BitcoinNetwork::Regtest,
+        "signet" => BitcoinNetwork::Signet,
         // devnet uses testnet-form receive addresses until a distinct core
         // network enum is added.
         _ => BitcoinNetwork::Testnet,
@@ -403,10 +404,6 @@ pub(crate) fn safety_warnings() -> Vec<&'static str> {
 
 pub(crate) fn now() -> i64 {
     chrono::Utc::now().timestamp()
-}
-
-pub(crate) fn fmt_btc(sats: u64) -> String {
-    format!("{}.{:08}", sats / 100_000_000, sats % 100_000_000)
 }
 
 /// Minimal percent-encoding for mailto: query components.

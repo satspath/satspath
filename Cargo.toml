@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/satspath-handoff",
     "crates/satspath-core",
     "crates/satspath-router",
     "crates/satspath-cli",
@@ -49,4 +50,11 @@ zeroize = "1.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 prometheus = { version = "0.13", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"
+
 
