@@ -619,7 +619,8 @@ impl Bip353Resolver {
     /// Resolve a BIP-353 name to its DNSSEC-validated payment instruction under [`DnssecPolicy::Strict`].
     ///
     /// # Errors
-    /// Fails closed if DNSSEC validation fails or is unavailable.
+    /// Fails closed if DNSSEC validation fails or is unavailable. Name, TXT lookup,
+    /// and payment URI validation errors propagate from [`resolve_bip353_with`].
     pub async fn resolve_instruction(&self, name: &str) -> Result<Bip353Resolution> {
         let now = chrono::Utc::now().timestamp();
         resolve_bip353_with(self.dns.as_ref(), name, DnssecPolicy::Strict, now).await
@@ -628,7 +629,7 @@ impl Bip353Resolver {
 
 #[async_trait]
 impl DnsTxtResolver for Bip353Resolver {
-    /// Delegate TXT lookup to the configured validating backend.
+    /// Delegate TXT lookup to the configured backend, returning its records and errors unchanged.
     async fn query_txt(&self, fqdn: &str) -> Result<Vec<DnsTxtRecord>> {
         self.dns.query_txt(fqdn).await
     }
