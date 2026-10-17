@@ -39,10 +39,13 @@ fuzz_target!(|data: &[u8]| {
             &frame.to_string(),
             "sub",
             &public.x_only_public_key().0.to_string(),
-            "alice@example.com"
+            "alice@example.com",
         );
         if signed.profile.revoked {
-            assert!(matches!(resolved, Err(satspath_core::SatsPathError::RegistryError(_))));
+            assert!(matches!(
+                resolved,
+                Err(satspath_core::SatsPathError::RegistryError(_))
+            ));
         } else {
             assert!(resolved.unwrap().is_some());
         }
