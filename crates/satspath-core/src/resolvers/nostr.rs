@@ -204,45 +204,57 @@ impl ProfileResolver for NostrResolver {
             .collect();
 
         let results = futures_util::future::join_all(futures).await;
+        select_relay_profile(results, alias)
+    }
+}
 
-        let mut best_profile: Option<SignedPaymentProfile> = None;
-        let mut last_error = None;
+/// A malformed relay event cannot veto a separately authenticated profile;
+/// a signed revocation still halts resolution, even if other relays disagree.
+fn select_relay_profile(
+    results: Vec<Result<SignedPaymentProfile>>,
+    alias: &str,
+) -> Result<SignedPaymentProfile> {
+    let mut best_profile: Option<SignedPaymentProfile> = None;
+    let mut last_error = None;
 
-        for result in results {
-            match result {
-                Ok(signed) => {
-                    let current_best_seq = best_profile
-                        .as_ref()
-                        .and_then(|p| p.profile.sequence)
-                        .unwrap_or(0);
-                    let new_seq = signed.profile.sequence.unwrap_or(0);
+    for result in results {
+        match result {
+            Ok(signed) => {
+                let current_best_seq = best_profile
+                    .as_ref()
+                    .and_then(|p| p.profile.sequence)
+                    .unwrap_or(0);
+                let new_seq = signed.profile.sequence.unwrap_or(0);
 
-                    if best_profile.is_none() || new_seq > current_best_seq {
-                        best_profile = Some(signed);
-                    }
-                }
-                Err(e @ SatsPathError::RegistryError(_))
-                | Err(e @ SatsPathError::InvalidSignature) => return Err(e),
-                Err(e) => last_error = Some(e),
-            }
-        }
-
-        match best_profile {
-            Some(profile) => {
-                if profile.profile.revoked {
-                    Err(SatsPathError::RegistryError(format!(
-                        "Alias {} has been revoked",
-                        alias
-                    )))
-                } else {
-                    Ok(profile)
+                if best_profile.is_none() || new_seq > current_best_seq {
+                    best_profile = Some(signed);
                 }
             }
-            None => match last_error {
-                Some(e) => Err(e),
-                None => Err(SatsPathError::AliasNotFound(alias.to_string())),
-            },
+            Err(e @ SatsPathError::RegistryError(_)) => return Err(e),
+            Err(e @ SatsPathError::InvalidSignature) => last_error = Some(e),
+            Err(e) => {
+                if !matches!(last_error, Some(SatsPathError::InvalidSignature)) {
+                    last_error = Some(e);
+                }
+            }
         }
+    }
+
+    match best_profile {
+        Some(profile) => {
+            if profile.profile.revoked {
+                Err(SatsPathError::RegistryError(format!(
+                    "Alias {} has been revoked",
+                    alias
+                )))
+            } else {
+                Ok(profile)
+            }
+        }
+        None => match last_error {
+            Some(e) => Err(e),
+            None => Err(SatsPathError::AliasNotFound(alias.to_string())),
+        },
     }
 }
 
@@ -301,13 +313,13 @@ pub fn signed_profile_from_event(
     if !verify_signed_profile(&signed)? {
         return Err(SatsPathError::InvalidSignature);
     }
-    check_profile_expiry(&signed.profile)?;
     if signed.profile.revoked {
         return Err(SatsPathError::RegistryError(format!(
             "Alias {} has been revoked",
             signed.profile.alias
         )));
     }
+    check_profile_expiry(&signed.profile)?;
     Ok(Some(signed))
 }
 
@@ -596,6 +608,8 @@ mod tests {
         let key = secp256k1::SecretKey::from_slice(&[1; 32]).unwrap();
         profile.profile.identity_pubkey =
             secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &key).to_string();
+        // Revocation remains fatal even after its expiry timestamp.
+        profile.profile.expires_at = Some(1);
         let profile = crate::crypto::sign_profile(profile.profile, &key).unwrap();
         let nostr_pk = &profile.profile.identity_pubkey[2..];
         let raw = json!(["EVENT", "sub", {
@@ -608,6 +622,31 @@ mod tests {
         assert!(matches!(
             signed_profile_from_event(&raw, "sub", nostr_pk, "alice@example.com"),
             Err(SatsPathError::RegistryError(_))
+        ));
+    }
+
+    #[test]
+    fn invalid_relay_signature_cannot_veto_a_valid_relay() {
+        let profile = signed("alice@example.com");
+        assert!(select_relay_profile(
+            vec![Err(SatsPathError::InvalidSignature), Ok(profile.clone())],
+            "alice@example.com",
+        )
+        .is_ok());
+        assert!(select_relay_profile(
+            vec![Ok(profile), Err(SatsPathError::InvalidSignature)],
+            "alice@example.com",
+        )
+        .is_ok());
+        assert!(matches!(
+            select_relay_profile(
+                vec![
+                    Err(SatsPathError::InvalidSignature),
+                    Err(SatsPathError::AliasNotFound("alice@example.com".into()))
+                ],
+                "alice@example.com",
+            ),
+            Err(SatsPathError::InvalidSignature)
         ));
     }
 }

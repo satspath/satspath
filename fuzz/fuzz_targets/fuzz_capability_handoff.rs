@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use satspath_core::profile::PaymentMethod;
+use satspath_core::{profile::PaymentMethod, BitcoinNetwork};
 use satspath_router::handoff::validate_payload;
 
 fuzz_target!(|data: &[u8]| {
@@ -17,4 +17,28 @@ fuzz_target!(|data: &[u8]| {
         );
         let _ = validate_payload(&method, "lntb1invalid", "regtest", Some(u64::MAX));
     }
+    // A method-compatible payload must be amount-bound, not just parseable.
+    let method = PaymentMethod::Onchain {
+        label: "onchain".into(),
+        network: BitcoinNetwork::Mainnet,
+        address: Some("1BoatSLRHtKNngkdXEeobR76b53LETtpyT".into()),
+        silent_payment_pubkey: None,
+        pubkey_hint: None,
+        descriptor_hint: None,
+        address_list: vec![],
+    };
+    assert!(validate_payload(
+        &method,
+        "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00000002",
+        "mainnet",
+        Some(1),
+    )
+    .is_err());
+    assert!(validate_payload(
+        &method,
+        "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00000001",
+        "mainnet",
+        Some(1),
+    )
+    .is_ok());
 });

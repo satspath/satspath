@@ -30,20 +30,45 @@ fuzz_target!(|data: &[u8]| {
         profile.pqc_required = false;
         profile.hybrid_pubkey = None;
         let signed = satspath_core::sign_profile(profile, &key).unwrap();
-        let raw = serde_json::json!(["EVENT", "sub", {
+        let frame = serde_json::json!(["EVENT", "sub", {
             "kind": 30078,
             "pubkey": public.x_only_public_key().0.to_string(),
             "tags": [["d", "satspath-profile:alice@example.com"]],
             "content": serde_json::to_string(&signed).unwrap()
-        }])
-        .to_string();
+        }]);
         assert!(signed_profile_from_event(
-            &raw,
+            &frame.to_string(),
             "sub",
             &public.x_only_public_key().0.to_string(),
             "alice@example.com"
         )
         .unwrap()
         .is_some());
+        for changed in [
+            {
+                let mut value = frame.clone();
+                value[1] = serde_json::json!("wrong-subscription");
+                value
+            },
+            {
+                let mut value = frame.clone();
+                value[2]["pubkey"] = serde_json::json!("wrong-author");
+                value
+            },
+            {
+                let mut value = frame.clone();
+                value[2]["tags"][0][1] = serde_json::json!("satspath-profile:bob@example.com");
+                value
+            },
+        ] {
+            assert!(signed_profile_from_event(
+                &changed.to_string(),
+                "sub",
+                &public.x_only_public_key().0.to_string(),
+                "alice@example.com"
+            )
+            .unwrap()
+            .is_none());
+        }
     }
 });
