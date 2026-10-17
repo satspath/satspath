@@ -9,8 +9,9 @@ cargo run -p satspath-conformance -- test --resolver https://resolver.example.co
 cargo run -p satspath-conformance -- test --observed wallet-output.json --format json
 ```
 
-`vectors/v1.json` is machine-readable. Missing/incorrect results fail; unknown
-features are SKIP, never PASS. `--observed` compares a third-party wallet or
+`vectors/v1.json` is embedded by default (or supply `--vectors PATH`).
+Missing/incorrect results fail; unknown features are SKIP, never PASS.
+`--observed` compares a third-party wallet or
 SDK's JSON object from vector ID to output; it does not execute that wallet or
 attest a real payment. The live resolver probe uses production HTTPS, SSRF/DNS
 pinning, response limits, signature and expiry verification, and checks the
@@ -22,3 +23,6 @@ wall-clock time advances. CI runs these vectors through `cargo test --workspace`
 positive rotation history, PaymentIntent approval (#173) and authenticated
 resolver conflict policy (#174). These cannot be claimed PASS from this suite
 until executable adapters and vectors are added.
+The current negative resolver vectors exercise invalid signatures, not a
+conflict between two independently valid signed profiles or a valid signed
+revocation. Those cases remain pending until authenticated fixtures exist.

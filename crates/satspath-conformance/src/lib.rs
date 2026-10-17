@@ -3,7 +3,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 use satspath_core::crypto::{canonical_profile_bytes, check_profile_expiry, verify_signed_profile};
@@ -218,11 +217,6 @@ fn evaluate(vector: &Vector) -> Result<Option<Value>, String> {
     Ok(Some(result))
 }
 
-pub fn canonical_json_sha256(value: &Value) -> Result<String, String> {
-    let json = canonical_json::to_string(value).map_err(|e| e.to_string())?;
-    Ok(hex::encode(Sha256::digest(json.as_bytes())))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,17 +236,6 @@ mod tests {
         actual.insert("wallet".into(), json!({"confirmed":true}));
         assert!(run_observed_suite(&suite, &actual).is_complete());
     }
-    #[test]
-    fn canonical_hash_ignores_json_member_order() {
-        let left = json!({"amount_sats":42,"destination":"bc1qexample"});
-        let right: Value =
-            serde_json::from_str(r#"{"destination":"bc1qexample","amount_sats":42}"#).unwrap();
-        assert_eq!(
-            canonical_json_sha256(&left).unwrap(),
-            canonical_json_sha256(&right).unwrap()
-        );
-    }
-
     #[test]
     fn resolver_vectors_reject_expired_profiles_at_fixed_time() {
         let mut suite: VectorSuite =

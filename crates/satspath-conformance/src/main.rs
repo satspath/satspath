@@ -12,8 +12,9 @@ struct Cli {
 enum Command {
     /// Run local vectors, compare an external SDK's results or probe an HTTPS resolver.
     Test {
-        #[arg(long, default_value = "crates/satspath-conformance/vectors/v1.json")]
-        vectors: std::path::PathBuf,
+        /// Defaults to the embedded v1 suite, independent of the working directory.
+        #[arg(long)]
+        vectors: Option<std::path::PathBuf>,
         #[arg(long)]
         observed: Option<std::path::PathBuf>,
         #[arg(long)]
@@ -42,9 +43,11 @@ async fn main() {
         format,
     } = command;
     let result: Result<(), String> = async {
-        let suite: VectorSuite =
-            serde_json::from_slice(&std::fs::read(vectors).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
+        let bytes = match vectors {
+            Some(path) => std::fs::read(path).map_err(|e| e.to_string())?,
+            None => include_bytes!("../vectors/v1.json").to_vec(),
+        };
+        let suite: VectorSuite = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         let mut report = if let Some(path) = observed {
             let outputs = serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
