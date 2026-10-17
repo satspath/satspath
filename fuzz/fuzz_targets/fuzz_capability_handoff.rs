@@ -25,6 +25,7 @@ fuzz_target!(|data: &[u8]| {
             let network = match network {
                 BitcoinNetwork::Mainnet => "mainnet",
                 BitcoinNetwork::Testnet => "testnet",
+                BitcoinNetwork::Signet => "signet",
                 BitcoinNetwork::Regtest => "regtest",
             };
             let valid = format!("bitcoin:{address}?amount=0.00000001");
