@@ -26,7 +26,6 @@ fuzz_target!(|data: &[u8]| {
         profile.alias = "alice@example.com".into();
         profile.identity_pubkey = public.to_string();
         profile.expires_at = None;
-        profile.revoked = false;
         profile.pqc_required = false;
         profile.hybrid_pubkey = None;
         let signed = satspath_core::sign_profile(profile, &key).unwrap();
@@ -36,14 +35,17 @@ fuzz_target!(|data: &[u8]| {
             "tags": [["d", "satspath-profile:alice@example.com"]],
             "content": serde_json::to_string(&signed).unwrap()
         }]);
-        assert!(signed_profile_from_event(
+        let resolved = signed_profile_from_event(
             &frame.to_string(),
             "sub",
             &public.x_only_public_key().0.to_string(),
             "alice@example.com"
-        )
-        .unwrap()
-        .is_some());
+        );
+        if signed.profile.revoked {
+            assert!(matches!(resolved, Err(satspath_core::SatsPathError::RegistryError(_))));
+        } else {
+            assert!(resolved.unwrap().is_some());
+        }
         for changed in [
             {
                 let mut value = frame.clone();

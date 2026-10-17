@@ -9,6 +9,13 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(mut profile) = serde_json::from_slice::<PaymentProfile>(data) {
         let key = SecretKey::from_slice(&[1; 32]).unwrap();
         profile.identity_pubkey = PublicKey::from_secret_key(&Secp256k1::new(), &key).to_string();
+        if profile.pqc_required || profile.hybrid_pubkey.is_some() {
+            // Classical-only signing cannot satisfy a PQC-demanding profile.
+            if let Ok(signed) = sign_profile(profile, &key) {
+                assert!(!verify_signed_profile(&signed).unwrap_or(false));
+            }
+            return;
+        }
         if let Ok(signed) = sign_profile(profile, &key) {
             assert!(verify_signed_profile(&signed).unwrap());
             if !signed.profile.methods.is_empty() {

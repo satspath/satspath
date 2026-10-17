@@ -16,6 +16,23 @@ fuzz_target!(|data: &[u8]| {
             Some(1),
         );
         let _ = validate_payload(&method, "lntb1invalid", "regtest", Some(u64::MAX));
+        if let PaymentMethod::Onchain {
+            network,
+            address: Some(address),
+            ..
+        } = &method
+        {
+            let network = match network {
+                BitcoinNetwork::Mainnet => "mainnet",
+                BitcoinNetwork::Testnet => "testnet",
+                BitcoinNetwork::Regtest => "regtest",
+            };
+            let valid = format!("bitcoin:{address}?amount=0.00000001");
+            if validate_payload(&method, &valid, network, Some(1)).is_ok() {
+                let wrong_amount = format!("bitcoin:{address}?amount=0.00000002");
+                assert!(validate_payload(&method, &wrong_amount, network, Some(1)).is_err());
+            }
+        }
     }
     // A method-compatible payload must be amount-bound, not just parseable.
     let method = PaymentMethod::Onchain {

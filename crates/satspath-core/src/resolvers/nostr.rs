@@ -649,4 +649,24 @@ mod tests {
             Err(SatsPathError::InvalidSignature)
         ));
     }
+
+    #[test]
+    fn signed_revocation_vetoes_stale_relay_profile_in_any_order() {
+        let stale = signed("alice@example.com");
+        let revoked = || SatsPathError::RegistryError("signed revocation".into());
+        for results in [
+            vec![Ok(stale.clone()), Err(revoked())],
+            vec![Err(revoked()), Ok(stale.clone())],
+            vec![
+                Err(SatsPathError::InvalidSignature),
+                Err(revoked()),
+                Ok(stale.clone()),
+            ],
+        ] {
+            assert!(matches!(
+                select_relay_profile(results, "alice@example.com"),
+                Err(SatsPathError::RegistryError(_))
+            ));
+        }
+    }
 }
