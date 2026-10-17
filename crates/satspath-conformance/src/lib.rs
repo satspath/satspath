@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
-use satspath_core::crypto::{canonical_profile_bytes, check_profile_expiry, verify_signed_profile};
+use satspath_core::crypto::{
+    canonical_profile_bytes, check_profile_expiry, is_profile_expired_at, verify_signed_profile,
+};
 use satspath_core::{PaymentMethod, PaymentProfile, SignedPaymentProfile};
 
 #[derive(Debug, Deserialize)]
@@ -195,11 +197,7 @@ fn evaluate(vector: &Vector) -> Result<Option<Value>, String> {
                 .map(|profile| {
                     if !verify_signed_profile(profile).unwrap_or(false)
                         || profile.profile.revoked
-                        // Match the protocol's 60-second expiry grace at the vector's fixed time.
-                        || profile
-                            .profile
-                            .expires_at
-                            .is_some_and(|expiry| comparison.as_of >= expiry.saturating_add(60))
+                        || is_profile_expired_at(&profile.profile, comparison.as_of)
                     {
                         None
                     } else {
@@ -244,6 +242,18 @@ mod tests {
         suite.vectors[0].input["as_of"] = json!(1_800_000_060);
         suite.vectors[0].expected = json!({"decision": "reject"});
         assert!(run_suite(&suite).is_complete());
+    }
+
+    #[test]
+    fn fixed_time_expiry_uses_core_grace_boundary() {
+        let suite: VectorSuite = serde_json::from_str(include_str!("../vectors/v1.json")).unwrap();
+        let signed: SignedPaymentProfile =
+            serde_json::from_value(suite.vectors[0].input.clone()).unwrap();
+        let expiry = signed.profile.expires_at.unwrap();
+        assert!(!is_profile_expired_at(&signed.profile, expiry + 59));
+        assert!(is_profile_expired_at(&signed.profile, expiry + 60));
+        // Signature validity is independent of wall-clock expiry.
+        assert!(verify_signed_profile(&signed).unwrap());
     }
 
     #[test]
