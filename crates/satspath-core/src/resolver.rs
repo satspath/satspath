@@ -247,6 +247,11 @@ impl ChainResolver {
             match entry.resolver.resolve_alias(alias).await {
                 Ok(signed) => {
                     let profile = &signed.profile;
+                    // Never treat unauthenticated revocation, expiry or alias
+                    // claims as authoritative protocol outcomes.
+                    if !verify_signed_profile(&signed)? {
+                        return Err(SatsPathError::InvalidSignature);
+                    }
                     if canonical_identifier(&profile.alias) != canonical {
                         return Err(SatsPathError::ResolverDisagreement(format!(
                             "{} returned alias {} instead of {}",
@@ -264,9 +269,6 @@ impl ChainResolver {
                             "{} returned an expired profile",
                             entry.source
                         )));
-                    }
-                    if !verify_signed_profile(&signed)? {
-                        return Err(SatsPathError::InvalidSignature);
                     }
                     if self
                         .pinned_key

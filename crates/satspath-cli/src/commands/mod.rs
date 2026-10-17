@@ -51,10 +51,6 @@ pub(crate) fn satspath_dir() -> PathBuf {
 pub(crate) fn open_registry() -> Result<Registry> {
     let dir = satspath_dir();
     if !dir.exists() {
-        let local = PathBuf::from(".satspath");
-        if local.exists() {
-            return Ok(Registry::open(&local)?);
-        }
         anyhow::bail!("{}/ not found. Run `satspath init` first.", dir.display());
     }
     Ok(Registry::open(&dir)?)

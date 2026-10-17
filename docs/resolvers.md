@@ -39,9 +39,18 @@ already stored alias; public sources are not expected to publish the same
 locally imported profile. For an alias absent locally, public-source outages
 remain hard errors rather than an unsafe fallback.
 
+The public router `quote()` API consults a local registry only when
+`SATSPATH_DIR` is explicitly configured; a planted `.satspath/` in the working
+directory cannot silently replace the public source chain. CLI commands use
+their documented default `.satspath/` when no directory is configured. If
+`SATSPATH_DIR` is set, a missing configured directory never falls back to a
+different working-directory registry.
+
 The strict `ChainResolver` MUST:
 
-1. Normalize the identifier and query every configured source in order.
+1. Query every configured source in order with the caller's identifier (some
+   transports require a `₿` prefix); normalize identifiers when comparing
+   returned aliases. Each transport parses its own input form.
 2. Continue past explicit `NotFound` responses. Only an *authoritative* source can establish identity; a supplementary source can corroborate but never bootstrap it.
 3. Reject transport failures rather than letting blocking of a preferred transport downgrade the decision. Configure only sources expected for this identifier; a disconnected optional source should not be configured as required.
 4. Verify each returned signature, alias, revocation and expiry independently.

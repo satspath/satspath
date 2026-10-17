@@ -446,12 +446,25 @@ fn recipient_of(profile: &PaymentProfile, verified: bool) -> QuoteRecipient {
     }
 }
 
-/// Local profiles have one authoritative source; absent aliases use public
-/// sources which must agree. Registry lives in the gitignored `.satspath/`.
+/// A locally configured registry has one authoritative source; absent aliases
+/// use public sources which must agree. A process's current directory is not
+/// an implicit trust root for the public quote API.
 fn default_resolver(recipient: &str) -> satspath_core::Result<ChainResolver> {
+    let configured_dir = std::env::var("SATSPATH_DIR").ok();
+    let local = configured_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::path::Path::new);
+    resolver_with_local_root(recipient, local)
+}
+
+fn resolver_with_local_root(
+    recipient: &str,
+    local: Option<&std::path::Path>,
+) -> satspath_core::Result<ChainResolver> {
     let mut chain = ChainResolver::new();
-    let local = std::path::Path::new(".satspath");
-    if local.exists() {
+    if let Some(local) = local.filter(|path| path.exists()) {
         let registry = Registry::open(local)?;
         if registry.is_registered(recipient) {
             return Ok(chain.push_authoritative("local-registry", registry));
@@ -468,6 +481,14 @@ mod tests {
     use async_trait::async_trait;
     use satspath_core::crypto::{generate_identity_keypair, sign_profile};
     use satspath_core::{BitcoinNetwork, PaymentProfile, SignedPaymentProfile};
+
+    #[test]
+    fn public_quote_does_not_implicitly_trust_local_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("registry.json"), "invalid-json").unwrap();
+        assert!(resolver_with_local_root("alice@example.com", None).is_ok());
+        assert!(resolver_with_local_root("alice@example.com", Some(dir.path())).is_err());
+    }
 
     // Deterministic fees: cheap next block (on-chain viable when a method exists).
     fn cheap_fees() -> FeeEstimate {
