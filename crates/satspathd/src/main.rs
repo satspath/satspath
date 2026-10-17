@@ -222,7 +222,7 @@ mod tests {
         profile::{recover_profile_key, rotate_profile_key, sign_and_store},
         quote::{pay_response, quote_response},
         resolve::resolve_v2_envelope,
-        send::{receive_view, send_response, send_response_with_resolver},
+        send::{receive_view, send_response_with_resolver},
         wallet::{load_or_create_identity, save_identity_key, save_wallet},
     };
     use crate::rate_limit;
@@ -1525,12 +1525,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_other_resolver_errors_still_create_and_persist_invites() {
+    async fn send_only_definitive_absence_creates_and_persists_an_invite() {
         use satspath_core::SatsPathError;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let response = send_response_with_resolver(
+            &state,
+            SendRequest {
+                recipient: "₿alice@example.com".into(),
+                amount_sats: 25_000,
+                routing_ok: Some(true),
+            },
+            &SendErrorResolver(|| SatsPathError::AliasNotFound("₿alice@example.com".into())),
+        )
+        .await;
+        let SendResponse::Invite { claim_url, .. } = response else {
+            panic!("expected an invite, got {response:?}");
+        };
+        let mut store = satspath_core::InviteStore::open(dir.path()).unwrap();
+        let invites = store.list().unwrap();
+        assert_eq!(invites.len(), 1);
+        assert_eq!(invites[0].amount_sats, 25_000);
+        assert!(claim_url.contains(&format!("invite_id={}", invites[0].invite_id)));
+
         let errors: [fn() -> SatsPathError; 3] = [
-            || SatsPathError::AliasNotFound("₿alice@example.com".into()),
             || SatsPathError::NetworkError("DNS lookup failed".into()),
             || SatsPathError::Bip353("no bitcoin: TXT record".into()),
+            || SatsPathError::ResolverDisagreement("different identity keys".into()),
         ];
         for error in errors {
             let dir = tempfile::tempdir().unwrap();
@@ -1546,14 +1567,14 @@ mod tests {
             )
             .await;
 
-            let SendResponse::Invite { claim_url, .. } = response else {
-                panic!("expected an invite, got {response:?}");
-            };
-            let mut store = satspath_core::InviteStore::open(dir.path()).unwrap();
-            let invites = store.list().unwrap();
-            assert_eq!(invites.len(), 1);
-            assert_eq!(invites[0].amount_sats, 25_000);
-            assert!(claim_url.contains(&format!("invite_id={}", invites[0].invite_id)));
+            assert!(
+                matches!(response, SendResponse::NoRoute { .. }),
+                "{response:?}"
+            );
+            assert!(!dir
+                .path()
+                .join(satspath_core::invite_store::INVITES_FILE)
+                .exists());
         }
     }
 
@@ -1588,14 +1609,18 @@ mod tests {
         let state = test_state(dir.path());
         load_or_create_identity(dir.path()).unwrap();
 
-        // 1. Sender initiates send to unregistered alias
-        let send_res = send_response(
+        // 1. A resolver explicitly reports absence; this does not depend on
+        // public DNS/Nostr availability, which must not become an invite.
+        let send_res = send_response_with_resolver(
             &state,
             SendRequest {
                 recipient: "carol@example.com".into(),
                 amount_sats: 25_000,
                 routing_ok: Some(true),
             },
+            &SendErrorResolver(|| {
+                satspath_core::SatsPathError::AliasNotFound("carol@example.com".into())
+            }),
         )
         .await;
 

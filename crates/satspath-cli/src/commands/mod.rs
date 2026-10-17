@@ -51,10 +51,6 @@ pub(crate) fn satspath_dir() -> PathBuf {
 pub(crate) fn open_registry() -> Result<Registry> {
     let dir = satspath_dir();
     if !dir.exists() {
-        let local = PathBuf::from(".satspath");
-        if local.exists() {
-            return Ok(Registry::open(&local)?);
-        }
         anyhow::bail!("{}/ not found. Run `satspath init` first.", dir.display());
     }
     Ok(Registry::open(&dir)?)
@@ -65,15 +61,22 @@ use satspath_core::resolvers::bip353::Bip353Resolver;
 use satspath_core::resolvers::http::HttpResolver;
 use satspath_core::resolvers::nostr::NostrResolver;
 
-pub(crate) fn get_resolver() -> Result<ChainResolver> {
+pub(crate) fn get_resolver(alias: &str) -> Result<ChainResolver> {
     let mut chain = ChainResolver::new();
 
-    // Add local registry first
-    if let Ok(reg) = open_registry() {
-        chain = chain.push(reg);
+    // A locally registered/imported alias has one authoritative source: the
+    // verified local registry. Unrelated public transports are not expected
+    // for that alias and must not turn offline `show` into a network request.
+    if satspath_dir().exists() {
+        let reg = open_registry()?;
+        if reg.is_registered(alias) {
+            return Ok(chain.push_authoritative("local-registry", reg));
+        }
     }
 
-    chain = chain.push(Bip353Resolver::new(satspath_dir()));
+    // For non-local aliases, every configured public source must agree or
+    // explicitly report NotFound. An outage is never silently downgraded.
+    chain = chain.push(Bip353Resolver::default());
 
     // Add public HTTP resolver fallback
     chain = chain.push(HttpResolver::new());

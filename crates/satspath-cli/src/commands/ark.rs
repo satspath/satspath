@@ -25,7 +25,7 @@ pub async fn cmd_ark_receive(alias: &str, testnet: bool, execute_testnet: bool) 
     if execute_testnet {
         anyhow::bail!("Ark receive execution requires --confirm '{EXEC_CONFIRMATION}' in a future implementation. Preview only.");
     }
-    let signed = get_resolver()?.resolve_alias(alias).await?;
+    let signed = get_resolver(alias)?.resolve_alias(alias).await?;
     let pointer = first_ark_pointer(&signed.profile.methods)?;
     let report = build_validation_report(alias, &signed, &pointer)?;
     print_validation_report(&report);
@@ -48,7 +48,7 @@ pub async fn cmd_ark_send(
     confirm: Option<&str>,
 ) -> Result<()> {
     ensure_testnet(testnet)?;
-    let signed = get_resolver()?.resolve_alias(alias).await?;
+    let signed = get_resolver(alias)?.resolve_alias(alias).await?;
     let pointer = first_ark_pointer(&signed.profile.methods)?;
     let report = build_validation_report(alias, &signed, &pointer)?;
     let plan = plan_ark_route(
@@ -88,7 +88,7 @@ pub async fn cmd_ark_swap(
     confirm: Option<&str>,
 ) -> Result<()> {
     ensure_testnet(testnet)?;
-    let signed = get_resolver()?.resolve_alias(alias).await?;
+    let signed = get_resolver(alias)?.resolve_alias(alias).await?;
     let pointer = first_ark_pointer(&signed.profile.methods).ok();
     let route_kind = route_kind_from_sides(from, to)?;
     let requires_builder = match route_kind {

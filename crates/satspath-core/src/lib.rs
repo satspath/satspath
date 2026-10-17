@@ -108,7 +108,8 @@ pub use invite_store::{InviteStore, INVITES_FILE};
 #[cfg(feature = "std")]
 pub use resolver::{
     verify_payment_method_states, ChainResolver, PaymentMethodVerificationState, ProfileResolver,
-    ResolvedTransparentProfile, ResolverSource, VerificationStates,
+    ResolutionReport, ResolvedTransparentProfile, ResolverObservation, ResolverRole,
+    ResolverSource, VerificationStates,
 };
 #[cfg(feature = "std")]
 pub use resolvers::{bip353::Bip353Resolver, http::HttpResolver, nostr::NostrResolver};

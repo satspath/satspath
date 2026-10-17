@@ -124,7 +124,14 @@ pub(crate) async fn send_response(state: &AppState, body: SendRequest) -> SendRe
             reason: e.to_string(),
         };
     }
-    let resolver = resolver_chain(&state.home);
+    let resolver = match resolver_chain(&state.home, &body.recipient) {
+        Ok(resolver) => resolver,
+        Err(error) => {
+            return SendResponse::NoRoute {
+                reason: error.to_string(),
+            }
+        }
+    };
     send_response_with_resolver(state, body, &resolver).await
 }
 
@@ -205,10 +212,7 @@ pub(crate) async fn send_response_with_resolver(
                 },
             }
         }
-        Err(SatsPathError::Bip353Unauthenticated) => SendResponse::NoRoute {
-            reason: SatsPathError::Bip353Unauthenticated.to_string(),
-        },
-        Err(_) => {
+        Err(SatsPathError::AliasNotFound(_)) => {
             let secret_opt = load_wallet(&state.home).ok().and_then(|w| {
                 w.identity_pubkey.and_then(|pk| {
                     crate::handlers::wallet::load_identity_key(&state.home, &pk).ok()
@@ -257,6 +261,9 @@ pub(crate) async fn send_response_with_resolver(
                 safety: safety_status(),
             }
         }
+        Err(error) => SendResponse::NoRoute {
+            reason: error.to_string(),
+        },
     }
 }
 

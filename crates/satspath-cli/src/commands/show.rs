@@ -23,7 +23,7 @@ async fn fetch_text(url: &str) -> Result<String> {
 }
 
 pub async fn cmd_show(alias: &str, verify_online: bool) -> Result<()> {
-    let resolver = get_resolver()?;
+    let resolver = get_resolver(alias)?;
     let signed = resolver
         .resolve_alias(alias)
         .await

@@ -118,7 +118,7 @@ pub async fn build_mainnet_preview_response(
 ) -> Result<QuoteResponse> {
     validate_amount_sats(amount_sats).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let resolver = get_resolver()?;
+    let resolver = get_resolver(recipient)?;
     let signed = match resolver.resolve_alias(recipient).await {
         Ok(signed) => signed,
         Err(SatsPathError::AliasNotFound(_)) => {

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::crypto::{canonical_profile_bytes, check_profile_expiry, verify_signed_profile};
 use crate::privacy::canonical_identifier;
 use crate::{Result, SatsPathError, SignedPaymentProfile};
 use serde::{Deserialize, Serialize};
@@ -132,21 +133,216 @@ pub trait ProfileResolver {
     async fn resolve_alias(&self, alias: &str) -> Result<SignedPaymentProfile>;
 }
 
-/// A composite resolver that queries a chain of resolvers in order.
+/// Whether a source is eligible to establish the alias or only corroborate it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolverRole {
+    Authoritative,
+    Supplementary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolverObservation {
+    pub source: String,
+    pub role: ResolverRole,
+    pub found: bool,
+}
+
+/// Report returned alongside an agreed, signed profile. A rejection returns
+/// `ResolverDisagreement` or the original error, never a payable candidate.
+#[derive(Debug, Clone)]
+pub struct ResolutionReport {
+    pub profile: SignedPaymentProfile,
+    pub observations: Vec<ResolverObservation>,
+}
+
+struct ResolverEntry {
+    source: String,
+    role: ResolverRole,
+    resolver: Box<dyn ProfileResolver + Send + Sync>,
+}
+
+/// A strict composite resolver. All configured sources are queried in order;
+/// an outage, invalid signature, divergent key, stale sequence or different
+/// capability set blocks payment instead of silently choosing a fallback.
+/// Configure only sources actually expected for this identifier.
 pub struct ChainResolver {
-    resolvers: Vec<Box<dyn ProfileResolver + Send + Sync>>,
+    resolvers: Vec<ResolverEntry>,
+    pinned_key: Option<String>,
+    minimum_sequence: Option<u64>,
+    required_capabilities: Vec<String>,
 }
 
 impl ChainResolver {
     pub fn new() -> Self {
         Self {
             resolvers: Vec::new(),
+            pinned_key: None,
+            minimum_sequence: None,
+            required_capabilities: Vec::new(),
         }
     }
 
     pub fn push<R: ProfileResolver + Send + Sync + 'static>(mut self, resolver: R) -> Self {
-        self.resolvers.push(Box::new(resolver));
+        let source = format!("resolver-{}", self.resolvers.len());
+        self.resolvers.push(ResolverEntry {
+            source,
+            role: ResolverRole::Authoritative,
+            resolver: Box::new(resolver),
+        });
         self
+    }
+
+    /// Register a source which may establish identity on first contact.
+    pub fn push_authoritative<R: ProfileResolver + Send + Sync + 'static>(
+        mut self,
+        source: impl Into<String>,
+        resolver: R,
+    ) -> Self {
+        self.resolvers.push(ResolverEntry {
+            source: source.into(),
+            role: ResolverRole::Authoritative,
+            resolver: Box::new(resolver),
+        });
+        self
+    }
+
+    /// Register an additional source which can corroborate but not establish
+    /// identity on its own. Its absence is permitted; its outage is not.
+    pub fn push_supplementary<R: ProfileResolver + Send + Sync + 'static>(
+        mut self,
+        source: impl Into<String>,
+        resolver: R,
+    ) -> Self {
+        self.resolvers.push(ResolverEntry {
+            source: source.into(),
+            role: ResolverRole::Supplementary,
+            resolver: Box::new(resolver),
+        });
+        self
+    }
+
+    /// Set the currently trusted identity key and minimum observed sequence.
+    /// Updating a pin after rotation requires independently verified history;
+    /// a single resolver's rotation claim never updates it automatically.
+    pub fn with_continuity_pin(mut self, key: String, sequence: u64) -> Self {
+        self.pinned_key = Some(key);
+        self.minimum_sequence = Some(sequence);
+        self
+    }
+
+    /// Descriptors previously accepted by the wallet. A source suppressing
+    /// any of them cannot silently force a lower-capability payment route.
+    pub fn with_required_capabilities(mut self, descriptors: Vec<String>) -> Self {
+        self.required_capabilities = descriptors;
+        self
+    }
+
+    pub async fn resolve_with_report(&self, alias: &str) -> Result<ResolutionReport> {
+        let canonical = canonical_identifier(alias);
+        let mut observations = Vec::with_capacity(self.resolvers.len());
+        let mut agreed: Option<Vec<u8>> = None;
+        let mut selected = None;
+        for entry in &self.resolvers {
+            match entry.resolver.resolve_alias(alias).await {
+                Ok(signed) => {
+                    let profile = &signed.profile;
+                    // Never treat unauthenticated revocation, expiry or alias
+                    // claims as authoritative protocol outcomes.
+                    if !verify_signed_profile(&signed)? {
+                        return Err(SatsPathError::InvalidSignature);
+                    }
+                    if canonical_identifier(&profile.alias) != canonical {
+                        return Err(SatsPathError::ResolverDisagreement(format!(
+                            "{} returned alias {} instead of {}",
+                            entry.source, profile.alias, alias
+                        )));
+                    }
+                    if profile.revoked {
+                        return Err(SatsPathError::RegistryError(format!(
+                            "Alias {} has been revoked",
+                            profile.alias
+                        )));
+                    }
+                    if check_profile_expiry(profile).is_err() {
+                        return Err(SatsPathError::ResolverDisagreement(format!(
+                            "{} returned an expired profile",
+                            entry.source
+                        )));
+                    }
+                    if self
+                        .pinned_key
+                        .as_ref()
+                        .is_some_and(|key| key != &profile.identity_pubkey)
+                    {
+                        return Err(SatsPathError::UnauthorizedKeyReplacement);
+                    }
+                    if self
+                        .minimum_sequence
+                        .is_some_and(|seq| profile.sequence.is_none_or(|n| n < seq))
+                    {
+                        return Err(SatsPathError::ResolverDisagreement(format!(
+                            "{} returned a stale sequence",
+                            entry.source
+                        )));
+                    }
+                    if !self.required_capabilities.iter().all(|descriptor| {
+                        profile
+                            .methods
+                            .iter()
+                            .any(|method| method.ownership_descriptor() == *descriptor)
+                    }) {
+                        return Err(SatsPathError::ResolverDisagreement(format!(
+                            "{} suppressed a pinned payment capability",
+                            entry.source
+                        )));
+                    }
+                    // Equality of the entire signed payload also detects
+                    // capability suppression, replay and equal-sequence forks.
+                    let bytes = canonical_profile_bytes(profile)?;
+                    if agreed.as_ref().is_some_and(|prev| prev != &bytes) {
+                        return Err(SatsPathError::ResolverDisagreement(format!(
+                            "{} disagrees on identity, sequence or capabilities",
+                            entry.source
+                        )));
+                    }
+                    agreed = Some(bytes);
+                    if selected.is_none() && entry.role == ResolverRole::Authoritative {
+                        selected = Some(signed);
+                    }
+                    observations.push(ResolverObservation {
+                        source: entry.source.clone(),
+                        role: entry.role,
+                        found: true,
+                    });
+                }
+                Err(SatsPathError::AliasNotFound(_)) => observations.push(ResolverObservation {
+                    source: entry.source.clone(),
+                    role: entry.role,
+                    found: false,
+                }),
+                Err(SatsPathError::NetworkError(reason)) => {
+                    return Err(SatsPathError::NetworkError(format!(
+                        "{} unavailable; refusing downgrade: {reason}",
+                        entry.source
+                    )));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let profile = selected.ok_or_else(|| {
+            if agreed.is_some() {
+                SatsPathError::ResolverDisagreement(
+                    "only supplementary sources returned a profile".into(),
+                )
+            } else {
+                SatsPathError::AliasNotFound(alias.into())
+            }
+        })?;
+        Ok(ResolutionReport {
+            profile,
+            observations,
+        })
     }
 }
 
@@ -159,35 +355,7 @@ impl Default for ChainResolver {
 #[async_trait]
 impl ProfileResolver for ChainResolver {
     async fn resolve_alias(&self, alias: &str) -> Result<SignedPaymentProfile> {
-        let requested_canonical = canonical_identifier(alias);
-        for resolver in &self.resolvers {
-            match resolver.resolve_alias(alias).await {
-                Ok(profile) => {
-                    // SEC-02: Profile Substitution Attack mitigation
-                    let returned_canonical = canonical_identifier(&profile.profile.alias);
-                    if returned_canonical != requested_canonical {
-                        // A resolver returned a valid profile but for a DIFFERENT user.
-                        // Fail hard to prevent funds from being routed to the attacker.
-                        return Err(SatsPathError::AliasNotFound(format!(
-                            "security failure: requested {}, but got profile for {}",
-                            requested_canonical, returned_canonical
-                        )));
-                    }
-                    if profile.profile.revoked {
-                        return Err(SatsPathError::RegistryError(format!(
-                            "Alias {} has been revoked",
-                            profile.profile.alias
-                        )));
-                    }
-                    return Ok(profile);
-                }
-                Err(SatsPathError::AliasNotFound(_)) => continue,
-                Err(SatsPathError::NetworkError(_)) => continue,
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(SatsPathError::AliasNotFound(alias.to_string()))
+        Ok(self.resolve_with_report(alias).await?.profile)
     }
 }
 
@@ -292,7 +460,7 @@ mod tests {
         assert!(res.is_err());
         let err = res.unwrap_err().to_string();
         assert!(
-            err.contains("security failure"),
+            err.contains("resolver disagreement"),
             "Expected security failure message, got: {}",
             err
         );
