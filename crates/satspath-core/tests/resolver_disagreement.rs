@@ -111,6 +111,24 @@ async fn conflict_vectors_fail_closed() {
         Err(SatsPathError::InvalidSignature)
     ));
 
+    let mut forged_revocation = base.clone();
+    forged_revocation.profile.revoked = true;
+    let resolver =
+        ChainResolver::new().push_authoritative("https", StaticResolver(Ok(forged_revocation)));
+    assert!(matches!(
+        resolver.resolve_alias("alice@example.com").await,
+        Err(SatsPathError::InvalidSignature)
+    ));
+
+    let mut forged_expiry = base.clone();
+    forged_expiry.profile.expires_at = Some(1);
+    let resolver =
+        ChainResolver::new().push_authoritative("https", StaticResolver(Ok(forged_expiry)));
+    assert!(matches!(
+        resolver.resolve_alias("alice@example.com").await,
+        Err(SatsPathError::InvalidSignature)
+    ));
+
     let mut expired = base.clone().profile;
     expired.expires_at = Some(1);
     let resolver = ChainResolver::new().push_authoritative(
