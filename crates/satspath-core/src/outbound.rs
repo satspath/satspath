@@ -255,6 +255,66 @@ Connection: close
         }
     }
 
+    /// The HTTP client used by fee sources rejects all private or mixed DNS
+    /// answers before opening a socket, even if one public answer is present.
+    #[tokio::test]
+    async fn http_connector_rejects_private_and_mixed_dns_answers() {
+        for addresses in [
+            vec!["10.0.0.1:0"],
+            vec!["8.8.8.8:0", "127.0.0.1:0"],
+            vec!["169.254.169.254:0", "8.8.8.8:0"],
+        ] {
+            let resolver = Arc::new(RebindingResolver {
+                first: addresses.into_iter().map(|a| a.parse().unwrap()).collect(),
+                calls: AtomicUsize::new(0),
+            });
+            let client = http_client_with_resolver(Duration::from_secs(2), resolver.clone());
+            assert!(client
+                .get("https://fee.example/api/fee-estimates")
+                .send()
+                .await
+                .is_err());
+            assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// The private address is reachable; a generic connection failure cannot
+    /// satisfy the rejection assertion without validating the DNS answer.
+    #[tokio::test]
+    async fn http_connector_never_connects_to_rejected_dns_answer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let resolver = Arc::new(RebindingResolver {
+            first: vec![address],
+            calls: AtomicUsize::new(0),
+        });
+        let client = http_client_with_resolver(Duration::from_secs(1), resolver.clone());
+        let server = tokio::spawn(async move {
+            match tokio::time::timeout(Duration::from_millis(200), listener.accept()).await {
+                Ok(Ok((mut socket, _))) => {
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                        .await;
+                    true
+                }
+                _ => false,
+            }
+        });
+        let result = client
+            .get(format!(
+                "http://fee.example:{}/api/fee-estimates",
+                address.port()
+            ))
+            .send()
+            .await;
+        assert!(result.is_err());
+        assert!(
+            !server.await.unwrap(),
+            "private DNS answer reached the socket"
+        );
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+    }
+
     /// Literal IPs and unsafe URL forms cannot bypass relay host validation.
     #[test]
     fn reject_unsafe_relay_urls() {
