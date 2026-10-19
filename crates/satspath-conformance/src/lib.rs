@@ -260,23 +260,25 @@ fn evaluate(vector: &Vector) -> Result<Option<Value>, String> {
         "bolt12" => {
             let check: Bolt12Check =
                 serde_json::from_value(vector.input.clone()).map_err(|e| e.to_string())?;
-            let valid = satspath_core::parse_bip321(&format!("bitcoin:?lno={}", check.offer))
-                .and_then(|parsed| {
-                    if !matches!(
-                        parsed.instructions.as_slice(),
-                        [Bip321Instruction::Bolt12Offer { .. }]
-                    ) {
-                        return Err(satspath_core::SatsPathError::InvalidPaymentUri(
-                            "expected a single BOLT12 offer".into(),
-                        ));
-                    }
-                    parsed.validate_handoff(
-                        check.amount_sats,
-                        bitcoin_network(check.network),
-                        check.as_of,
-                    )
-                })
-                .is_ok();
+            // Offers are Bech32 strings, not URI query fragments or parameters.
+            let valid = check.offer.bytes().all(|b| b.is_ascii_alphanumeric())
+                && satspath_core::parse_bip321(&format!("bitcoin:?lno={}", check.offer))
+                    .and_then(|parsed| {
+                        if !matches!(
+                            parsed.instructions.as_slice(),
+                            [Bip321Instruction::Bolt12Offer { .. }]
+                        ) {
+                            return Err(satspath_core::SatsPathError::InvalidPaymentUri(
+                                "expected a single BOLT12 offer".into(),
+                            ));
+                        }
+                        parsed.validate_handoff(
+                            check.amount_sats,
+                            bitcoin_network(check.network),
+                            check.as_of,
+                        )
+                    })
+                    .is_ok();
             json!({"valid": valid})
         }
         "rotation" => {

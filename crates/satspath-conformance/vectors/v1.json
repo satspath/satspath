@@ -511,6 +511,19 @@
       }
     },
     {
+      "id": "bolt12-injected-query-parameter",
+      "kind": "bolt12",
+      "input": {
+        "offer": "lno1pcqk293pqfumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtes6r6ryy&label=x",
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": {
+        "valid": false
+      }
+    },
+    {
       "id": "rotation-invalid",
       "kind": "rotation",
       "input": {

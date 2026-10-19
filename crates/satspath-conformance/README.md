@@ -33,6 +33,8 @@ wall-clock time advances. CI runs these vectors through `cargo test --workspace`
 positive rotation history, PaymentIntent approval (#173) and authenticated
 resolver conflict policy (#174). These cannot be claimed PASS from this suite
 until executable adapters and vectors are added.
+The `rotation-invalid` vector checks malformed encoding only; it does not
+exercise authorization, acceptance, replay or event-chain continuity.
 The current negative resolver vectors exercise invalid signatures, not a
 conflict between two independently valid signed profiles or a valid signed
 revocation. Those cases remain pending until authenticated fixtures exist.
