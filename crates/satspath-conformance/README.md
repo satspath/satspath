@@ -12,6 +12,8 @@ cargo run -p satspath-conformance -- test --observed wallet-output.json --format
 `vectors/v1.json` is embedded by default (or supply `--vectors PATH`).
 Missing/incorrect results fail; unknown features are SKIP, never PASS. A PASS
 for a negative vector means the implementation **rejected** the unsafe input.
+`--observed` first verifies each expectation against the local reference
+evaluator; unsupported cases remain SKIP even if external JSON claims success.
 `expiry` cases supply `{"as_of": UNIX_SECONDS, "profile": {...}}`; both
 `expires_at + 59` (valid) and `expires_at + 60` (expired) are checked without
 relying on the current clock. `bip21` cases supply a `uri`, `amount_sats`,
