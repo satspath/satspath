@@ -10,7 +10,17 @@ cargo run -p satspath-conformance -- test --observed wallet-output.json --format
 ```
 
 `vectors/v1.json` is embedded by default (or supply `--vectors PATH`).
-Missing/incorrect results fail; unknown features are SKIP, never PASS.
+Missing/incorrect results fail; unknown features are SKIP, never PASS. A PASS
+for a negative vector means the implementation **rejected** the unsafe input.
+`expiry` cases supply `{"as_of": UNIX_SECONDS, "profile": {...}}`; both
+`expires_at + 59` (valid) and `expires_at + 60` (expired) are checked without
+relying on the current clock. `bip21` cases supply a `uri`, `amount_sats`,
+`network` and `as_of`; they validate every embedded payment instruction with
+the wallet-handoff policy, not just URI syntax. `capability` cases supply a
+`method`, `amount_sats`, `network` and `as_of`; a descriptor is reported only
+after method validation. Unsupported opaque Ark handoffs are rejected.
+`bolt12` cases supply `offer`, `amount_sats`, `network` and `as_of`, and use
+the same fixed-time handoff validation as the BIP-21 cases.
 `--observed` compares a third-party wallet or
 SDK's JSON object from vector ID to output; it does not execute that wallet or
 attest a real payment. The live resolver probe uses production HTTPS, SSRF/DNS

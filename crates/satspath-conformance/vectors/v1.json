@@ -81,11 +81,48 @@
       "id": "expired-profile",
       "kind": "expiry",
       "input": {
-        "alias": "alice@example.com",
-        "identity_pubkey": "03efcc8c5f74bb7352713b9bf51a5cc77a189cd971d3eac05b920bf567944cfcf1",
-        "methods": [],
-        "updated_at": 1,
-        "expires_at": 2
+        "as_of": 100,
+        "profile": {
+          "alias": "alice@example.com",
+          "identity_pubkey": "03efcc8c5f74bb7352713b9bf51a5cc77a189cd971d3eac05b920bf567944cfcf1",
+          "methods": [],
+          "updated_at": 1,
+          "expires_at": 2
+        }
+      },
+      "expected": {
+        "expired": true
+      }
+    },
+    {
+      "id": "expiry-grace-59",
+      "kind": "expiry",
+      "input": {
+        "as_of": 61,
+        "profile": {
+          "alias": "alice@example.com",
+          "identity_pubkey": "03efcc8c5f74bb7352713b9bf51a5cc77a189cd971d3eac05b920bf567944cfcf1",
+          "methods": [],
+          "updated_at": 1,
+          "expires_at": 2
+        }
+      },
+      "expected": {
+        "expired": false
+      }
+    },
+    {
+      "id": "expiry-grace-60",
+      "kind": "expiry",
+      "input": {
+        "as_of": 62,
+        "profile": {
+          "alias": "alice@example.com",
+          "identity_pubkey": "03efcc8c5f74bb7352713b9bf51a5cc77a189cd971d3eac05b920bf567944cfcf1",
+          "methods": [],
+          "updated_at": 1,
+          "expires_at": 2
+        }
       },
       "expected": {
         "expired": true
@@ -110,31 +147,367 @@
     {
       "id": "bip21-onchain",
       "kind": "bip21",
-      "input": "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00021000",
+      "input": {
+        "uri": "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00021000",
+        "amount_sats": 21000,
+        "network": "Mainnet",
+        "as_of": 1700000000
+      },
       "expected": {
         "address": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT",
         "amount_btc": "0.00021000"
       }
     },
     {
+      "id": "bip21-wrong-network",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00021000",
+        "amount_sats": 21000,
+        "network": "Testnet",
+        "as_of": 1700000000
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bip21-wrong-amount",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00021000",
+        "amount_sats": 21001,
+        "network": "Mainnet",
+        "as_of": 1700000000
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bip21-zero-amount",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00021000",
+        "amount_sats": 0,
+        "network": "Mainnet",
+        "as_of": 1700000000
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bip21-overflow-amount",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00021000",
+        "amount_sats": 2100000000000001,
+        "network": "Mainnet",
+        "as_of": 1700000000
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bip21-invalid-checksum",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyX?amount=0.00021000",
+        "amount_sats": 21000,
+        "network": "Mainnet",
+        "as_of": 1700000000
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bip21-empty-receiver",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:",
+        "amount_sats": 21000,
+        "network": "Mainnet",
+        "as_of": 1700000000
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bip21-metadata-without-receiver",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?label=Coffee",
+        "amount_sats": 21000,
+        "network": "Mainnet",
+        "as_of": 1700000000
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bip21-unsupported-parameter",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:1BoatSLRHtKNngkdXEeobR76b53LETtpyT?amount=0.00021000&payjoin=https%3A%2F%2Fexample.com",
+        "amount_sats": 21000,
+        "network": "Mainnet",
+        "as_of": 1700000000
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
       "id": "capability-descriptor",
       "kind": "capability",
       "input": {
-        "type": "Onchain",
-        "label": "test",
+        "method": {
+          "type": "Onchain",
+          "label": "test",
+          "network": "Testnet",
+          "address": "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn"
+        },
+        "amount_sats": 21000,
         "network": "Testnet",
-        "address": "tb1qexample"
+        "as_of": 1700000000
       },
       "expected": {
-        "descriptor": "onchain:testnet:tb1qexample"
+        "descriptor": "onchain:testnet:mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn"
       }
+    },
+    {
+      "id": "capability-invalid-address",
+      "kind": "capability",
+      "input": {
+        "method": {
+          "type": "Onchain",
+          "label": "test",
+          "network": "Testnet",
+          "address": "tb1qexample"
+        },
+        "amount_sats": 21000,
+        "network": "Testnet",
+        "as_of": 1700000000
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "capability-wrong-network",
+      "kind": "capability",
+      "input": {
+        "method": {
+          "type": "Onchain",
+          "label": "test",
+          "network": "Testnet",
+          "address": "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn"
+        },
+        "amount_sats": 21000,
+        "network": "Mainnet",
+        "as_of": 1700000000
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bolt11-valid-testnet",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?lightning=lntb20m1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygshp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqfpp3x9et2e20v6pu37c5d9vax37wxq72un989qrsgqdj545axuxtnfemtpwkc45hx9d2ft7x04mt8q7y6t0k2dge9e7h8kpy9p34ytyslj3yu569aalz2xdk8xkd7ltxqld94u8h2esmsmacgpghe9k8",
+        "amount_sats": 2000000,
+        "network": "Testnet",
+        "as_of": 1496314658
+      },
+      "expected": { "address": null, "amount_btc": null }
+    },
+    {
+      "id": "bolt11-wrong-network",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?lightning=lntb20m1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygshp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqfpp3x9et2e20v6pu37c5d9vax37wxq72un989qrsgqdj545axuxtnfemtpwkc45hx9d2ft7x04mt8q7y6t0k2dge9e7h8kpy9p34ytyslj3yu569aalz2xdk8xkd7ltxqld94u8h2esmsmacgpghe9k8",
+        "amount_sats": 2000000,
+        "network": "Mainnet",
+        "as_of": 1496314658
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bolt11-expired",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?lightning=lntb20m1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygshp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqfpp3x9et2e20v6pu37c5d9vax37wxq72un989qrsgqdj545axuxtnfemtpwkc45hx9d2ft7x04mt8q7y6t0k2dge9e7h8kpy9p34ytyslj3yu569aalz2xdk8xkd7ltxqld94u8h2esmsmacgpghe9k8",
+        "amount_sats": 2000000,
+        "network": "Testnet",
+        "as_of": 1496318258
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bolt11-wrong-amount",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?lightning=lntb20m1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygshp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqfpp3x9et2e20v6pu37c5d9vax37wxq72un989qrsgqdj545axuxtnfemtpwkc45hx9d2ft7x04mt8q7y6t0k2dge9e7h8kpy9p34ytyslj3yu569aalz2xdk8xkd7ltxqld94u8h2esmsmacgpghe9k8",
+        "amount_sats": 2000001,
+        "network": "Testnet",
+        "as_of": 1496314658
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bolt12-valid-mainnet",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?lno=lno1pcqk293pqfumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtes6r6ryy",
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": { "address": null, "amount_btc": null }
+    },
+    {
+      "id": "bolt12-expired",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?lno=lno1pcqk293pqfumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtes6r6ryy",
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 101
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bolt12-wrong-network",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?lno=lno1pcqk293pqfumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtes6r6ryy",
+        "amount_sats": 1000,
+        "network": "Regtest",
+        "as_of": 100
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bolt12-invalid-destination",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?lno=lno1malformed",
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "silent-valid-mainnet",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?sp=sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv",
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": { "address": null, "amount_btc": null }
+    },
+    {
+      "id": "silent-wrong-network",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?sp=sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv",
+        "amount_sats": 1000,
+        "network": "Testnet",
+        "as_of": 100
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "silent-truncated",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?sp=sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkq",
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "ark-valid-receiver",
+      "kind": "capability",
+      "input": {
+        "method": {
+          "type": "Ark",
+          "label": "Ark",
+          "server": "https://ark.example.com",
+          "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "expires_at": 101
+        },
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": { "descriptor": "ark:0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" }
+    },
+    {
+      "id": "ark-expired-receiver",
+      "kind": "capability",
+      "input": {
+        "method": {
+          "type": "Ark",
+          "label": "Ark",
+          "server": "https://ark.example.com",
+          "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "expires_at": 100
+        },
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "ark-invalid-pubkey",
+      "kind": "capability",
+      "input": {
+        "method": {
+          "type": "Ark",
+          "label": "Ark",
+          "server": "https://ark.example.com",
+          "pubkey": "00"
+        },
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "ark-opaque-unsupported",
+      "kind": "capability",
+      "input": {
+        "method": {
+          "type": "Ark",
+          "label": "Ark",
+          "server": "https://ark.example.com",
+          "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "opaque_uri": "ark1qexample"
+        },
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": { "error": "invalid" }
     },
     {
       "id": "bolt12-invalid",
       "kind": "bolt12",
-      "input": "lno1malformed",
+      "input": {
+        "offer": "lno1malformed",
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 100
+      },
       "expected": {
         "valid": false
+      }
+    },
+    {
+      "id": "bolt12-valid",
+      "kind": "bolt12",
+      "input": {
+        "offer": "lno1pcqk293pqfumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtes6r6ryy",
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": {
+        "valid": true
       }
     },
     {

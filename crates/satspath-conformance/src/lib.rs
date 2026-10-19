@@ -6,10 +6,13 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
 use satspath_core::crypto::{
-    canonical_profile_bytes, check_profile_expiry, is_profile_expired_at, verify_signed_profile,
+    canonical_profile_bytes, is_profile_expired_at, verify_signed_profile,
 };
-use satspath_core::{PaymentMethod, PaymentProfile, SignedPaymentProfile};
+use satspath_core::{
+    Bip321Instruction, BitcoinNetwork, PaymentMethod, PaymentProfile, SignedPaymentProfile,
+};
 
+/// A versioned collection of independently comparable reference cases.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VectorSuite {
@@ -17,6 +20,7 @@ pub struct VectorSuite {
     pub vectors: Vec<Vector>,
 }
 
+/// A named input and its expected observable JSON result.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Vector {
@@ -24,6 +28,40 @@ pub struct Vector {
     pub kind: String,
     pub input: Value,
     pub expected: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExpiryCheck {
+    as_of: i64,
+    profile: PaymentProfile,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandoffCheck {
+    uri: String,
+    amount_sats: u64,
+    network: BitcoinNetwork,
+    as_of: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Bolt12Check {
+    offer: String,
+    amount_sats: u64,
+    network: BitcoinNetwork,
+    as_of: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapabilityCheck {
+    method: PaymentMethod,
+    amount_sats: u64,
+    network: BitcoinNetwork,
+    as_of: i64,
 }
 
 #[derive(Deserialize)]
@@ -42,6 +80,7 @@ pub enum CaseStatus {
     Skip,
 }
 
+/// The result and diagnostic for one vector.
 #[derive(Debug, Serialize)]
 pub struct CaseReport {
     pub id: String,
@@ -50,6 +89,7 @@ pub struct CaseReport {
     pub detail: String,
 }
 
+/// Totals and per-case results for a suite.
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub passed: usize,
@@ -59,11 +99,13 @@ pub struct Report {
 }
 
 impl Report {
+    /// Only a report with every vector passing is complete.
     pub fn is_complete(&self) -> bool {
         self.failed == 0 && self.skipped == 0
     }
 }
 
+/// Execute the embedded reference policy against the supplied vectors.
 pub fn run_suite(suite: &VectorSuite) -> Report {
     run(suite, None)
 }
@@ -133,6 +175,7 @@ fn run(suite: &VectorSuite, observed: Option<&HashMap<String, Value>>) -> Report
     summarize(cases)
 }
 
+/// Count passing, failing, and skipped cases without treating skips as success.
 pub fn summarize(cases: Vec<CaseReport>) -> Report {
     Report {
         passed: cases
@@ -159,9 +202,9 @@ fn evaluate(vector: &Vector) -> Result<Option<Value>, String> {
             json!({"valid": verify_signed_profile(&signed).unwrap_or(false)})
         }
         "expiry" => {
-            let profile: PaymentProfile =
+            let check: ExpiryCheck =
                 serde_json::from_value(vector.input.clone()).map_err(|e| e.to_string())?;
-            json!({"expired": check_profile_expiry(&profile).is_err()})
+            json!({"expired": is_profile_expired_at(&check.profile, check.as_of)})
         }
         "bip353_name" => match satspath_core::parse_bip353_name(
             vector.input.as_str().ok_or("expected name string")?,
@@ -170,18 +213,71 @@ fn evaluate(vector: &Vector) -> Result<Option<Value>, String> {
             Err(_) => json!({"error": "invalid"}),
         },
         "bip21" => {
-            match satspath_core::parse_bip321(vector.input.as_str().ok_or("expected URI string")?) {
+            let check: HandoffCheck =
+                serde_json::from_value(vector.input.clone()).map_err(|e| e.to_string())?;
+            match satspath_core::parse_bip321(&check.uri).and_then(|parsed| {
+                parsed.validate_handoff(
+                    check.amount_sats,
+                    bitcoin_network(check.network),
+                    check.as_of,
+                )?;
+                // Metadata alone (or a bare URI) is not a payment receiver.
+                if !parsed.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction,
+                        Bip321Instruction::Onchain { .. }
+                            | Bip321Instruction::LightningBolt11 { .. }
+                            | Bip321Instruction::Bolt12Offer { .. }
+                            | Bip321Instruction::SilentPayment { .. }
+                    )
+                }) {
+                    return Err(satspath_core::SatsPathError::InvalidPaymentUri(
+                        "wallet URI has no payment instructions".into(),
+                    ));
+                }
+                Ok(parsed)
+            }) {
                 Ok(parsed) => json!({"address": parsed.address, "amount_btc": parsed.amount_btc}),
                 Err(_) => json!({"error": "invalid"}),
             }
         }
         "capability" => {
-            let method: PaymentMethod =
+            let check: CapabilityCheck =
                 serde_json::from_value(vector.input.clone()).map_err(|e| e.to_string())?;
-            json!({"descriptor": method.ownership_descriptor()})
+            if satspath_core::handoff::validate_method_for_network_at(
+                &check.method,
+                check.amount_sats,
+                check.network,
+                check.as_of,
+            )
+            .is_ok()
+            {
+                json!({"descriptor": check.method.ownership_descriptor()})
+            } else {
+                json!({"error": "invalid"})
+            }
         }
         "bolt12" => {
-            json!({"valid": satspath_core::validation::validate_bolt12_offer(vector.input.as_str().ok_or("expected offer string")?).is_ok()})
+            let check: Bolt12Check =
+                serde_json::from_value(vector.input.clone()).map_err(|e| e.to_string())?;
+            let valid = satspath_core::parse_bip321(&format!("bitcoin:?lno={}", check.offer))
+                .and_then(|parsed| {
+                    if !matches!(
+                        parsed.instructions.as_slice(),
+                        [Bip321Instruction::Bolt12Offer { .. }]
+                    ) {
+                        return Err(satspath_core::SatsPathError::InvalidPaymentUri(
+                            "expected a single BOLT12 offer".into(),
+                        ));
+                    }
+                    parsed.validate_handoff(
+                        check.amount_sats,
+                        bitcoin_network(check.network),
+                        check.as_of,
+                    )
+                })
+                .is_ok();
+            json!({"valid": valid})
         }
         "rotation" => {
             let rotation: satspath_core::KeyRotation =
@@ -213,6 +309,15 @@ fn evaluate(vector: &Vector) -> Result<Option<Value>, String> {
         _ => return Ok(None),
     };
     Ok(Some(result))
+}
+
+fn bitcoin_network(network: BitcoinNetwork) -> bitcoin::Network {
+    match network {
+        BitcoinNetwork::Mainnet => bitcoin::Network::Bitcoin,
+        BitcoinNetwork::Testnet => bitcoin::Network::Testnet,
+        BitcoinNetwork::Signet => bitcoin::Network::Signet,
+        BitcoinNetwork::Regtest => bitcoin::Network::Regtest,
+    }
 }
 
 #[cfg(test)]
@@ -254,6 +359,36 @@ mod tests {
         assert!(is_profile_expired_at(&signed.profile, expiry + 60));
         // Signature validity is independent of wall-clock expiry.
         assert!(verify_signed_profile(&signed).unwrap());
+    }
+
+    #[test]
+    fn expiry_vectors_test_both_sides_of_grace_boundary() {
+        let mut suite: VectorSuite =
+            serde_json::from_str(include_str!("../vectors/v1.json")).unwrap();
+        suite.vectors.retain(|v| v.id.starts_with("expiry-grace-"));
+        assert_eq!(suite.vectors.len(), 2);
+        assert!(run_suite(&suite).is_complete());
+
+        // An implementation returning the same value on both sides fails comparison.
+        let observed = HashMap::from([
+            ("expiry-grace-59".to_string(), json!({"expired": false})),
+            ("expiry-grace-60".to_string(), json!({"expired": false})),
+        ]);
+        assert_eq!(run_observed_suite(&suite, &observed).failed, 1);
+    }
+
+    #[test]
+    fn handoff_and_capability_vectors_fail_if_policy_is_bypassed() {
+        let mut suite: VectorSuite =
+            serde_json::from_str(include_str!("../vectors/v1.json")).unwrap();
+        suite
+            .vectors
+            .retain(|v| v.id == "bip21-onchain" || v.id == "capability-descriptor");
+        assert!(run_suite(&suite).is_complete());
+
+        suite.vectors[0].input["network"] = json!("Testnet");
+        suite.vectors[1].input["method"]["address"] = json!("tb1qexample");
+        assert_eq!(run_suite(&suite).failed, 2);
     }
 
     #[test]
