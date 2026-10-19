@@ -23,7 +23,11 @@ invoice or offer), so an observed SDK cannot substitute or drop a receiver.
 a descriptor is reported only after method validation. Unsupported opaque Ark
 handoffs are rejected.
 `bolt12` cases supply `offer`, `amount_sats`, `network` and `as_of`, and use
-the same fixed-time handoff validation as the BIP-21 cases.
+the same fixed-time handoff validation as the BIP-21 cases. BOLT12 results
+additionally require the SatsPath offer HRP for the requested network, the
+encoded offer amount (if present), and the profile method's minimum amount.
+Unsupported network/encoding combinations are rejected, not inferred from
+the shared validator's more permissive legacy behavior.
 `--observed` compares a third-party wallet or
 SDK's JSON object from vector ID to output; it does not execute that wallet or
 attest a real payment. The live resolver probe uses production HTTPS, SSRF/DNS

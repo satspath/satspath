@@ -399,6 +399,48 @@
       "expected": { "error": "invalid" }
     },
     {
+      "id": "bolt12-wrong-hrp-mainnet",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?lno=lnot1zcssy7d7vel0nh9m4326qc54e6rskpczn07dktww9rv4nu5ptvt0s9ucu48t2c",
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bolt12-fixed-amount",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?lno=lno1pqpq86q2q36x2um5zcssy7d7vel0nh9m4326qc54e6rskpczn07dktww9rv4nu5ptvt0s9uchg4ch0",
+        "amount_sats": 1,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": {
+        "address": null,
+        "amount_btc": null,
+        "instructions": [
+          {
+            "kind": "bolt12_offer",
+            "offer": "lno1pqpq86q2q36x2um5zcssy7d7vel0nh9m4326qc54e6rskpczn07dktww9rv4nu5ptvt0s9uchg4ch0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "bolt12-fixed-amount-mismatch",
+      "kind": "bip21",
+      "input": {
+        "uri": "bitcoin:?lno=lno1pqpq86q2q36x2um5zcssy7d7vel0nh9m4326qc54e6rskpczn07dktww9rv4nu5ptvt0s9uchg4ch0",
+        "amount_sats": 2,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
       "id": "bolt12-invalid-destination",
       "kind": "bip21",
       "input": {
@@ -519,6 +561,41 @@
       "expected": { "error": "invalid" }
     },
     {
+      "id": "bolt12-method-minimum-amount",
+      "kind": "capability",
+      "input": {
+        "method": {
+          "type": "Bolt12",
+          "label": "offer",
+          "offer": "lno1pcqk293pqfumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtes6r6ryy",
+          "network": "Mainnet",
+          "minimum_amount_sats": 2000,
+          "issuer_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        },
+        "amount_sats": 1000,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
+      "id": "bolt12-method-fixed-amount-mismatch",
+      "kind": "capability",
+      "input": {
+        "method": {
+          "type": "Bolt12",
+          "label": "offer",
+          "offer": "lno1pqpq86q2q36x2um5zcssy7d7vel0nh9m4326qc54e6rskpczn07dktww9rv4nu5ptvt0s9uchg4ch0",
+          "network": "Mainnet",
+          "issuer_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        },
+        "amount_sats": 2,
+        "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": { "error": "invalid" }
+    },
+    {
       "id": "bolt12-invalid",
       "kind": "bolt12",
       "input": {
@@ -551,6 +628,19 @@
         "offer": "lno1pcqk293pqfumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtes6r6ryy&label=x",
         "amount_sats": 1000,
         "network": "Mainnet",
+        "as_of": 100
+      },
+      "expected": {
+        "valid": false
+      }
+    },
+    {
+      "id": "bolt12-mainnet-hrp-on-testnet-chain",
+      "kind": "bolt12",
+      "input": {
+        "offer": "lno1qgsyxjtl6luzd9t3pr62xr7eemp6awnejusgf6gw45q75vcfqqqqqqqkyyp8n0nx0muaewav2ksx99wwsu9swq5mlndjmn3gm9vl9q2mzmup0xqwnqm94",
+        "amount_sats": 1000,
+        "network": "Testnet",
         "as_of": 100
       },
       "expected": {

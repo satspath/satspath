@@ -221,6 +221,20 @@ fn evaluate(vector: &Vector) -> Result<Option<Value>, String> {
                     bitcoin_network(check.network),
                     check.as_of,
                 )?;
+                for instruction in &parsed.instructions {
+                    if let Bip321Instruction::Bolt12Offer { offer } = instruction {
+                        if !validate_bolt12_conformance(
+                            offer,
+                            check.amount_sats,
+                            check.network,
+                            check.as_of,
+                        ) {
+                            return Err(satspath_core::SatsPathError::InvalidPaymentUri(
+                                "BOLT12 offer network or amount mismatch".into(),
+                            ));
+                        }
+                    }
+                }
                 // Metadata alone (or a bare URI) is not a payment receiver.
                 if !parsed.instructions.iter().any(|instruction| {
                     matches!(
@@ -248,14 +262,44 @@ fn evaluate(vector: &Vector) -> Result<Option<Value>, String> {
         "capability" => {
             let check: CapabilityCheck =
                 serde_json::from_value(vector.input.clone()).map_err(|e| e.to_string())?;
-            if satspath_core::handoff::validate_method_for_network_at(
+            let validated = satspath_core::handoff::validate_method_for_network_at(
                 &check.method,
                 check.amount_sats,
                 check.network,
                 check.as_of,
             )
-            .is_ok()
-            {
+            .is_ok();
+            let bolt12_safe = match &check.method {
+                PaymentMethod::Bolt12(offer) => {
+                    offer
+                        .minimum_amount_sats
+                        .is_none_or(|minimum| check.amount_sats >= minimum)
+                        && check.as_of >= 0
+                        && validate_bolt12_conformance(
+                            &offer.offer,
+                            check.amount_sats,
+                            check.network,
+                            check.as_of as u64,
+                        )
+                }
+                PaymentMethod::Lightning {
+                    bolt12: Some(offer),
+                    ..
+                } if ["lno1", "lnot1", "lnob1", "lnos1"]
+                    .iter()
+                    .any(|prefix| offer.to_ascii_lowercase().starts_with(prefix)) =>
+                {
+                    check.as_of >= 0
+                        && validate_bolt12_conformance(
+                            offer,
+                            check.amount_sats,
+                            check.network,
+                            check.as_of as u64,
+                        )
+                }
+                _ => true,
+            };
+            if validated && bolt12_safe {
                 json!({"descriptor": check.method.ownership_descriptor()})
             } else {
                 json!({"error": "invalid"})
@@ -280,7 +324,19 @@ fn evaluate(vector: &Vector) -> Result<Option<Value>, String> {
                             check.amount_sats,
                             bitcoin_network(check.network),
                             check.as_of,
+                        )?;
+                        validate_bolt12_conformance(
+                            &check.offer,
+                            check.amount_sats,
+                            check.network,
+                            check.as_of,
                         )
+                        .then_some(())
+                        .ok_or_else(|| {
+                            satspath_core::SatsPathError::InvalidPaymentUri(
+                                "BOLT12 offer network or amount mismatch".into(),
+                            )
+                        })
                     })
                     .is_ok();
             json!({"valid": valid})
@@ -324,6 +380,28 @@ fn bitcoin_network(network: BitcoinNetwork) -> bitcoin::Network {
         BitcoinNetwork::Signet => bitcoin::Network::Signet,
         BitcoinNetwork::Regtest => bitcoin::Network::Regtest,
     }
+}
+
+fn validate_bolt12_conformance(
+    offer: &str,
+    amount_sats: u64,
+    network: BitcoinNetwork,
+    as_of: u64,
+) -> bool {
+    let expected_hrp = satspath_core::bolt12::offer_hrp(network);
+    if !offer
+        .to_ascii_lowercase()
+        .starts_with(&format!("{expected_hrp}1"))
+    {
+        return false;
+    }
+    let Some(amount_msats) = amount_sats.checked_mul(1000) else {
+        return false;
+    };
+    let Ok(parsed) = satspath_core::bolt12::parse_bolt12_offer(offer) else {
+        return false;
+    };
+    !parsed.is_expired(as_of) && parsed.is_amount_valid(amount_msats)
 }
 
 #[cfg(test)]
