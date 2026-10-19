@@ -155,7 +155,14 @@
       },
       "expected": {
         "address": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT",
-        "amount_btc": "0.00021000"
+        "amount_btc": "0.00021000",
+        "instructions": [
+          {
+            "kind": "onchain",
+            "address": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT",
+            "amount_btc": "0.00021000"
+          }
+        ]
       }
     },
     {
@@ -305,7 +312,16 @@
         "network": "Testnet",
         "as_of": 1496314658
       },
-      "expected": { "address": null, "amount_btc": null }
+      "expected": {
+        "address": null,
+        "amount_btc": null,
+        "instructions": [
+          {
+            "kind": "lightning_bolt11",
+            "invoice": "lntb20m1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygshp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqfpp3x9et2e20v6pu37c5d9vax37wxq72un989qrsgqdj545axuxtnfemtpwkc45hx9d2ft7x04mt8q7y6t0k2dge9e7h8kpy9p34ytyslj3yu569aalz2xdk8xkd7ltxqld94u8h2esmsmacgpghe9k8"
+          }
+        ]
+      }
     },
     {
       "id": "bolt11-wrong-network",
@@ -349,7 +365,16 @@
         "network": "Mainnet",
         "as_of": 100
       },
-      "expected": { "address": null, "amount_btc": null }
+      "expected": {
+        "address": null,
+        "amount_btc": null,
+        "instructions": [
+          {
+            "kind": "bolt12_offer",
+            "offer": "lno1pcqk293pqfumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtes6r6ryy"
+          }
+        ]
+      }
     },
     {
       "id": "bolt12-expired",
@@ -393,7 +418,16 @@
         "network": "Mainnet",
         "as_of": 100
       },
-      "expected": { "address": null, "amount_btc": null }
+      "expected": {
+        "address": null,
+        "amount_btc": null,
+        "instructions": [
+          {
+            "kind": "silent_payment",
+            "address": "sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv"
+          }
+        ]
+      }
     },
     {
       "id": "silent-wrong-network",

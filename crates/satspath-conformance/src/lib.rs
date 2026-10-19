@@ -237,7 +237,11 @@ fn evaluate(vector: &Vector) -> Result<Option<Value>, String> {
                 }
                 Ok(parsed)
             }) {
-                Ok(parsed) => json!({"address": parsed.address, "amount_btc": parsed.amount_btc}),
+                Ok(parsed) => json!({
+                    "address": parsed.address,
+                    "amount_btc": parsed.amount_btc,
+                    "instructions": parsed.instructions,
+                }),
                 Err(_) => json!({"error": "invalid"}),
             }
         }
@@ -391,6 +395,26 @@ mod tests {
         suite.vectors[0].input["network"] = json!("Testnet");
         suite.vectors[1].input["method"]["address"] = json!("tb1qexample");
         assert_eq!(run_suite(&suite).failed, 2);
+    }
+
+    #[test]
+    fn observed_handoff_must_bind_exact_receiver_for_every_rail() {
+        for (id, field) in [
+            ("bip21-onchain", "address"),
+            ("bolt11-valid-testnet", "invoice"),
+            ("bolt12-valid-mainnet", "offer"),
+            ("silent-valid-mainnet", "address"),
+        ] {
+            let mut case: VectorSuite =
+                serde_json::from_str(include_str!("../vectors/v1.json")).unwrap();
+            case.vectors.retain(|v| v.id == id);
+            assert_eq!(case.vectors.len(), 1);
+            assert!(run_suite(&case).is_complete());
+            let mut wrong_receiver = case.vectors[0].expected.clone();
+            wrong_receiver["instructions"][0][field] = json!("different-receiver");
+            let observed = HashMap::from([(id.to_owned(), wrong_receiver)]);
+            assert_eq!(run_observed_suite(&case, &observed).failed, 1, "{id}");
+        }
     }
 
     #[test]
