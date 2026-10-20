@@ -20,11 +20,12 @@ use std::sync::Arc;
 use futures_util::{future, stream, Stream};
 use hickory_resolver::proto::error::ProtoError;
 use hickory_resolver::proto::op::{Message, MessageType, OpCode, ResponseCode};
-use hickory_resolver::proto::rr::dnssec::rdata::{DNSSECRData, DNSKEY, DS, RRSIG};
+use hickory_resolver::proto::rr::dnssec::rdata::{DNSSECRData, DNSKEY, DS, NSEC, NSEC3, RRSIG};
 use hickory_resolver::proto::rr::dnssec::{
-    tbs, Algorithm, DigestType, KeyFormat, KeyPair, Private, PublicKeyBuf, TrustAnchor, Verifier,
+    tbs, Algorithm, DigestType, KeyFormat, KeyPair, Nsec3HashAlgorithm, Private, PublicKeyBuf,
+    TrustAnchor, Verifier,
 };
-use hickory_resolver::proto::rr::rdata::TXT;
+use hickory_resolver::proto::rr::rdata::{SOA, TXT};
 use hickory_resolver::proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_resolver::proto::xfer::{DnsHandle, DnsRequest, DnsResponse};
 
@@ -354,16 +355,42 @@ impl SignedDnssecFixture {
 
 // ─── In-Process Authoritative DNSSEC Fixture Handle ─────────────────────────────
 
+type NegativeResponseEntry = (Name, RecordType, ResponseCode, Vec<Record>);
+
+/// Encode raw digest bytes into RFC 4648 Section 7 (`base32hex` / `BASE32_DNSSEC`) without padding.
+fn encode_base32hex(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"0123456789abcdefghijklmnopqrstuv";
+    let mut out = String::new();
+    let mut buffer = 0u32;
+    let mut bits = 0u8;
+    for &byte in bytes {
+        buffer = (buffer << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            let idx = ((buffer >> bits) & 0x1f) as usize;
+            out.push(ALPHABET[idx] as char);
+        }
+    }
+    if bits > 0 {
+        let idx = ((buffer << (5 - bits)) & 0x1f) as usize;
+        out.push(ALPHABET[idx] as char);
+    }
+    out
+}
+
 /// Deterministic in-process [`DnsHandle`] serving signed, bogus, and unsigned zones.
 #[derive(Clone)]
 struct InProcessAuthoritativeDnssecServer {
     records: Arc<Vec<(Name, RecordType, Vec<Record>)>>,
+    negative_responses: Arc<Vec<NegativeResponseEntry>>,
 }
 
 impl InProcessAuthoritativeDnssecServer {
     /// Serve fixture records and deliberate invalid variants through a DNS handle.
     fn from_fixture(fixture: &SignedDnssecFixture) -> Self {
         let mut entries = Vec::new();
+        let mut negative_responses = Vec::new();
 
         for link in &fixture.chain {
             let mut dnskey_ans = link.dnskey_records.clone();
@@ -439,8 +466,214 @@ impl InProcessAuthoritativeDnssecServer {
         );
         entries.push((unsigned_name, RecordType::TXT, vec![unsigned_txt_rec]));
 
+        // Signed SOA for satspath.dev. negative responses
+        let domain_name = Name::from_ascii("satspath.dev.").unwrap();
+        let domain_kp = &fixture.zone_keypairs[2];
+        let Some(RData::DNSSEC(DNSSECRData::DNSKEY(domain_dnskey))) =
+            fixture.chain[2].dnskey_records[0].data()
+        else {
+            panic!("domain DNSKEY must exist");
+        };
+        let inception = fixture.txt_rrsigs[0].sig_inception();
+        let expiration = fixture.txt_rrsigs[0].sig_expiration();
+
+        let soa_rec = Record::from_rdata(
+            domain_name.clone(),
+            3600,
+            RData::SOA(SOA::new(
+                Name::from_ascii("ns1.satspath.dev.").unwrap(),
+                Name::from_ascii("hostmaster.satspath.dev.").unwrap(),
+                2026102001,
+                3600,
+                600,
+                86400,
+                300,
+            )),
+        );
+        let (_, soa_rrsig_rec) = sign_rrset(
+            &domain_name,
+            &domain_name,
+            RecordType::SOA,
+            std::slice::from_ref(&soa_rec),
+            domain_kp,
+            domain_dnskey,
+            inception,
+            expiration,
+        );
+
+        // 1. Authenticated NSEC NXDomain
+        let nsec_nxdomain_qname =
+            Name::from_ascii("nsec-nxdomain.user._bitcoin-payment.satspath.dev.").unwrap();
+        let nsec_nxdomain_rec = Record::from_rdata(
+            domain_name.clone(),
+            300,
+            RData::DNSSEC(DNSSECRData::NSEC(NSEC::new(
+                Name::from_ascii("zzz.satspath.dev.").unwrap(),
+                vec![
+                    RecordType::SOA,
+                    RecordType::DNSKEY,
+                    RecordType::RRSIG,
+                    RecordType::NSEC,
+                ],
+            ))),
+        );
+        let (_, nsec_nxdomain_rrsig_rec) = sign_rrset(
+            &domain_name,
+            &domain_name,
+            RecordType::NSEC,
+            std::slice::from_ref(&nsec_nxdomain_rec),
+            domain_kp,
+            domain_dnskey,
+            inception,
+            expiration,
+        );
+        negative_responses.push((
+            nsec_nxdomain_qname,
+            RecordType::TXT,
+            ResponseCode::NXDomain,
+            vec![
+                soa_rec.clone(),
+                soa_rrsig_rec.clone(),
+                nsec_nxdomain_rec,
+                nsec_nxdomain_rrsig_rec,
+            ],
+        ));
+
+        // 2. Authenticated NSEC NODATA (NoError + empty answer + exact-name NSEC without TXT/CNAME)
+        let nsec_nodata_qname =
+            Name::from_ascii("nsec-nodata.user._bitcoin-payment.satspath.dev.").unwrap();
+        let nsec_nodata_rec = Record::from_rdata(
+            nsec_nodata_qname.clone(),
+            300,
+            RData::DNSSEC(DNSSECRData::NSEC(NSEC::new(
+                Name::from_ascii("zzz.satspath.dev.").unwrap(),
+                vec![RecordType::A, RecordType::RRSIG, RecordType::NSEC],
+            ))),
+        );
+        let (_, nsec_nodata_rrsig_rec) = sign_rrset(
+            &nsec_nodata_qname,
+            &domain_name,
+            RecordType::NSEC,
+            std::slice::from_ref(&nsec_nodata_rec),
+            domain_kp,
+            domain_dnskey,
+            inception,
+            expiration,
+        );
+        negative_responses.push((
+            nsec_nodata_qname,
+            RecordType::TXT,
+            ResponseCode::NoError,
+            vec![
+                soa_rec.clone(),
+                soa_rrsig_rec.clone(),
+                nsec_nodata_rec,
+                nsec_nodata_rrsig_rec,
+            ],
+        ));
+
+        // 3. Authenticated NSEC3 NXDomain (wraparound interval covering qname and *.encloser)
+        let nsec3_nxdomain_qname =
+            Name::from_ascii("nsec3-nxdomain.user._bitcoin-payment.satspath.dev.").unwrap();
+        let nsec3_nx_owner_hash = vec![0xfe; 20];
+        let nsec3_nx_next_hash = vec![0xfd; 20];
+        let nsec3_nx_owner_name = Name::from_ascii(format!(
+            "{}.satspath.dev.",
+            encode_base32hex(&nsec3_nx_owner_hash)
+        ))
+        .unwrap();
+        let nsec3_nx_rec = Record::from_rdata(
+            nsec3_nx_owner_name.clone(),
+            300,
+            RData::DNSSEC(DNSSECRData::NSEC3(NSEC3::new(
+                Nsec3HashAlgorithm::SHA1,
+                false,
+                0,
+                Vec::new(),
+                nsec3_nx_next_hash,
+                vec![RecordType::SOA, RecordType::DNSKEY, RecordType::RRSIG],
+            ))),
+        );
+        let (_, nsec3_nx_rrsig_rec) = sign_rrset(
+            &nsec3_nx_owner_name,
+            &domain_name,
+            RecordType::NSEC3,
+            std::slice::from_ref(&nsec3_nx_rec),
+            domain_kp,
+            domain_dnskey,
+            inception,
+            expiration,
+        );
+        negative_responses.push((
+            nsec3_nxdomain_qname,
+            RecordType::TXT,
+            ResponseCode::NXDomain,
+            vec![
+                soa_rec.clone(),
+                soa_rrsig_rec.clone(),
+                nsec3_nx_rec,
+                nsec3_nx_rrsig_rec,
+            ],
+        ));
+
+        // 4. Authenticated NSEC3 NODATA (exact hash match without TXT/CNAME)
+        let nsec3_nodata_qname =
+            Name::from_ascii("nsec3-nodata.user._bitcoin-payment.satspath.dev.").unwrap();
+        let nodata_hash = Nsec3HashAlgorithm::SHA1
+            .hash(&[], &nsec3_nodata_qname, 0)
+            .expect("sha1 nsec3 hash");
+        let nsec3_nodata_owner_name = Name::from_ascii(format!(
+            "{}.satspath.dev.",
+            encode_base32hex(nodata_hash.as_ref())
+        ))
+        .unwrap();
+        let nsec3_nodata_rec = Record::from_rdata(
+            nsec3_nodata_owner_name.clone(),
+            300,
+            RData::DNSSEC(DNSSECRData::NSEC3(NSEC3::new(
+                Nsec3HashAlgorithm::SHA1,
+                false,
+                0,
+                Vec::new(),
+                vec![0xff; 20],
+                vec![RecordType::A, RecordType::RRSIG],
+            ))),
+        );
+        let (_, nsec3_nodata_rrsig_rec) = sign_rrset(
+            &nsec3_nodata_owner_name,
+            &domain_name,
+            RecordType::NSEC3,
+            std::slice::from_ref(&nsec3_nodata_rec),
+            domain_kp,
+            domain_dnskey,
+            inception,
+            expiration,
+        );
+        negative_responses.push((
+            nsec3_nodata_qname,
+            RecordType::TXT,
+            ResponseCode::NoError,
+            vec![
+                soa_rec.clone(),
+                soa_rrsig_rec.clone(),
+                nsec3_nodata_rec,
+                nsec3_nodata_rrsig_rec,
+            ],
+        ));
+
+        // 5. Unauthenticated NXDomain (SOA without NSEC/NSEC3 proof)
+        let unauth_nxdomain_qname =
+            Name::from_ascii("unauth-nxdomain.user._bitcoin-payment.satspath.dev.").unwrap();
+        negative_responses.push((
+            unauth_nxdomain_qname,
+            RecordType::TXT,
+            ResponseCode::NXDomain,
+            vec![soa_rec, soa_rrsig_rec],
+        ));
+
         Self {
             records: Arc::new(entries),
+            negative_responses: Arc::new(negative_responses),
         }
     }
 }
@@ -464,10 +697,21 @@ impl DnsHandle for InProcessAuthoritativeDnssecServer {
         msg.set_response_code(ResponseCode::NoError);
         msg.add_query(query);
 
-        for (name, rtype, recs) in self.records.iter() {
-            if name == &qname && *rtype == qtype {
-                for r in recs {
-                    msg.add_answer(r.clone());
+        if let Some((_, _, rcode, authority_recs)) = self
+            .negative_responses
+            .iter()
+            .find(|(name, rtype, _, _)| name == &qname && *rtype == qtype)
+        {
+            msg.set_response_code(*rcode);
+            for r in authority_recs {
+                msg.add_name_server(r.clone());
+            }
+        } else {
+            for (name, rtype, recs) in self.records.iter() {
+                if name == &qname && *rtype == qtype {
+                    for r in recs {
+                        msg.add_answer(r.clone());
+                    }
                 }
             }
         }
@@ -647,6 +891,41 @@ async fn test_in_process_hickory_dnssec_valid_bogus_and_unsigned() {
     assert!(
         matches!(expired_err, SatsPathError::NetworkError(ref msg) if msg.contains("DNSSEC") && (msg.contains("verification failed") || msg.contains("validation failed") || msg.contains("no valid RRSIG verified"))),
         "expected expired RRSIG to fail validation under Strict policy, got: {expired_err:?}"
+    );
+
+    // 5. Authenticated NSEC and NSEC3 negative responses (NXDomain and NODATA) produce AliasNotFound
+    for alias in [
+        "₿nsec-nxdomain@satspath.dev",
+        "₿nsec-nodata@satspath.dev",
+        "₿nsec3-nxdomain@satspath.dev",
+        "₿nsec3-nodata@satspath.dev",
+    ] {
+        let neg_err = resolve_bip353_with(
+            &resolver,
+            alias,
+            DnssecPolicy::Strict,
+            FIXED_TEST_TIME as i64,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(neg_err, SatsPathError::AliasNotFound(_)),
+            "expected AliasNotFound for authenticated negative DNSSEC proof on {alias}, got: {neg_err:?}"
+        );
+    }
+
+    // 6. Unauthenticated NXDomain (missing NSEC/NSEC3) fails closed and never becomes AliasNotFound
+    let unauth_neg_err = resolve_bip353_with(
+        &resolver,
+        "₿unauth-nxdomain@satspath.dev",
+        DnssecPolicy::Strict,
+        FIXED_TEST_TIME as i64,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        !matches!(unauth_neg_err, SatsPathError::AliasNotFound(_)),
+        "unauthenticated NXDomain must not return AliasNotFound, got: {unauth_neg_err:?}"
     );
 }
 

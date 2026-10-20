@@ -94,6 +94,30 @@ async fn matching_sources_return_deterministic_report_and_signed_profile() {
         .all(|observation| observation.found));
 }
 
+/// Verifies that repeating resolution of an unchanged sequenced profile on one shared
+/// continuity directory and resolver succeeds and returns identical observations.
+#[tokio::test]
+async fn repeat_resolution_with_shared_continuity_dir_succeeds_for_unchanged_sequenced_profile() {
+    let signed = signed_profile(&SecretKey::from_slice(&[1; 32]).unwrap(), 7, "tb1qexample");
+    let dir = tempfile::tempdir().unwrap();
+    let resolver = ChainResolver::with_continuity_dir(dir.path())
+        .push_authoritative("https", StaticResolver(Ok(signed.clone())))
+        .push_supplementary("nostr", StaticResolver(Ok(signed.clone())))
+        .with_continuity_pin(signed.profile.identity_pubkey.clone(), 7);
+
+    let first = resolver
+        .resolve_with_report("alice@example.com")
+        .await
+        .unwrap();
+    let second = resolver
+        .resolve_with_report("alice@example.com")
+        .await
+        .unwrap();
+    assert!(verify_signed_profile(&first.profile).unwrap());
+    assert!(verify_signed_profile(&second.profile).unwrap());
+    assert_eq!(first.observations, second.observations);
+}
+
 /// Verifies that conflicting or forged profiles across resolver sources fail closed.
 #[tokio::test]
 async fn conflict_vectors_fail_closed() {

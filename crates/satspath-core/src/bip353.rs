@@ -191,7 +191,9 @@ where
     let name = parse_bip353_name(input)?;
     let records = resolver.query_txt(&name.dns_name).await?;
 
-    if matches!(policy, DnssecPolicy::Strict) && records.iter().any(|r| !r.dnssec_validated) {
+    if matches!(policy, DnssecPolicy::Strict)
+        && (records.is_empty() || records.iter().any(|r| !r.dnssec_validated))
+    {
         return Err(SatsPathError::DnssecUnavailable);
     }
 
@@ -368,9 +370,13 @@ impl MockDnsTxtResolver {
 
 #[async_trait]
 impl DnsTxtResolver for MockDnsTxtResolver {
-    /// Returns the mocked TXT records registered for `fqdn`.
+    /// Returns the mocked TXT records registered for `fqdn`, or `AliasNotFound` when absent.
     async fn query_txt(&self, fqdn: &str) -> Result<Vec<DnsTxtRecord>> {
-        Ok(self.records.get(fqdn).cloned().unwrap_or_default())
+        self.records
+            .get(fqdn)
+            .cloned()
+            .filter(|records| !records.is_empty())
+            .ok_or_else(|| SatsPathError::AliasNotFound(fqdn.to_string()))
     }
 }
 

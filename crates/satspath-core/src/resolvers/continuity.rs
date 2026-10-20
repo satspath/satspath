@@ -48,11 +48,7 @@ fn validate_signed_candidate(signed: &SignedPaymentProfile) -> Result<String> {
 }
 
 /// Validate a candidate transition against the stored pin without mutating SQLite.
-pub(crate) fn validate_candidate(
-    dir: &Path,
-    signed: &SignedPaymentProfile,
-    allow_unchanged_local: bool,
-) -> Result<()> {
+pub(crate) fn validate_candidate(dir: &Path, signed: &SignedPaymentProfile) -> Result<()> {
     let canonical = validate_signed_candidate(signed)?;
     let connection = open_store(dir)?;
     let key = identifier_hash(&canonical);
@@ -67,7 +63,7 @@ pub(crate) fn validate_candidate(
     let previous: Option<SignedPaymentProfile> = previous
         .map(|json| serde_json::from_str(&json))
         .transpose()?;
-    validate_transition_rules(&canonical, signed, previous.as_ref(), allow_unchanged_local)
+    validate_transition_rules(&canonical, signed, previous.as_ref())
 }
 
 /// Enforce key continuity, sequence progression, and same-sequence immutability.
@@ -75,12 +71,12 @@ fn validate_transition_rules(
     canonical: &str,
     signed: &SignedPaymentProfile,
     previous: Option<&SignedPaymentProfile>,
-    allow_unchanged_local: bool,
 ) -> Result<()> {
     if let Some(prev) = previous {
         let same_bytes = crate::crypto::canonical_profile_bytes(&prev.profile)?
             == crate::crypto::canonical_profile_bytes(&signed.profile)?;
-        if allow_unchanged_local && !prev.profile.revoked && !signed.profile.revoked && same_bytes {
+        // Re-observing the exact profile is neither a rollback nor a fork.
+        if !prev.profile.revoked && !signed.profile.revoked && same_bytes {
             return Ok(());
         }
         if prev.profile.sequence.is_none()
@@ -96,6 +92,21 @@ fn validate_transition_rules(
     Registry::validate_profile_transition(canonical, signed, previous)
 }
 
+/// Return whether `dir` already holds an authorized continuity record for `alias`.
+pub(crate) fn has_pin(dir: &Path, alias: &str) -> Result<bool> {
+    let canonical = normalize_alias(alias);
+    let connection = open_store(dir)?;
+    let previous: Option<String> = connection
+        .query_row(
+            "SELECT signed FROM profiles WHERE alias_hash = ?1",
+            [identifier_hash(&canonical)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage_error)?;
+    Ok(previous.is_some())
+}
+
 /// Atomically check and persist a fetched profile using the registry's update policy.
 /// A verified revocation is committed as a tombstone and then returned as an error.
 ///
@@ -103,16 +114,6 @@ fn validate_transition_rules(
 /// profile-write and transition validation errors; storage failures return
 /// `RegistryError`, and JSON errors propagate as `JsonError`.
 pub(crate) fn accept_profile(dir: &Path, signed: &SignedPaymentProfile) -> Result<()> {
-    accept_profile_with_mode(dir, signed, false)
-}
-
-/// Atomically check and persist a resolved profile, optionally allowing unchanged
-/// local-registry reads while still enforcing continuity on any change.
-pub(crate) fn accept_profile_with_mode(
-    dir: &Path,
-    signed: &SignedPaymentProfile,
-    allow_unchanged_local: bool,
-) -> Result<()> {
     let canonical = validate_signed_candidate(signed)?;
     let mut connection = open_store(dir)?;
     let tx = connection
@@ -130,7 +131,7 @@ pub(crate) fn accept_profile_with_mode(
     let previous: Option<SignedPaymentProfile> = previous
         .map(|json| serde_json::from_str(&json))
         .transpose()?;
-    validate_transition_rules(&canonical, signed, previous.as_ref(), allow_unchanged_local)?;
+    validate_transition_rules(&canonical, signed, previous.as_ref())?;
     let json = serde_json::to_string(signed)?;
     tx.execute(
         "INSERT INTO profiles (alias_hash, signed) VALUES (?1, ?2)

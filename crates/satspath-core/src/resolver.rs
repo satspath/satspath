@@ -313,7 +313,6 @@ impl ChainResolver {
         let mut observations = Vec::with_capacity(self.resolvers.len());
         let mut agreed: Option<Vec<u8>> = None;
         let mut selected = None;
-        let mut selected_is_local = false;
         for entry in &self.resolvers {
             match entry.resolver.resolve_for_chain(alias).await {
                 Ok(signed) => {
@@ -330,10 +329,23 @@ impl ChainResolver {
                         )));
                     }
                     if profile.revoked {
-                        crate::resolvers::continuity::accept_profile(
-                            &self.continuity_dir,
-                            &signed,
-                        )?;
+                        if self
+                            .pinned_key
+                            .as_ref()
+                            .is_some_and(|key| key != &profile.identity_pubkey)
+                            || agreed.is_some()
+                        {
+                            return Err(SatsPathError::ResolverDisagreement(
+                                "revocation conflicts with the resolved identity".into(),
+                            ));
+                        }
+                        if crate::resolvers::continuity::has_pin(&self.continuity_dir, &canonical)?
+                        {
+                            crate::resolvers::continuity::accept_profile(
+                                &self.continuity_dir,
+                                &signed,
+                            )?;
+                        }
                         return Err(SatsPathError::RegistryError(format!(
                             "Alias {} has been revoked",
                             profile.alias
@@ -372,11 +384,9 @@ impl ChainResolver {
                             entry.source
                         )));
                     }
-                    let is_local = entry.source == "local-registry";
                     crate::resolvers::continuity::validate_candidate(
                         &self.continuity_dir,
                         &signed,
-                        is_local,
                     )?;
                     // Equality of the entire signed payload also detects
                     // capability suppression, replay and equal-sequence forks.
@@ -390,7 +400,6 @@ impl ChainResolver {
                     agreed = Some(bytes);
                     if selected.is_none() && entry.role == ResolverRole::Authoritative {
                         selected = Some(signed);
-                        selected_is_local = is_local;
                     }
                     observations.push(ResolverObservation {
                         source: entry.source.clone(),
@@ -403,15 +412,6 @@ impl ChainResolver {
                     role: entry.role,
                     found: false,
                 }),
-                Err(SatsPathError::Bip353(reason))
-                    if reason == "no bitcoin: TXT record at this name" =>
-                {
-                    observations.push(ResolverObservation {
-                        source: entry.source.clone(),
-                        role: entry.role,
-                        found: false,
-                    })
-                }
                 Err(SatsPathError::NetworkError(reason)) => {
                     return Err(SatsPathError::NetworkError(format!(
                         "{} unavailable; refusing downgrade: {reason}",
@@ -430,11 +430,7 @@ impl ChainResolver {
                 SatsPathError::AliasNotFound(alias.into())
             }
         })?;
-        crate::resolvers::continuity::accept_profile_with_mode(
-            &self.continuity_dir,
-            &profile,
-            selected_is_local,
-        )?;
+        crate::resolvers::continuity::accept_profile(&self.continuity_dir, &profile)?;
         Ok(ResolutionReport {
             profile,
             observations,
@@ -642,6 +638,111 @@ mod tests {
         assert!(matches!(
             chain_unsigned.resolve_alias("₿alice@example.com").await,
             Err(SatsPathError::DnssecUnavailable)
+        ));
+
+        // Non-bitcoin TXT records at the name produce SatsPathError::Bip353 and must NOT fall through.
+        let dir_non_bitcoin = tempfile::tempdir().unwrap();
+        let mut non_bitcoin_dns = MockDnsTxtResolver::new();
+        non_bitcoin_dns.insert(
+            "alice.user._bitcoin-payment.example.com",
+            DnsTxtRecord {
+                strings: vec!["v=spf1 -all".into()],
+                dnssec_validated: true,
+                ttl_seconds: Some(60),
+            },
+        );
+        let bip353_non_bitcoin =
+            Bip353Resolver::with_dns_resolver(Arc::new(non_bitcoin_dns), dir_non_bitcoin.path());
+        let chain_non_bitcoin = ChainResolver::with_continuity_dir(dir_non_bitcoin.path())
+            .push_authoritative("bip353", bip353_non_bitcoin)
+            .push_authoritative(
+                "https",
+                MockResolver {
+                    should_succeed: true,
+                    returned_alias: Some("alice@example.com".to_string()),
+                },
+            );
+        assert!(matches!(
+            chain_non_bitcoin.resolve_alias("₿alice@example.com").await,
+            Err(SatsPathError::Bip353(_))
+        ));
+    }
+
+    /// Verify that a first-contact revoked BIP-353 profile fails closed without persisting a tombstone,
+    /// and that revocations conflicting with `pinned_key` or an agreed profile fail with `ResolverDisagreement`.
+    #[tokio::test]
+    async fn first_contact_bip353_revocation_does_not_persist_tombstone() {
+        let dir = tempfile::tempdir().unwrap();
+        let attacker = generate_identity_keypair();
+        let attacker_pub = hex::encode(attacker.public_key.serialize());
+        let revoked_profile = PaymentProfile {
+            alias: "alice@example.com".into(),
+            identity_pubkey: attacker_pub.clone(),
+            methods: Vec::new(),
+            updated_at: 1_700_000_000,
+            expires_at: None,
+            sequence: Some(1),
+            preferences: vec![],
+            nonce: None,
+            rotation: None,
+            method_verifications: Vec::new(),
+            hybrid_pubkey: None,
+            pqc_required: false,
+            revoked: true,
+            recovery_policy: None,
+            recovery: None,
+        };
+        let signed_revoked = sign_profile(revoked_profile, &attacker.secret_key).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/profile")
+            .with_status(200)
+            .with_body(serde_json::to_string(&signed_revoked).unwrap())
+            .create_async()
+            .await;
+        let mut dns = MockDnsTxtResolver::new();
+        dns.insert(
+            "alice.user._bitcoin-payment.example.com",
+            DnsTxtRecord {
+                strings: vec![format!("bitcoin:?sp-profile={}/profile", server.url())],
+                dnssec_validated: true,
+                ttl_seconds: Some(60),
+            },
+        );
+        let bip353 = Bip353Resolver::with_dns_resolver(Arc::new(dns.clone()), dir.path())
+            .with_allow_private_profile_url(true);
+        let chain =
+            ChainResolver::with_continuity_dir(dir.path()).push_authoritative("bip353", bip353);
+        assert!(matches!(
+            chain.resolve_alias("₿alice@example.com").await,
+            Err(SatsPathError::RegistryError(msg)) if msg.contains("revoked")
+        ));
+
+        // A fresh ChainResolver using the same directory must not encounter a persisted tombstone.
+        let fresh_chain = ChainResolver::with_continuity_dir(dir.path()).push_authoritative(
+            "https",
+            MockResolver {
+                should_succeed: true,
+                returned_alias: Some("alice@example.com".to_string()),
+            },
+        );
+        let resolved = fresh_chain
+            .resolve_alias("₿alice@example.com")
+            .await
+            .expect("first-contact revocation must not poison empty continuity store");
+        assert_eq!(resolved.profile.alias, "alice@example.com");
+
+        // Conflicting with an explicit pinned_key must return ResolverDisagreement.
+        let dir_pinned = tempfile::tempdir().unwrap();
+        let bip353_pinned = Bip353Resolver::with_dns_resolver(Arc::new(dns), dir_pinned.path())
+            .with_allow_private_profile_url(true);
+        let chain_pinned = ChainResolver::with_continuity_dir(dir_pinned.path())
+            .push_authoritative("bip353", bip353_pinned)
+            .with_continuity_pin("different-pinned-key".into(), 1);
+        assert!(matches!(
+            chain_pinned.resolve_alias("₿alice@example.com").await,
+            Err(SatsPathError::ResolverDisagreement(_))
         ));
     }
 }
