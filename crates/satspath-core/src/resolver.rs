@@ -42,6 +42,7 @@ pub struct PaymentMethodVerificationState {
     pub reason: String,
 }
 
+/// Evaluate ownership verification states for every payment method in `profile` at `now`.
 pub fn verify_payment_method_states(
     profile: &crate::PaymentProfile,
     now: i64,
@@ -106,6 +107,7 @@ pub fn verify_payment_method_states(
         .collect()
 }
 
+/// A resolved profile bundled with its transparency log event, proofs, and verification state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedTransparentProfile {
     pub signed_profile: SignedPaymentProfile,
@@ -131,6 +133,17 @@ pub trait ProfileResolver {
     /// - `Err(SatsPathError::AliasNotFound)` if the alias is explicitly not found.
     /// - `Err(SatsPathError::NetworkError)` (or similar) on fetch failure.
     async fn resolve_alias(&self, alias: &str) -> Result<SignedPaymentProfile>;
+
+    /// Resolve `alias` as a member of a [`ChainResolver`] that commits continuity
+    /// atomically after all configured sources have been validated.
+    async fn resolve_for_chain(&self, alias: &str) -> Result<SignedPaymentProfile> {
+        self.resolve_alias(alias).await
+    }
+
+    /// Return the continuity storage directory configured on this resolver, if any.
+    fn continuity_dir(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 /// Whether a source is eligible to establish the alias or only corroborate it.
@@ -141,6 +154,7 @@ pub enum ResolverRole {
     Supplementary,
 }
 
+/// Per-source outcome recorded by [`ChainResolver::resolve_with_report`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolverObservation {
     pub source: String,
@@ -162,28 +176,60 @@ struct ResolverEntry {
     resolver: Box<dyn ProfileResolver + Send + Sync>,
 }
 
+/// Construct an isolated default continuity directory when none is supplied.
+fn default_chain_continuity_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("SATSPATH_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return std::path::PathBuf::from(trimmed);
+        }
+    }
+    std::env::temp_dir().join(format!("satspath-continuity-{}", uuid::Uuid::new_v4()))
+}
+
 /// A strict composite resolver. All configured sources are queried in order;
 /// an outage, invalid signature, divergent key, stale sequence or different
 /// capability set blocks payment instead of silently choosing a fallback.
 /// Configure only sources actually expected for this identifier.
 pub struct ChainResolver {
     resolvers: Vec<ResolverEntry>,
+    continuity_dir: std::path::PathBuf,
+    explicit_continuity_dir: bool,
     pinned_key: Option<String>,
     minimum_sequence: Option<u64>,
     required_capabilities: Vec<String>,
 }
 
 impl ChainResolver {
+    /// Construct an empty resolver chain with mandatory continuity enforcement.
     pub fn new() -> Self {
         Self {
             resolvers: Vec::new(),
+            continuity_dir: default_chain_continuity_dir(),
+            explicit_continuity_dir: false,
             pinned_key: None,
             minimum_sequence: None,
             required_capabilities: Vec::new(),
         }
     }
 
+    /// Construct a resolver chain persisting continuity state and revocations in `dir`.
+    pub fn with_continuity_dir(dir: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            continuity_dir: dir.into(),
+            explicit_continuity_dir: true,
+            ..Self::new()
+        }
+    }
+
+    /// Append an authoritative resolver with a default positional source name.
     pub fn push<R: ProfileResolver + Send + Sync + 'static>(mut self, resolver: R) -> Self {
+        if !self.explicit_continuity_dir {
+            if let Some(dir) = resolver.continuity_dir() {
+                self.continuity_dir = dir.to_path_buf();
+                self.explicit_continuity_dir = true;
+            }
+        }
         let source = format!("resolver-{}", self.resolvers.len());
         self.resolvers.push(ResolverEntry {
             source,
@@ -199,6 +245,12 @@ impl ChainResolver {
         source: impl Into<String>,
         resolver: R,
     ) -> Self {
+        if !self.explicit_continuity_dir {
+            if let Some(dir) = resolver.continuity_dir() {
+                self.continuity_dir = dir.to_path_buf();
+                self.explicit_continuity_dir = true;
+            }
+        }
         self.resolvers.push(ResolverEntry {
             source: source.into(),
             role: ResolverRole::Authoritative,
@@ -214,6 +266,12 @@ impl ChainResolver {
         source: impl Into<String>,
         resolver: R,
     ) -> Self {
+        if !self.explicit_continuity_dir {
+            if let Some(dir) = resolver.continuity_dir() {
+                self.continuity_dir = dir.to_path_buf();
+                self.explicit_continuity_dir = true;
+            }
+        }
         self.resolvers.push(ResolverEntry {
             source: source.into(),
             role: ResolverRole::Supplementary,
@@ -238,13 +296,19 @@ impl ChainResolver {
         self
     }
 
+    /// Resolve `alias` across all configured sources, enforcing signature validity,
+    /// continuity, capability preservation, and byte-identical payload agreement.
     pub async fn resolve_with_report(&self, alias: &str) -> Result<ResolutionReport> {
-        let canonical = canonical_identifier(alias);
+        let strip = |s: &str| canonical_identifier(s.trim().strip_prefix('₿').unwrap_or(s.trim()));
+        let canonical = strip(alias);
+        crate::resolvers::continuity::check_revocation(&self.continuity_dir, &canonical)?;
+
         let mut observations = Vec::with_capacity(self.resolvers.len());
         let mut agreed: Option<Vec<u8>> = None;
         let mut selected = None;
+        let mut selected_is_local = false;
         for entry in &self.resolvers {
-            match entry.resolver.resolve_alias(alias).await {
+            match entry.resolver.resolve_for_chain(alias).await {
                 Ok(signed) => {
                     let profile = &signed.profile;
                     // Never treat unauthenticated revocation, expiry or alias
@@ -252,13 +316,17 @@ impl ChainResolver {
                     if !verify_signed_profile(&signed)? {
                         return Err(SatsPathError::InvalidSignature);
                     }
-                    if canonical_identifier(&profile.alias) != canonical {
+                    if strip(&profile.alias) != canonical {
                         return Err(SatsPathError::ResolverDisagreement(format!(
                             "{} returned alias {} instead of {}",
                             entry.source, profile.alias, alias
                         )));
                     }
                     if profile.revoked {
+                        crate::resolvers::continuity::accept_profile(
+                            &self.continuity_dir,
+                            &signed,
+                        )?;
                         return Err(SatsPathError::RegistryError(format!(
                             "Alias {} has been revoked",
                             profile.alias
@@ -297,6 +365,12 @@ impl ChainResolver {
                             entry.source
                         )));
                     }
+                    let is_local = entry.source == "local-registry";
+                    crate::resolvers::continuity::validate_candidate(
+                        &self.continuity_dir,
+                        &signed,
+                        is_local,
+                    )?;
                     // Equality of the entire signed payload also detects
                     // capability suppression, replay and equal-sequence forks.
                     let bytes = canonical_profile_bytes(profile)?;
@@ -309,6 +383,7 @@ impl ChainResolver {
                     agreed = Some(bytes);
                     if selected.is_none() && entry.role == ResolverRole::Authoritative {
                         selected = Some(signed);
+                        selected_is_local = is_local;
                     }
                     observations.push(ResolverObservation {
                         source: entry.source.clone(),
@@ -321,6 +396,15 @@ impl ChainResolver {
                     role: entry.role,
                     found: false,
                 }),
+                Err(SatsPathError::Bip353(reason))
+                    if reason == "no bitcoin: TXT record at this name" =>
+                {
+                    observations.push(ResolverObservation {
+                        source: entry.source.clone(),
+                        role: entry.role,
+                        found: false,
+                    })
+                }
                 Err(SatsPathError::NetworkError(reason)) => {
                     return Err(SatsPathError::NetworkError(format!(
                         "{} unavailable; refusing downgrade: {reason}",
@@ -339,6 +423,11 @@ impl ChainResolver {
                 SatsPathError::AliasNotFound(alias.into())
             }
         })?;
+        crate::resolvers::continuity::accept_profile_with_mode(
+            &self.continuity_dir,
+            &profile,
+            selected_is_local,
+        )?;
         Ok(ResolutionReport {
             profile,
             observations,
@@ -347,6 +436,7 @@ impl ChainResolver {
 }
 
 impl Default for ChainResolver {
+    /// Construct an empty [`ChainResolver`].
     fn default() -> Self {
         Self::new()
     }
@@ -354,6 +444,7 @@ impl Default for ChainResolver {
 
 #[async_trait]
 impl ProfileResolver for ChainResolver {
+    /// Resolve `alias` and return the agreed signed payment profile.
     async fn resolve_alias(&self, alias: &str) -> Result<SignedPaymentProfile> {
         Ok(self.resolve_with_report(alias).await?.profile)
     }
@@ -362,8 +453,11 @@ impl ProfileResolver for ChainResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bip353::{DnsTxtRecord, MockDnsTxtResolver};
     use crate::crypto::{generate_identity_keypair, sign_profile};
     use crate::profile::{PaymentMethod, PaymentProfile};
+    use crate::resolvers::bip353::Bip353Resolver;
+    use std::sync::Arc;
 
     struct MockResolver {
         should_succeed: bool,
@@ -372,6 +466,7 @@ mod tests {
 
     #[async_trait]
     impl ProfileResolver for MockResolver {
+        /// Return a signed mock profile or `AliasNotFound` depending on `should_succeed`.
         async fn resolve_alias(&self, alias: &str) -> Result<SignedPaymentProfile> {
             if self.should_succeed {
                 let kp = generate_identity_keypair();
@@ -410,6 +505,7 @@ mod tests {
         }
     }
 
+    /// Verify that `ChainResolver` falls through `AliasNotFound` to the next authoritative source.
     #[tokio::test]
     async fn chain_resolver_success() {
         let chain = ChainResolver::new()
@@ -427,6 +523,7 @@ mod tests {
         assert_eq!(res.unwrap().profile.alias, "test@domain.com");
     }
 
+    /// Verify that `ChainResolver` returns `AliasNotFound` when all sources report absence.
     #[tokio::test]
     async fn chain_resolver_failure() {
         let chain = ChainResolver::new()
@@ -443,6 +540,7 @@ mod tests {
         assert!(res.is_err());
     }
 
+    /// Verify that `ChainResolver` rejects a profile whose alias does not match the requested alias.
     #[tokio::test]
     async fn chain_resolver_rejects_substituted_alias() {
         // We ask the mock resolver to succeed, which always returns a profile
@@ -466,5 +564,77 @@ mod tests {
         );
         assert!(err.contains("alice@domain.com"));
         assert!(err.contains("test@domain.com"));
+    }
+
+    /// Verify that a `₿`-prefixed request matches an otherwise identical unprefixed profile alias.
+    #[tokio::test]
+    async fn chain_resolver_accepts_prefixed_request_for_unprefixed_profile() {
+        let chain = ChainResolver::new().push_authoritative(
+            "https",
+            MockResolver {
+                should_succeed: true,
+                returned_alias: Some("alice@example.com".to_string()),
+            },
+        );
+
+        let report = chain
+            .resolve_with_report("₿alice@example.com")
+            .await
+            .unwrap();
+        assert_eq!(report.profile.profile.alias, "alice@example.com");
+        assert!(report.observations[0].found);
+    }
+
+    /// Verify that definitive BIP-353 absence allows HTTPS fallback, while unsigned DNS records fail closed.
+    #[tokio::test]
+    async fn chain_resolver_allows_definitive_bip353_absence_but_blocks_unsigned_dns() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty_dns = MockDnsTxtResolver::new();
+        let bip353_absent = Bip353Resolver::with_dns_resolver(Arc::new(empty_dns), dir.path());
+
+        let chain = ChainResolver::with_continuity_dir(dir.path())
+            .push_authoritative("bip353", bip353_absent)
+            .push_authoritative(
+                "https",
+                MockResolver {
+                    should_succeed: true,
+                    returned_alias: Some("alice@example.com".to_string()),
+                },
+            );
+
+        let report = chain
+            .resolve_with_report("₿alice@example.com")
+            .await
+            .unwrap();
+        assert_eq!(report.profile.profile.alias, "alice@example.com");
+        assert!(!report.observations[0].found);
+        assert!(report.observations[1].found);
+
+        // An existing unsigned DNS record must fail closed with DnssecUnavailable and never fall back.
+        let dir_unsigned = tempfile::tempdir().unwrap();
+        let mut unsigned_dns = MockDnsTxtResolver::new();
+        unsigned_dns.insert(
+            "alice.user._bitcoin-payment.example.com",
+            DnsTxtRecord {
+                strings: vec!["bitcoin:?lno=lno1qoffer".into()],
+                dnssec_validated: false,
+                ttl_seconds: Some(60),
+            },
+        );
+        let bip353_unsigned =
+            Bip353Resolver::with_dns_resolver(Arc::new(unsigned_dns), dir_unsigned.path());
+        let chain_unsigned = ChainResolver::with_continuity_dir(dir_unsigned.path())
+            .push_authoritative("bip353", bip353_unsigned)
+            .push_authoritative(
+                "https",
+                MockResolver {
+                    should_succeed: true,
+                    returned_alias: Some("alice@example.com".to_string()),
+                },
+            );
+        assert!(matches!(
+            chain_unsigned.resolve_alias("₿alice@example.com").await,
+            Err(SatsPathError::DnssecUnavailable)
+        ));
     }
 }

@@ -44,10 +44,12 @@ use anyhow::Result;
 use satspath_core::registry::Registry;
 use std::path::PathBuf;
 
+/// Returns the default SatsPath configuration and data directory.
 pub(crate) fn satspath_dir() -> PathBuf {
     satspath_core::default_data_dir()
 }
 
+/// Opens the local SatsPath [`Registry`] in [`satspath_dir`].
 pub(crate) fn open_registry() -> Result<Registry> {
     let dir = satspath_dir();
     if !dir.exists() {
@@ -61,13 +63,16 @@ use satspath_core::resolvers::bip353::Bip353Resolver;
 use satspath_core::resolvers::http::HttpResolver;
 use satspath_core::resolvers::nostr::NostrResolver;
 
+/// Builds a [`ChainResolver`] for `alias`, using the local registry when `alias` is registered
+/// locally, or the public resolver chain backed by [`satspath_dir`] continuity state otherwise.
 pub(crate) fn get_resolver(alias: &str) -> Result<ChainResolver> {
-    let mut chain = ChainResolver::new();
+    let dir = satspath_dir();
+    let mut chain = ChainResolver::with_continuity_dir(&dir);
 
     // A locally registered/imported alias has one authoritative source: the
     // verified local registry. Unrelated public transports are not expected
     // for that alias and must not turn offline `show` into a network request.
-    if satspath_dir().exists() {
+    if dir.exists() {
         let reg = open_registry()?;
         if reg.is_registered(alias) {
             return Ok(chain.push_authoritative("local-registry", reg));
@@ -76,7 +81,7 @@ pub(crate) fn get_resolver(alias: &str) -> Result<ChainResolver> {
 
     // For non-local aliases, every configured public source must agree or
     // explicitly report NotFound. An outage is never silently downgraded.
-    chain = chain.push(Bip353Resolver::default());
+    chain = chain.push(Bip353Resolver::new(dir));
 
     // Add public HTTP resolver fallback
     chain = chain.push(HttpResolver::new());

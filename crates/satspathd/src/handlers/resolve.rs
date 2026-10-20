@@ -14,11 +14,14 @@ use crate::handlers::transparency::transparency_log;
 use crate::types::{now, DnsResolveRequest, DnsResolveResponse};
 
 
+
+/// Resolves and verifies a transparency-backed profile for `alias` and persists the latest checkpoint pin.
 pub(crate) fn resolve_profile(state: &AppState, alias: &str) -> Result<ResolvedTransparentProfile> {
     let store = TransactionalTransparencyStore::open(&state.home)?;
     verify_stored_profile(state, alias, store, true)
 }
 
+/// Resolves and verifies a transparency-backed profile for `alias` without mutating local checkpoint pins.
 pub(crate) fn resolve_profile_read_only(
     state: &AppState,
     alias: &str,
@@ -27,6 +30,7 @@ pub(crate) fn resolve_profile_read_only(
     verify_stored_profile(state, alias, store, false)
 }
 
+/// Verifies a stored profile against its transparency log history, inclusion proof, and checkpoint transition.
 fn verify_stored_profile(
     state: &AppState,
     alias: &str,
@@ -130,6 +134,7 @@ fn verify_stored_profile(
     })
 }
 
+/// Builds a v2 [`satspath_core::transparency::ResolutionEnvelope`] for `alias` with inclusion and state proofs.
 pub(crate) fn resolve_v2_envelope(
     state: &AppState,
     alias: &str,

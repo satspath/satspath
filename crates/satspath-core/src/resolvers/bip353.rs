@@ -649,6 +649,8 @@ pub async fn resolve_alias_with(
     resolve_alias_with_allow_private(resolver, alias, false).await
 }
 
+/// Resolve a `₿`-prefixed alias and fetch its DNSSEC-authenticated `sp-profile`,
+/// optionally allowing private or loopback profile URLs in test environments.
 pub async fn resolve_alias_with_allow_private(
     resolver: &(impl DnsTxtResolver + Sync + ?Sized),
     alias: &str,
@@ -711,6 +713,14 @@ impl ProfileResolver for Bip353Resolver {
     /// A verified revocation is persisted before returning `RegistryError`.
     /// Alias, DNS, profile validation, transition, and storage errors propagate.
     async fn resolve_alias(&self, alias: &str) -> Result<SignedPaymentProfile> {
+        let signed = self.resolve_for_chain(alias).await?;
+        super::continuity::accept_profile(&self.continuity_dir, &signed)?;
+        Ok(signed)
+    }
+
+    /// Authenticate the DNS pointer and check stored revocations while deferring
+    /// pin advancement to [`crate::resolver::ChainResolver`].
+    async fn resolve_for_chain(&self, alias: &str) -> Result<SignedPaymentProfile> {
         if !alias.starts_with('₿') {
             return Err(SatsPathError::AliasNotFound(alias.to_string()));
         }
@@ -720,14 +730,13 @@ impl ProfileResolver for Bip353Resolver {
             &self.continuity_dir,
             &format!("{}@{}", name.user, name.domain),
         )?;
-        let signed = resolve_alias_with_allow_private(
-            self.dns.as_ref(),
-            alias,
-            self.allow_private_profile_url,
-        )
-        .await?;
-        super::continuity::accept_profile(&self.continuity_dir, &signed)?;
-        Ok(signed)
+        resolve_alias_with_allow_private(self.dns.as_ref(), alias, self.allow_private_profile_url)
+            .await
+    }
+
+    /// Return the configured continuity storage directory for this resolver.
+    fn continuity_dir(&self) -> Option<&std::path::Path> {
+        Some(&self.continuity_dir)
     }
 }
 

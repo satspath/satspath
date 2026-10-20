@@ -645,6 +645,7 @@ mod tests {
             .len()
     }
 
+    /// Builds a test [`PaymentMethod::Onchain`] on mainnet.
     fn onchain(address: &str) -> PaymentMethod {
         PaymentMethod::Onchain {
             label: "On-chain".into(),
@@ -657,6 +658,7 @@ mod tests {
         }
     }
 
+    /// Verifies that `payable_methods` skips unpayable preferred rails before route selection.
     #[test]
     fn send_skips_unpayable_preferred_rails_before_selecting_route() {
         let good = onchain("1BoatSLRHtKNngkdXEeobR76b53LETtpyT");
@@ -692,6 +694,7 @@ mod tests {
         .is_ok());
     }
 
+    /// Verifies that `payable_methods` returns empty when every method is unpayable.
     #[test]
     fn send_has_no_route_when_every_method_is_unpayable() {
         let methods = [PaymentMethod::Lightning {

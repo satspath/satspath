@@ -29,6 +29,7 @@ use handlers::status::print_startup_status;
 use http::write_owner_only_file;
 use server::{audit_binding_security, serve};
 
+/// Entry point for the `satspathd` local receiver-profile daemon.
 fn main() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -40,6 +41,7 @@ fn main() -> Result<()> {
     result
 }
 
+/// Parses CLI configuration, initializes telemetry and identity state, and serves the daemon HTTP API.
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     telemetry::init_telemetry(cli.log_format.as_deref())?;
@@ -2089,10 +2091,12 @@ mod tests {
         server.unblock();
     }
 
+    /// Test resolver that returns a caller-specified [`satspath_core::SatsPathError`].
     struct SendErrorResolver(fn() -> satspath_core::SatsPathError);
 
     #[async_trait::async_trait]
     impl satspath_core::ProfileResolver for SendErrorResolver {
+        /// Returns the configured error for `resolve_alias`.
         async fn resolve_alias(
             &self,
             _alias: &str,
@@ -2101,6 +2105,7 @@ mod tests {
         }
     }
 
+    /// Verifies that unauthenticated BIP-353 responses return `no_route` and never create or persist invites.
     #[tokio::test]
     async fn send_unauthenticated_bip353_does_not_create_or_persist_invites() {
         let dir = tempfile::tempdir().unwrap();
@@ -2151,6 +2156,8 @@ mod tests {
         }
     }
 
+    /// Verifies that only `AliasNotFound` creates an invite while network, disagreement, continuity,
+    /// and revocation errors map to `SendResponse::NoRoute`.
     #[tokio::test]
     async fn send_only_definitive_absence_creates_and_persists_an_invite() {
         use satspath_core::SatsPathError;
@@ -2198,10 +2205,22 @@ mod tests {
         );
         assert!(!crate::config::wallet_path(dir.path()).exists());
 
-        let errors: [fn() -> SatsPathError; 3] = [
+        let errors: [fn() -> SatsPathError; 7] = [
             || SatsPathError::NetworkError("DNS lookup failed".into()),
             || SatsPathError::Bip353("no bitcoin: TXT record".into()),
             || SatsPathError::ResolverDisagreement("different identity keys".into()),
+            || SatsPathError::UnauthorizedKeyReplacement,
+            || {
+                SatsPathError::RegistryError(
+                    "Update rejected: sequence number 4 not greater than existing 5".into(),
+                )
+            },
+            || {
+                SatsPathError::RegistryError(
+                    "Update rejected: profile mutated without sequence progression".into(),
+                )
+            },
+            || SatsPathError::RegistryError("Alias alice@example.com has been revoked".into()),
         ];
         for error in errors {
             let dir = tempfile::tempdir().unwrap();
@@ -2228,6 +2247,7 @@ mod tests {
         }
     }
 
+    /// Verifies that invalid payment amounts return `NoRoute` without creating an invite.
     #[tokio::test]
     async fn send_invalid_amount_never_creates_an_invite() {
         let dir = tempfile::tempdir().unwrap();
