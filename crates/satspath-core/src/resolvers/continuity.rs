@@ -11,8 +11,12 @@ use crate::{Result, SatsPathError, SignedPaymentProfile};
 /// Strip at most one leading `₿` and return the canonical ASCII identifier.
 fn normalize_alias(alias: &str) -> String {
     let trimmed = alias.trim();
-    let unprefixed = trimmed.strip_prefix('₿').unwrap_or(trimmed);
-    canonical_identifier(unprefixed)
+    let unprefixed = trimmed.strip_prefix('₿').unwrap_or(trimmed).trim();
+    if let Some((user, domain)) = unprefixed.split_once('@') {
+        canonical_identifier(&format!("{}@{}", user.trim(), domain.trim()))
+    } else {
+        canonical_identifier(unprefixed)
+    }
 }
 
 /// Validate a signed profile's structure, expiry, public material, and signature

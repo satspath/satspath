@@ -299,7 +299,14 @@ impl ChainResolver {
     /// Resolve `alias` across all configured sources, enforcing signature validity,
     /// continuity, capability preservation, and byte-identical payload agreement.
     pub async fn resolve_with_report(&self, alias: &str) -> Result<ResolutionReport> {
-        let strip = |s: &str| canonical_identifier(s.trim().strip_prefix('₿').unwrap_or(s.trim()));
+        let strip = |s: &str| {
+            let unprefixed = s.trim().strip_prefix('₿').unwrap_or(s.trim()).trim();
+            if let Some((user, domain)) = unprefixed.split_once('@') {
+                canonical_identifier(&format!("{}@{}", user.trim(), domain.trim()))
+            } else {
+                canonical_identifier(unprefixed)
+            }
+        };
         let canonical = strip(alias);
         crate::resolvers::continuity::check_revocation(&self.continuity_dir, &canonical)?;
 
