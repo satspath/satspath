@@ -14,7 +14,7 @@
 //!   pointer return [`SatsPathError::Bip353Unauthenticated`] in [`ProfileResolver::resolve_alias`]
 //!   and never synthesize ephemeral `secp256k1` profile signatures.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -491,12 +491,18 @@ fn verify_rrset_with_trusted_keys(
     records: &[Record],
     rrsigs: &[RRSIG],
     trusted_keys: &[DNSKEY],
+    now: u32,
 ) -> bool {
     if records.is_empty() || rrsigs.is_empty() {
         return false;
     }
     for rrsig in rrsigs {
         if rrsig.signer_name() != expected_signer {
+            continue;
+        }
+        let inception = rrsig.sig_inception();
+        let expiration = rrsig.sig_expiration();
+        if now < inception || now > expiration {
             continue;
         }
         for dnskey in trusted_keys {
@@ -566,6 +572,12 @@ fn verify_nsec_negative_response(query: &Query, response: &DnsResponse) -> bool 
     verify_nsec(query, soa_name, &nsecs)
 }
 
+/// Maximum number of NSEC3 records accepted in a single denial-of-existence proof.
+const MAX_NSEC3_RECORDS: usize = 8;
+
+/// Maximum NSEC3 hash iterations permitted per RFC 9276 to mitigate algorithmic complexity attacks.
+const MAX_NSEC3_ITERATIONS: u16 = 100;
+
 /// Verify RFC 5155 `NSEC3` denial of existence over pre-authenticated `NSEC3` records.
 fn verify_nsec3_coverage(
     query: &Query,
@@ -573,6 +585,10 @@ fn verify_nsec3_coverage(
     response_code: ResponseCode,
     nsec3_records: &[Record],
 ) -> bool {
+    if nsec3_records.is_empty() || nsec3_records.len() > MAX_NSEC3_RECORDS {
+        return false;
+    }
+
     struct ParsedNsec3<'a> {
         owner_hash: Vec<u8>,
         rdata: &'a hickory_resolver::proto::rr::dnssec::rdata::NSEC3,
@@ -599,6 +615,9 @@ fn verify_nsec3_coverage(
         let Some(RData::DNSSEC(DNSSECRData::NSEC3(rdata))) = record.data() else {
             return false;
         };
+        if rdata.iterations() > MAX_NSEC3_ITERATIONS {
+            return false;
+        }
         if owner_hash.is_empty() || owner_hash.len() != rdata.next_hashed_owner_name().len() {
             return false;
         }
@@ -627,6 +646,7 @@ fn verify_nsec3_coverage(
                 && !entry.rdata.type_bit_maps().contains(&RecordType::CNAME)
         }),
         ResponseCode::NXDomain => {
+            // 1. QNAME must not match any NSEC3 owner hash.
             for entry in &parsed {
                 let Some(qhash) = hash_name(entry, query.name()) else {
                     return false;
@@ -635,8 +655,13 @@ fn verify_nsec3_coverage(
                     return false;
                 }
             }
-            let covers_name = |target: &Name| -> bool {
+
+            // Helper to check if any NSEC3 record covers a target name.
+            let find_covering_entry = |target: &Name, require_no_opt_out: bool| -> bool {
                 parsed.iter().any(|entry| {
+                    if require_no_opt_out && entry.rdata.opt_out() {
+                        return false;
+                    }
                     hash_name(entry, target).is_some_and(|h| {
                         nsec3_interval_covers(
                             &entry.owner_hash,
@@ -646,19 +671,55 @@ fn verify_nsec3_coverage(
                     })
                 })
             };
-            if !covers_name(query.name()) {
+
+            // 2. Candidate ancestor pairs (child, parent_of_child) from QNAME up to soa_name.
+            let mut candidates = Vec::new();
+            let mut curr = query.name().clone();
+            while curr != *soa_name && soa_name.zone_of(&curr) {
+                let parent = curr.base_name();
+                candidates.push((curr, parent.clone()));
+                curr = parent;
+            }
+
+            // 3. Find Closest Encloser (CE) and Next Closer (NC).
+            let mut ce_and_nc = None;
+            for (nc_cand, ce_cand) in &candidates {
+                let ce_exists = parsed
+                    .iter()
+                    .any(|entry| hash_name(entry, ce_cand).is_some_and(|h| entry.owner_hash == h));
+                if ce_exists {
+                    ce_and_nc = Some((ce_cand.clone(), nc_cand.clone()));
+                    break;
+                }
+            }
+
+            let Some((ce, nc)) = ce_and_nc else {
+                return false;
+            };
+
+            // 4. Next Closer (NC) must be covered by an NSEC3 record without Opt-Out.
+            // RFC 5155 §8.4: The NSEC3 RR covering next closer name MUST NOT have Opt-Out set for NXDOMAIN.
+            if !find_covering_entry(&nc, true) {
                 return false;
             }
-            let parent = query.name().base_name();
-            let encloser = if soa_name.zone_of(&parent) {
-                parent
-            } else {
-                soa_name.clone()
-            };
-            let Ok(wildcard) = Name::from_ascii(format!("*.{encloser}")) else {
+
+            // 5. Wildcard at Closest Encloser (*.CE) must not exist and must be covered.
+            let Ok(wildcard) = Name::from_ascii(format!("*.{ce}")) else {
                 return false;
             };
-            covers_name(&wildcard)
+            for entry in &parsed {
+                let Some(wchash) = hash_name(entry, &wildcard) else {
+                    return false;
+                };
+                if entry.owner_hash == wchash {
+                    return false;
+                }
+            }
+            if !find_covering_entry(&wildcard, true) {
+                return false;
+            }
+
+            true
         }
         _ => false,
     }
@@ -672,6 +733,7 @@ fn verify_nsec3_coverage(
 pub struct HickoryDnssecTxtResolver {
     handle: DnssecDnsHandle<SharedDnsHandle>,
     raw_handle: SharedDnsHandle,
+    clock: Option<Arc<dyn Fn() -> u32 + Send + Sync>>,
 }
 
 impl Default for HickoryDnssecTxtResolver {
@@ -724,6 +786,36 @@ impl HickoryDnssecTxtResolver {
         Self::from_dns_handle(handle, anchor)
     }
 
+    /// Construct a validating resolver with a custom clock function for deterministic validation.
+    pub fn with_dns_handle_and_clock<H, E, F>(handle: H, anchor: TrustAnchor, clock: F) -> Self
+    where
+        H: DnsHandle<Error = E> + Send + Sync + Unpin + 'static,
+        E: std::error::Error + Send + 'static,
+        F: Fn() -> u32 + Send + Sync + 'static,
+    {
+        let mut resolver = Self::from_dns_handle(handle, anchor);
+        resolver.clock = Some(Arc::new(clock));
+        resolver
+    }
+
+    /// Attach a custom clock function to this resolver.
+    pub fn with_clock<F: Fn() -> u32 + Send + Sync + 'static>(mut self, clock: F) -> Self {
+        self.clock = Some(Arc::new(clock));
+        self
+    }
+
+    /// Return the current validation time in seconds since UNIX epoch.
+    pub fn now(&self) -> u32 {
+        if let Some(ref clock) = self.clock {
+            clock()
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as u32)
+                .unwrap_or(0)
+        }
+    }
+
     /// Wrap a prevalidated network pool or an explicitly injected test transport.
     fn from_dns_handle<H, E>(handle: H, anchor: TrustAnchor) -> Self
     where
@@ -735,6 +827,7 @@ impl HickoryDnssecTxtResolver {
         Self {
             handle: dnssec_handle,
             raw_handle: shared,
+            clock: None,
         }
     }
 
@@ -770,7 +863,7 @@ impl HickoryDnssecTxtResolver {
             .filter(|rr| rr.record_type() == RecordType::NSEC3)
             .cloned()
             .collect();
-        if nsec3_records.is_empty() {
+        if nsec3_records.is_empty() || nsec3_records.len() > MAX_NSEC3_RECORDS {
             return false;
         }
         let rrsigs: Vec<(Name, RRSIG)> = raw_response
@@ -810,6 +903,7 @@ impl HickoryDnssecTxtResolver {
         if trusted_keys.is_empty() {
             return false;
         }
+        let now = self.now();
         let soa_rrsigs: Vec<RRSIG> = rrsigs
             .iter()
             .filter(|(owner, sig)| owner == &soa_name && sig.type_covered() == RecordType::SOA)
@@ -821,6 +915,7 @@ impl HickoryDnssecTxtResolver {
             &soa_records,
             &soa_rrsigs,
             &trusted_keys,
+            now,
         ) {
             return false;
         }
@@ -845,6 +940,7 @@ impl HickoryDnssecTxtResolver {
                 records,
                 &owner_rrsigs,
                 &trusted_keys,
+                now,
             ) {
                 return false;
             }
@@ -918,10 +1014,35 @@ impl DnsTxtResolver for HickoryDnssecTxtResolver {
             )));
         }
 
+        let mut final_owner = name.clone();
+        let mut visited = HashSet::new();
+        visited.insert(final_owner.clone());
+        for _ in 0..16 {
+            let next_target = response.answers().iter().find_map(|record| {
+                if record.name() == &final_owner && record.record_type() == RecordType::CNAME {
+                    record
+                        .data()
+                        .and_then(|d| d.as_cname())
+                        .map(|c| c.0.clone())
+                } else {
+                    None
+                }
+            });
+            match next_target {
+                Some(target) => {
+                    if !visited.insert(target.clone()) {
+                        break;
+                    }
+                    final_owner = target;
+                }
+                None => break,
+            }
+        }
+
         let mut out = Vec::new();
         if response.response_code() == ResponseCode::NoError {
             for record in response.answers() {
-                if record.name() != &name || record.record_type() != RecordType::TXT {
+                if record.name() != &final_owner || record.record_type() != RecordType::TXT {
                     continue;
                 }
                 if let Some(txt) = record.data().and_then(|d| d.as_txt()) {

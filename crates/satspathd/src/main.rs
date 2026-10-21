@@ -242,7 +242,7 @@ mod tests {
         profile::{recover_profile_key, rotate_profile_key, sign_and_store},
         quote::{pay_response, quote_response},
         resolve::resolve_v2_envelope,
-        send::{receive_view, send_response, send_response_with_resolver},
+        send::{receive_view, send_response_with_resolver},
         wallet::{load_or_create_identity, load_wallet, save_identity_key, save_wallet},
     };
     use crate::rate_limit;
@@ -2180,6 +2180,7 @@ mod tests {
         let invites = store.list().unwrap();
         assert_eq!(invites.len(), 1);
         assert_eq!(invites[0].amount_sats, 25_000);
+        assert!(claim_url.contains(&format!("invite_id={}", invites[0].invite_id)));
         let before =
             std::fs::read(dir.path().join(satspath_core::invite_store::INVITES_FILE)).unwrap();
         let error = crate::handlers::claim::claim_invite_handler(

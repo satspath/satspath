@@ -13,8 +13,6 @@ use crate::config::AppState;
 use crate::handlers::transparency::transparency_log;
 use crate::types::{now, DnsResolveRequest, DnsResolveResponse};
 
-
-
 /// Resolves and verifies a transparency-backed profile for `alias` and persists the latest checkpoint pin.
 pub(crate) fn resolve_profile(state: &AppState, alias: &str) -> Result<ResolvedTransparentProfile> {
     let store = TransactionalTransparencyStore::open(&state.home)?;

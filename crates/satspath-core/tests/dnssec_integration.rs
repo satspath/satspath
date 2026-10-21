@@ -25,7 +25,7 @@ use hickory_resolver::proto::rr::dnssec::{
     tbs, Algorithm, DigestType, KeyFormat, KeyPair, Nsec3HashAlgorithm, Private, PublicKeyBuf,
     TrustAnchor, Verifier,
 };
-use hickory_resolver::proto::rr::rdata::{SOA, TXT};
+use hickory_resolver::proto::rr::rdata::{CNAME, SOA, TXT};
 use hickory_resolver::proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_resolver::proto::xfer::{DnsHandle, DnsRequest, DnsResponse};
 
@@ -419,7 +419,11 @@ impl InProcessAuthoritativeDnssecServer {
         // Valid signed TXT record
         let mut valid_txt = fixture.txt_records.clone();
         valid_txt.extend(fixture.txt_rrsig_records.clone());
-        entries.push((fixture.txt_owner.clone(), RecordType::TXT, valid_txt));
+        entries.push((
+            fixture.txt_owner.clone(),
+            RecordType::TXT,
+            valid_txt.clone(),
+        ));
 
         // Bogus TXT record (signature corrupted)
         let bogus_name = Name::from_ascii("bogus.user._bitcoin-payment.satspath.dev.").unwrap();
@@ -501,6 +505,28 @@ impl InProcessAuthoritativeDnssecServer {
             expiration,
         );
 
+        // Signed CNAME redirection: rodrigo-cname -> rodrigo
+        let cname_owner =
+            Name::from_ascii("rodrigo-cname.user._bitcoin-payment.satspath.dev.").unwrap();
+        let cname_rec = Record::from_rdata(
+            cname_owner.clone(),
+            300,
+            RData::CNAME(CNAME(fixture.txt_owner.clone())),
+        );
+        let (_, cname_rrsig_rec) = sign_rrset(
+            &cname_owner,
+            &domain_name,
+            RecordType::CNAME,
+            std::slice::from_ref(&cname_rec),
+            domain_kp,
+            domain_dnskey,
+            inception,
+            expiration,
+        );
+        let mut cname_answers = vec![cname_rec, cname_rrsig_rec];
+        cname_answers.extend(valid_txt.clone());
+        entries.push((cname_owner, RecordType::TXT, cname_answers));
+
         // 1. Authenticated NSEC NXDomain
         let nsec_nxdomain_qname =
             Name::from_ascii("nsec-nxdomain.user._bitcoin-payment.satspath.dev.").unwrap();
@@ -572,9 +598,45 @@ impl InProcessAuthoritativeDnssecServer {
             ],
         ));
 
-        // 3. Authenticated NSEC3 NXDomain (wraparound interval covering qname and *.encloser)
+        // 3. Authenticated NSEC3 NXDomain (RFC 5155 closest-encloser proof)
         let nsec3_nxdomain_qname =
             Name::from_ascii("nsec3-nxdomain.user._bitcoin-payment.satspath.dev.").unwrap();
+        let ce_hash = Nsec3HashAlgorithm::SHA1
+            .hash(&[], &domain_name, 0)
+            .expect("sha1 ce hash");
+        let nsec3_ce_owner_name = Name::from_ascii(format!(
+            "{}.satspath.dev.",
+            encode_base32hex(ce_hash.as_ref())
+        ))
+        .unwrap();
+        let nsec3_ce_rec = Record::from_rdata(
+            nsec3_ce_owner_name.clone(),
+            300,
+            RData::DNSSEC(DNSSECRData::NSEC3(NSEC3::new(
+                Nsec3HashAlgorithm::SHA1,
+                false,
+                0,
+                Vec::new(),
+                vec![0xfe; 20],
+                vec![
+                    RecordType::SOA,
+                    RecordType::DNSKEY,
+                    RecordType::RRSIG,
+                    RecordType::NSEC3,
+                ],
+            ))),
+        );
+        let (_, nsec3_ce_rrsig_rec) = sign_rrset(
+            &nsec3_ce_owner_name,
+            &domain_name,
+            RecordType::NSEC3,
+            std::slice::from_ref(&nsec3_ce_rec),
+            domain_kp,
+            domain_dnskey,
+            inception,
+            expiration,
+        );
+
         let nsec3_nx_owner_hash = vec![0xfe; 20];
         let nsec3_nx_next_hash = vec![0xfd; 20];
         let nsec3_nx_owner_name = Name::from_ascii(format!(
@@ -590,8 +652,8 @@ impl InProcessAuthoritativeDnssecServer {
                 false,
                 0,
                 Vec::new(),
-                nsec3_nx_next_hash,
-                vec![RecordType::SOA, RecordType::DNSKEY, RecordType::RRSIG],
+                nsec3_nx_next_hash.clone(),
+                vec![RecordType::RRSIG],
             ))),
         );
         let (_, nsec3_nx_rrsig_rec) = sign_rrset(
@@ -611,8 +673,10 @@ impl InProcessAuthoritativeDnssecServer {
             vec![
                 soa_rec.clone(),
                 soa_rrsig_rec.clone(),
-                nsec3_nx_rec,
-                nsec3_nx_rrsig_rec,
+                nsec3_ce_rec.clone(),
+                nsec3_ce_rrsig_rec.clone(),
+                nsec3_nx_rec.clone(),
+                nsec3_nx_rrsig_rec.clone(),
             ],
         ));
 
@@ -668,7 +732,156 @@ impl InProcessAuthoritativeDnssecServer {
             unauth_nxdomain_qname,
             RecordType::TXT,
             ResponseCode::NXDomain,
-            vec![soa_rec, soa_rrsig_rec],
+            vec![soa_rec.clone(), soa_rrsig_rec.clone()],
+        ));
+
+        // 6. Expired NSEC3 NXDomain (expired RRSIGs)
+        let nsec3_expired_qname =
+            Name::from_ascii("nsec3-expired.user._bitcoin-payment.satspath.dev.").unwrap();
+        let expired_inception = inception.saturating_sub(7200);
+        let expired_expiration = inception.saturating_sub(3600);
+        let (_, soa_expired_rrsig_rec) = sign_rrset(
+            &domain_name,
+            &domain_name,
+            RecordType::SOA,
+            std::slice::from_ref(&soa_rec),
+            domain_kp,
+            domain_dnskey,
+            expired_inception,
+            expired_expiration,
+        );
+        let (_, nsec3_expired_rrsig_rec) = sign_rrset(
+            &nsec3_nx_owner_name,
+            &domain_name,
+            RecordType::NSEC3,
+            std::slice::from_ref(&nsec3_nx_rec),
+            domain_kp,
+            domain_dnskey,
+            expired_inception,
+            expired_expiration,
+        );
+        negative_responses.push((
+            nsec3_expired_qname,
+            RecordType::TXT,
+            ResponseCode::NXDomain,
+            vec![
+                soa_rec.clone(),
+                soa_expired_rrsig_rec,
+                nsec3_ce_rec.clone(),
+                nsec3_ce_rrsig_rec.clone(),
+                nsec3_nx_rec.clone(),
+                nsec3_expired_rrsig_rec,
+            ],
+        ));
+
+        // 7. Opt-Out NSEC3 NXDomain (covering record has opt_out = true)
+        let nsec3_optout_qname =
+            Name::from_ascii("nsec3-optout.user._bitcoin-payment.satspath.dev.").unwrap();
+        let nsec3_optout_rec = Record::from_rdata(
+            nsec3_nx_owner_name.clone(),
+            300,
+            RData::DNSSEC(DNSSECRData::NSEC3(NSEC3::new(
+                Nsec3HashAlgorithm::SHA1,
+                true, // opt_out = true!
+                0,
+                Vec::new(),
+                nsec3_nx_next_hash.clone(),
+                vec![RecordType::RRSIG],
+            ))),
+        );
+        let (_, nsec3_optout_rrsig_rec) = sign_rrset(
+            &nsec3_nx_owner_name,
+            &domain_name,
+            RecordType::NSEC3,
+            std::slice::from_ref(&nsec3_optout_rec),
+            domain_kp,
+            domain_dnskey,
+            inception,
+            expiration,
+        );
+        negative_responses.push((
+            nsec3_optout_qname,
+            RecordType::TXT,
+            ResponseCode::NXDomain,
+            vec![
+                soa_rec.clone(),
+                soa_rrsig_rec.clone(),
+                nsec3_ce_rec.clone(),
+                nsec3_ce_rrsig_rec.clone(),
+                nsec3_optout_rec,
+                nsec3_optout_rrsig_rec,
+            ],
+        ));
+
+        // 8. Parent-zone NXDomain proof (SOA and NSEC3 are from parent zone "dev." instead of authoritative "satspath.dev.")
+        let parent_proof_qname =
+            Name::from_ascii("parent-proof.user._bitcoin-payment.satspath.dev.").unwrap();
+        let dev_zone_name = Name::from_ascii("dev.").unwrap();
+        let dev_kp = &fixture.zone_keypairs[1];
+        let Some(RData::DNSSEC(DNSSECRData::DNSKEY(dev_dnskey))) =
+            fixture.chain[1].dnskey_records[0].data()
+        else {
+            panic!("dev DNSKEY must exist");
+        };
+        let dev_soa_rec = Record::from_rdata(
+            dev_zone_name.clone(),
+            3600,
+            RData::SOA(SOA::new(
+                Name::from_ascii("ns1.dev.").unwrap(),
+                Name::from_ascii("hostmaster.dev.").unwrap(),
+                2026102001,
+                3600,
+                600,
+                86400,
+                300,
+            )),
+        );
+        let (_, dev_soa_rrsig_rec) = sign_rrset(
+            &dev_zone_name,
+            &dev_zone_name,
+            RecordType::SOA,
+            std::slice::from_ref(&dev_soa_rec),
+            dev_kp,
+            dev_dnskey,
+            inception,
+            expiration,
+        );
+        let dev_nsec3_owner_hash = vec![0xfe; 20];
+        let dev_nsec3_next_hash = vec![0xfd; 20];
+        let dev_nsec3_owner_name =
+            Name::from_ascii(format!("{}.dev.", encode_base32hex(&dev_nsec3_owner_hash))).unwrap();
+        let dev_nsec3_rec = Record::from_rdata(
+            dev_nsec3_owner_name.clone(),
+            300,
+            RData::DNSSEC(DNSSECRData::NSEC3(NSEC3::new(
+                Nsec3HashAlgorithm::SHA1,
+                false,
+                0,
+                Vec::new(),
+                dev_nsec3_next_hash,
+                vec![RecordType::SOA, RecordType::RRSIG],
+            ))),
+        );
+        let (_, dev_nsec3_rrsig_rec) = sign_rrset(
+            &dev_nsec3_owner_name,
+            &dev_zone_name,
+            RecordType::NSEC3,
+            std::slice::from_ref(&dev_nsec3_rec),
+            dev_kp,
+            dev_dnskey,
+            inception,
+            expiration,
+        );
+        negative_responses.push((
+            parent_proof_qname,
+            RecordType::TXT,
+            ResponseCode::NXDomain,
+            vec![
+                dev_soa_rec,
+                dev_soa_rrsig_rec,
+                dev_nsec3_rec,
+                dev_nsec3_rrsig_rec,
+            ],
         ));
 
         Self {
@@ -843,7 +1056,11 @@ async fn test_in_process_hickory_dnssec_valid_bogus_and_unsigned() {
     const FIXED_TEST_TIME: u32 = 1_700_000_000;
     let fixture = SignedDnssecFixture::build_at(uri, FIXED_TEST_TIME);
     let server = InProcessAuthoritativeDnssecServer::from_fixture(&fixture);
-    let resolver = HickoryDnssecTxtResolver::with_dns_handle(server, fixture.trust_anchor.clone());
+    let resolver = HickoryDnssecTxtResolver::with_dns_handle_and_clock(
+        server,
+        fixture.trust_anchor.clone(),
+        move || FIXED_TEST_TIME,
+    );
 
     // 1. Valid DNSSEC-signed domain resolves and passes Strict mode
     let res = resolve_bip353_with(
@@ -927,6 +1144,38 @@ async fn test_in_process_hickory_dnssec_valid_bogus_and_unsigned() {
         !matches!(unauth_neg_err, SatsPathError::AliasNotFound(_)),
         "unauthenticated NXDomain must not return AliasNotFound, got: {unauth_neg_err:?}"
     );
+
+    // 7. Signed CNAME redirection resolves to the target TXT record
+    let cname_res = resolve_bip353_with(
+        &resolver,
+        "₿rodrigo-cname@satspath.dev",
+        DnssecPolicy::Strict,
+        FIXED_TEST_TIME as i64,
+    )
+    .await
+    .expect("signed CNAME redirection must resolve target TXT in Strict mode");
+    assert!(cname_res.dnssec_validated);
+    assert_eq!(cname_res.bitcoin_uri, uri);
+
+    // 8. Adversarial negative proofs (expired signatures, opt-out, and parent-zone proof) fail closed and never become AliasNotFound
+    for adversarial_alias in [
+        "₿nsec3-expired@satspath.dev",
+        "₿nsec3-optout@satspath.dev",
+        "₿parent-proof@satspath.dev",
+    ] {
+        let adv_err = resolve_bip353_with(
+            &resolver,
+            adversarial_alias,
+            DnssecPolicy::Strict,
+            FIXED_TEST_TIME as i64,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            !matches!(adv_err, SatsPathError::AliasNotFound(_)),
+            "adversarial negative proof for {adversarial_alias} must not return AliasNotFound, got: {adv_err:?}"
+        );
+    }
 }
 
 /// Accept authenticated profile pointers and reject instructions without a profile.
