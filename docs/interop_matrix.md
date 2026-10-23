@@ -1,0 +1,58 @@
+# Real-wallet interoperability matrix (#171)
+
+No case is marked `PASS` until an actual host wallet executes a validated
+SatsPath intent and an **independent receiving implementation** confirms the
+payment. Existing mock receipts in #156 are unit tests, not real-wallet proof.
+
+| Transport | Capability | Host wallet | Network | Status | Evidence required |
+| --- | --- | --- | --- | --- | --- |
+| HTTPS | Lightning BOLT11 | LDK | regtest | PENDING | recipient invoice + settlement preimage |
+| BIP-353 | Lightning BOLT11 | LDK | signet | PENDING | local DNSSEC proof + receiver confirmation |
+| HTTPS | On-chain | BDK | regtest | PENDING | txid + receiver UTXO confirmation |
+| Nostr | On-chain | BDK | regtest | PENDING | signed event + receiver UTXO confirmation |
+| BOLT12 | Offer/invoice | compatible node | regtest | PENDING | invoice settlement |
+| HTTPS | Silent Payments | compatible BDK flow | signet | PENDING | derived output detected by receiver |
+| HTTPS | Ark | live ASP | testnet/signet | PENDING | ASP receipt + receiver VTXO |
+| Any eligible transport | production-ready rail | host wallet | mainnet | PENDING | capped approved amount + independent receipt |
+
+The opt-in `real_wallet_interop` test provides a fail-closed driver contract
+for on-chain HTTPS. It intentionally fails without a real profile, authenticated
+transparency evidence, a host-wallet executable and an independent receiver
+checker. It does **not** silently substitute in-memory mocks. No mainnet
+transaction is initiated by CI.
+
+From the repository root, with an externally provisioned testnet/regtest wallet
+and independently configured receiver, run:
+
+```sh
+SATSPATH_INTEROP_CONFIG=/absolute/path/to/interop.json \
+  cargo test -p satspath-router --test real_wallet_interop \
+  https_onchain_wallet_receiver_confirms_payment -- --ignored --nocapture
+```
+
+The private JSON config must contain `alias`, `amount_sats`, `max_fee_sats`,
+`network` (`"Regtest"` or `"Testnet"`), `store_dir`, `pins_dir`, `wallet_driver`,
+`receiving_wallet_checker`, `witness_quorum`, `witness_pubkeys`,
+`observer_pubkeys`, and `transparency` (authenticated handoff evidence from
+the independent witness/observer deployment). Do not commit credentials or
+the JSON config. Both executables accept one JSON request on stdin and return
+one JSON response on stdout. The host driver receives `action: send_onchain`,
+`network`, `destination`, `amount_sats`, `max_fee_sats`; it must return an
+`OnchainReceipt` with `txid`, `destination`, `amount_sats`, `fee_sats`,
+`timestamp`. The independent checker receives `action: confirm_receive` plus
+`network`, `txid`, `destination`, `amount_sats` and returns those fields with a
+positive `confirmations` count. The sending driver has a 30-second deadline;
+the receiving checker has up to 20 minutes for testnet confirmation. Both have
+an 8 KiB output limit. If the receiver times out **after broadcast**, inspect
+the txid and receiving wallet before any retry: rerunning the test could send
+a second payment. The test cannot attest independence from executable output
+alone: keep the receiver's transaction/UTXO evidence for manual verification.
+The harness clears the driver's inherited environment and runs it from `/`;
+the executable must be an absolute path and load its own credentials from a
+separately provisioned host wallet. This is not an OS sandbox: run only trusted
+drivers on a host with appropriate filesystem permissions.
+Fee-source HTTP calls in the quote path reject private or loopback endpoints,
+credentials in URLs, and non-HTTPS schemes. The connector rejects private or
+mixed DNS answers and disables proxies and redirects. A local Bitcoin Core RPC
+address cannot be used as a quote fee oracle; use a public HTTPS oracle or an
+explicit static fee source in controlled regtest environments.
