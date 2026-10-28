@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::{Arc, RwLock};
 
-use satspath_core::{Result, SatsPathError};
+use satspath_core::Result;
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+use satspath_core::SatsPathError;
 
 /// Recommended fee rates from mempool.space (camelCase for JSON).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -530,8 +532,30 @@ struct SmartFeeResult {
 pub mod native_fees {
     use super::*;
     use reqwest::Client;
+    use satspath_core::{outbound, ssrf};
 
+    const MAX_FEE_RESPONSE_BYTES: usize = 32 * 1024;
+
+    // Public compatibility wrappers never send through an arbitrary supplied
+    // reqwest client: it could use a proxy or unvalidated DNS answers.
+    fn protected_fee_client(url: &str) -> Option<Client> {
+        outbound::validate_request_url(url).ok()?;
+        Some(outbound::http_client(std::time::Duration::from_secs(3)))
+    }
+
+    /// Fetch an RPC target using the protected connector. The legacy client
+    /// argument is ignored: caller-provided transports cannot enforce SSRF policy.
     pub async fn fetch_rpc_target_fee(
+        target: u64,
+        _client: &Client,
+        url: &str,
+        auth: &Option<(String, Option<String>)>,
+    ) -> Option<u64> {
+        let protected = protected_fee_client(url)?;
+        fetch_rpc_target_fee_with_client(target, &protected, url, auth).await
+    }
+
+    async fn fetch_rpc_target_fee_with_client(
         target: u64,
         client: &Client,
         url: &str,
@@ -547,13 +571,14 @@ pub mod native_fees {
         if let Some((user, pass)) = auth {
             builder = builder.basic_auth(user.clone(), pass.as_deref());
         }
-        let res = builder
-            .send()
-            .await
-            .ok()?
-            .json::<RpcResponse>()
+        let response = builder.send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let body = ssrf::read_bounded_response(response, MAX_FEE_RESPONSE_BYTES)
             .await
             .ok()?;
+        let res: RpcResponse = serde_json::from_slice(&body).ok()?;
         if res.error.is_some() {
             return None;
         }
@@ -565,16 +590,26 @@ pub mod native_fees {
         Some(std::cmp::max(1, sat_vb))
     }
 
+    /// Fetch Bitcoin Core estimates through a protected, URL-validated client.
     pub async fn fetch_bitcoin_core_fee(
+        url: &str,
+        auth: &Option<(String, Option<String>)>,
+        _client: &Client,
+    ) -> Option<FeeEstimate> {
+        let protected = protected_fee_client(url)?;
+        fetch_bitcoin_core_fee_with_client(url, auth, &protected).await
+    }
+
+    async fn fetch_bitcoin_core_fee_with_client(
         url: &str,
         auth: &Option<(String, Option<String>)>,
         client: &Client,
     ) -> Option<FeeEstimate> {
         let (t1, t3, t6, t24) = tokio::join!(
-            fetch_rpc_target_fee(1, client, url, auth),
-            fetch_rpc_target_fee(3, client, url, auth),
-            fetch_rpc_target_fee(6, client, url, auth),
-            fetch_rpc_target_fee(24, client, url, auth),
+            fetch_rpc_target_fee_with_client(1, client, url, auth),
+            fetch_rpc_target_fee_with_client(3, client, url, auth),
+            fetch_rpc_target_fee_with_client(6, client, url, auth),
+            fetch_rpc_target_fee_with_client(24, client, url, auth),
         );
 
         let fastest = t1.or(t3).or(t6)?;
@@ -594,25 +629,68 @@ pub mod native_fees {
         Some(est)
     }
 
-    pub async fn fetch_mempool_fee(url: &str, client: &Client) -> Option<FeeEstimate> {
+    /// Fetch mempool.space fees through the protected connector.
+    pub async fn fetch_mempool_fee(url: &str, _client: &Client) -> Option<FeeEstimate> {
+        let protected = protected_fee_client(url)?;
+        fetch_mempool_fee_with_client(url, &protected).await
+    }
+
+    async fn fetch_mempool_fee_with_client(url: &str, client: &Client) -> Option<FeeEstimate> {
         let resp = client.get(url).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
         }
-        let est: MempoolFeeEstimate = resp.json().await.ok()?;
+        let body = ssrf::read_bounded_response(resp, MAX_FEE_RESPONSE_BYTES)
+            .await
+            .ok()?;
+        let est: MempoolFeeEstimate = serde_json::from_slice(&body).ok()?;
         Some(est.into())
     }
 
-    pub async fn fetch_esplora_fee(url: &str, client: &Client) -> Option<FeeEstimate> {
+    /// Fetch Esplora fees through the protected connector.
+    pub async fn fetch_esplora_fee(url: &str, _client: &Client) -> Option<FeeEstimate> {
+        let protected = protected_fee_client(url)?;
+        fetch_esplora_fee_with_client(url, &protected).await
+    }
+
+    async fn fetch_esplora_fee_with_client(url: &str, client: &Client) -> Option<FeeEstimate> {
         let resp = client.get(url).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
         }
-        let map: EsploraFeeEstimate = resp.json().await.ok()?;
+        let body = ssrf::read_bounded_response(resp, MAX_FEE_RESPONSE_BYTES)
+            .await
+            .ok()?;
+        let map: EsploraFeeEstimate = serde_json::from_slice(&body).ok()?;
         map.to_fee_estimate()
     }
 
-    pub async fn fetch_source_estimate(source: &FeeSource, client: &Client) -> Option<FeeEstimate> {
+    /// Fetch a configured fee source without trusting a caller-provided client.
+    pub async fn fetch_source_estimate(
+        source: &FeeSource,
+        _client: &Client,
+    ) -> Option<FeeEstimate> {
+        match source {
+            FeeSource::Static(est) => {
+                let mut estimate = est.clone();
+                estimate.sanitize();
+                Some(estimate)
+            }
+            FeeSource::BitcoinCore { rpc_url, .. } => {
+                let protected = protected_fee_client(rpc_url)?;
+                fetch_source_estimate_with_client(source, &protected).await
+            }
+            FeeSource::MempoolSpace { url } | FeeSource::Esplora { url } => {
+                let protected = protected_fee_client(url)?;
+                fetch_source_estimate_with_client(source, &protected).await
+            }
+        }
+    }
+
+    async fn fetch_source_estimate_with_client(
+        source: &FeeSource,
+        client: &Client,
+    ) -> Option<FeeEstimate> {
         match source {
             FeeSource::Static(est) => {
                 let mut e = est.clone();
@@ -624,20 +702,28 @@ pub mod native_fees {
                 rpc_user,
                 rpc_password,
             } => {
+                // Reject unsafe endpoints before attaching any RPC credentials.
+                outbound::validate_request_url(rpc_url).ok()?;
                 let auth = rpc_user.as_ref().map(|u| (u.clone(), rpc_password.clone()));
-                fetch_bitcoin_core_fee(rpc_url, &auth, client).await
+                fetch_bitcoin_core_fee_with_client(rpc_url, &auth, client).await
             }
-            FeeSource::MempoolSpace { url } => fetch_mempool_fee(url, client).await,
-            FeeSource::Esplora { url } => fetch_esplora_fee(url, client).await,
+            FeeSource::MempoolSpace { url } => {
+                outbound::validate_request_url(url).ok()?;
+                fetch_mempool_fee_with_client(url, client).await
+            }
+            FeeSource::Esplora { url } => {
+                outbound::validate_request_url(url).ok()?;
+                fetch_esplora_fee_with_client(url, client).await
+            }
         }
     }
 
     pub async fn fetch_consensus_fee(config: &FeeEstimatorConfig) -> Result<ConsensusFeeReport> {
         let now = current_time_secs();
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_millis(config.request_timeout_ms))
-            .build()
-            .map_err(|e| SatsPathError::NetworkError(e.to_string()))?;
+        // The shared connector validates every DNS answer it actually uses,
+        // disables proxies and redirects, and never resolves a second time.
+        let client =
+            outbound::http_client(std::time::Duration::from_millis(config.request_timeout_ms));
 
         let mut set = tokio::task::JoinSet::new();
         for source in &config.sources {
@@ -645,7 +731,7 @@ pub mod native_fees {
             let cl = client.clone();
             set.spawn(async move {
                 let name = src.name();
-                let est = fetch_source_estimate(&src, &cl).await;
+                let est = fetch_source_estimate_with_client(&src, &cl).await;
                 (name, est)
             });
         }
@@ -724,6 +810,77 @@ pub mod native_fees {
             is_from_cache: false,
             is_decayed: false,
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Exercise all three parsers with local mock servers; production URLs
+        /// are validated before reaching these private request helpers.
+        #[tokio::test]
+        async fn fee_sources_parse_bounded_responses() {
+            let mut server = mockito::Server::new_async().await;
+            let _mempool = server
+                .mock("GET", "/mempool")
+                .with_status(200)
+                .with_body(r#"{"fastestFee":25,"halfHourFee":18,"hourFee":12,"economyFee":6,"minimumFee":1}"#)
+                .create_async()
+                .await;
+            let _esplora = server
+                .mock("GET", "/esplora")
+                .with_status(200)
+                .with_body(r#"{"1":27.0,"3":19.0,"6":13.0,"24":7.0,"1008":1.0}"#)
+                .create_async()
+                .await;
+            let _rpc = server
+                .mock("POST", "/")
+                .with_status(200)
+                .with_body(r#"{"result":{"feerate":0.00030},"error":null}"#)
+                .expect(4)
+                .create_async()
+                .await;
+            let client = Client::new();
+            assert_eq!(
+                fetch_mempool_fee_with_client(&format!("{}/mempool", server.url()), &client)
+                    .await
+                    .unwrap()
+                    .fastest_fee,
+                25
+            );
+            assert_eq!(
+                fetch_esplora_fee_with_client(&format!("{}/esplora", server.url()), &client)
+                    .await
+                    .unwrap()
+                    .half_hour_fee,
+                19
+            );
+            assert_eq!(
+                fetch_bitcoin_core_fee_with_client(&server.url(), &None, &client)
+                    .await
+                    .unwrap()
+                    .fastest_fee,
+                30
+            );
+        }
+
+        /// Oversized responses fail instead of allocating an unbounded JSON body.
+        #[tokio::test]
+        async fn fee_source_rejects_oversized_body() {
+            let mut server = mockito::Server::new_async().await;
+            let _mock = server
+                .mock("GET", "/oversized")
+                .with_status(200)
+                .with_body("x".repeat(MAX_FEE_RESPONSE_BYTES + 1))
+                .create_async()
+                .await;
+            assert!(fetch_mempool_fee_with_client(
+                &format!("{}/oversized", server.url()),
+                &Client::new()
+            )
+            .await
+            .is_none());
+        }
     }
 }
 
