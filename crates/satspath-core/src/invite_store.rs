@@ -25,6 +25,12 @@ struct InviteStorage {
     invites: HashMap<String, InviteRecord>,
     #[serde(default)]
     notifications: Vec<ClaimNotification>,
+    // SQLite claimed_invites is append-only. Persist the recovery watermark
+    // with the mirror so missing/legacy mirrors automatically replay from zero.
+    #[serde(default)]
+    committed_claim_cursor: i64,
+    #[serde(default)]
+    committed_claim_anchor: Option<String>,
 }
 
 /// Thread-safe and persistent invite store for daemon and CLI operations.
@@ -207,6 +213,121 @@ impl InviteStore {
         Ok(updated)
     }
 
+    /// Replay a receipt already committed with registration in the authoritative
+    /// SQLite store. The JSON invite file is only a recoverable notification mirror.
+    pub fn apply_authorized_claim(&mut self, receipt: &InviteRecord) -> Result<()> {
+        self.apply_authorized_claims(std::slice::from_ref(receipt))
+    }
+
+    /// Recover all receipts in memory and persist once, or leave the original
+    /// mirror untouched if any receipt is invalid or the final save fails.
+    pub fn apply_authorized_claims(&mut self, receipts: &[InviteRecord]) -> Result<()> {
+        self.apply_authorized_claims_with_cursor(receipts, None)
+    }
+
+    pub fn committed_claim_cursor(&self) -> i64 {
+        self.storage.committed_claim_cursor
+    }
+
+    pub fn committed_claim_anchor(&self) -> Option<&str> {
+        self.storage.committed_claim_anchor.as_deref()
+    }
+
+    /// Advance the append-only receipt cursor only with a successfully saved mirror.
+    pub fn apply_authorized_claims_through(
+        &mut self,
+        receipts: &[InviteRecord],
+        cursor: i64,
+    ) -> Result<()> {
+        anyhow::ensure!(cursor > 0, "claim cursor must be positive");
+        let last = receipts
+            .last()
+            .context("claim cursor requires a receipt anchor")?;
+        self.apply_authorized_claims_with_cursor(receipts, Some((cursor, &last.invite_id)))
+    }
+
+    fn apply_authorized_claims_with_cursor(
+        &mut self,
+        receipts: &[InviteRecord],
+        cursor: Option<(i64, &str)>,
+    ) -> Result<()> {
+        let mut candidate = self.clone();
+        let mut changed = false;
+        if let Some((cursor, anchor)) = cursor {
+            changed = cursor != self.committed_claim_cursor()
+                || self.committed_claim_anchor() != Some(anchor);
+            candidate.storage.committed_claim_cursor = cursor;
+            candidate.storage.committed_claim_anchor = Some(anchor.to_owned());
+        }
+        for receipt in receipts {
+            changed |= candidate.apply_authorized_claim_in_memory(receipt)?;
+        }
+        if changed {
+            candidate.save()?;
+            self.storage = candidate.storage;
+        }
+        Ok(())
+    }
+
+    fn apply_authorized_claim_in_memory(&mut self, receipt: &InviteRecord) -> Result<bool> {
+        anyhow::ensure!(
+            receipt.status == InviteStatus::ClaimedWithPublicProfile
+                && receipt
+                    .claimed_at
+                    .is_some_and(|time| time >= receipt.created_at && time < receipt.expires_at)
+                && receipt.claimed_profile_pubkey.is_some(),
+            "invalid committed claim receipt"
+        );
+        let original = self.storage.invites.get(&receipt.invite_id);
+        if let Some(original) = original {
+            anyhow::ensure!(
+                original.identifier_hash == receipt.identifier_hash
+                    && original.amount_sats == receipt.amount_sats
+                    && original.created_at == receipt.created_at
+                    && original.expires_at == receipt.expires_at,
+                "conflicting invite mirror"
+            );
+        }
+        let notification = self
+            .storage
+            .notifications
+            .iter()
+            .find(|n| n.invite_id == receipt.invite_id);
+        if let Some(notification) = notification {
+            anyhow::ensure!(
+                Some(&notification.claimed_profile_pubkey)
+                    == receipt.claimed_profile_pubkey.as_ref()
+                    && notification.identifier_hash == receipt.identifier_hash
+                    && notification.amount_sats == receipt.amount_sats,
+                "conflicting claim notification"
+            );
+            if original.is_some_and(|record| {
+                record.status == receipt.status
+                    && record.claimed_profile_pubkey == receipt.claimed_profile_pubkey
+            }) {
+                return Ok(false);
+            }
+        } else {
+            self.storage.notifications.push(ClaimNotification {
+                notification_id: format!("registration-{}", receipt.invite_id),
+                invite_id: receipt.invite_id.clone(),
+                identifier_hash: receipt.identifier_hash.clone(),
+                display_hint: receipt.display_hint.clone(),
+                amount_sats: receipt.amount_sats,
+                claimed_at: receipt.claimed_at.expect("validated receipt"),
+                claimed_profile_pubkey: receipt
+                    .claimed_profile_pubkey
+                    .clone()
+                    .expect("validated receipt"),
+                read: false,
+            });
+        }
+        self.storage
+            .invites
+            .insert(receipt.invite_id.clone(), receipt.clone());
+        Ok(true)
+    }
+
     /// Cancel an active, unclaimed invite.
     pub fn cancel(&mut self, invite_id: &str) -> Result<InviteRecord> {
         let record = self
@@ -255,6 +376,57 @@ impl InviteStore {
 mod tests {
     use super::*;
     use crate::create_invite_record;
+
+    #[test]
+    fn batch_claim_recovery_defers_persistence_until_all_receipts_are_valid() -> Result<()> {
+        let home = tempfile::tempdir()?;
+        let mut store = InviteStore::open(home.path())?;
+        let key = crate::crypto::generate_identity_keypair();
+        let receiver = hex::encode(key.public_key.serialize());
+        let mut receipts = Vec::new();
+        for alias in ["alice@example.com", "bob@example.com"] {
+            let mut record = create_invite_record(alias, 1000, None, "sender".into(), 3600);
+            store.insert(record.clone())?;
+            record.status = InviteStatus::ClaimedWithPublicProfile;
+            record.claimed_at = Some(chrono::Utc::now().timestamp());
+            record.claimed_profile_pubkey = Some(receiver.clone());
+            receipts.push(record);
+        }
+        let path = home.path().join(INVITES_FILE);
+        let before = std::fs::read(&path)?;
+        let mut invalid = receipts[1].clone();
+        invalid.amount_sats += 1;
+        assert!(store
+            .apply_authorized_claims(&[receipts[0].clone(), invalid])
+            .is_err());
+        assert_eq!(std::fs::read(&path)?, before);
+        assert!(
+            store.notifications().is_empty(),
+            "failed batches cannot leave partial in-memory state"
+        );
+        // Block the destination to force a final-save failure, then retry on
+        // the same store. Neither API may retain an unpersisted in-memory claim.
+        std::fs::remove_file(&path)?;
+        std::fs::create_dir(&path)?;
+        assert!(store.apply_authorized_claims_through(&receipts, 2).is_err());
+        assert!(store.apply_authorized_claim(&receipts[0]).is_err());
+        assert!(store.notifications().is_empty());
+        assert_eq!(store.committed_claim_cursor(), 0);
+        std::fs::remove_dir(&path)?;
+        std::fs::write(&path, &before)?;
+        store.apply_authorized_claim(&receipts[0])?;
+        store.apply_authorized_claims_through(&receipts, 2)?;
+        assert_eq!(InviteStore::open(home.path())?.committed_claim_cursor(), 2);
+        assert_eq!(InviteStore::open(home.path())?.notifications().len(), 2);
+        store.mark_all_notifications_read()?;
+        let applied = std::fs::read(&path)?;
+        store.apply_authorized_claims(&receipts)?;
+        store.apply_authorized_claim(&receipts[0])?;
+        assert_eq!(std::fs::read(path)?, applied);
+        assert_eq!(store.notifications().len(), 2);
+        assert!(store.notifications().iter().all(|note| note.read));
+        Ok(())
+    }
 
     #[test]
     fn test_email_sent_invites_expire_and_are_pruned() -> Result<()> {

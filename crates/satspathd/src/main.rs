@@ -172,6 +172,8 @@ async fn run() -> Result<()> {
     let rate_limiter = Arc::new(rate_limit::RateLimiter::new(rate_limiter_config));
 
     let state = AppState {
+        #[cfg(test)]
+        alias_test_client: None,
         p2p: p2p::Bridge::new(cli.p2p),
         home,
         bind,
@@ -199,6 +201,7 @@ async fn run() -> Result<()> {
         rate_limiter,
         is_tls,
     };
+    handlers::onboarding::recover_registration_wallet(&state)?;
 
     let tls_config = if let (Some(cert), Some(key)) = (tls_cert_path, tls_key_path) {
         Some((cert, key))
@@ -258,6 +261,7 @@ mod tests {
 
     fn test_state(home: &Path) -> AppState {
         AppState {
+            alias_test_client: None,
             p2p: crate::p2p::Bridge::new(false),
             home: home.to_owned(),
             bind: "127.0.0.1:0".parse().unwrap(),
@@ -768,6 +772,7 @@ mod tests {
         wallet.onchain_address =
             Some(bitcoin::Address::p2wpkh(&pk, bitcoin::Network::Testnet).to_string());
         sign_and_store(dir.path(), &mut wallet, "devnet").unwrap();
+        wallet.alias = Some("Alice@Example.COM".into());
         save_wallet(dir.path(), &wallet).unwrap();
         let method = crate::types::build_methods(&wallet, "devnet")
             .into_iter()
@@ -786,10 +791,13 @@ mod tests {
         let response = attach_method_proof(
             &state,
             MethodProofRequest {
+                alias: Some("alice@example.com".into()),
                 verification: proof.clone(),
             },
         )
         .unwrap();
+        wallet = response.wallet;
+        assert_eq!(wallet.alias.as_deref(), Some("alice@example.com"));
         let profile = response.signed_profile.unwrap();
         assert_eq!(profile.profile.method_verifications, vec![proof.clone()]);
         assert!(satspath_core::evaluate_method_trust_for_profile(
@@ -801,9 +809,27 @@ mod tests {
         .is_verified());
         let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
         let before = store.load_log().unwrap().events().len();
+        let wallet_before = std::fs::read(crate::config::wallet_path(dir.path())).unwrap();
+        assert!(
+            attach_method_proof(
+                &state,
+                MethodProofRequest {
+                    alias: Some("other@example.com".into()),
+                    verification: proof.clone(),
+                }
+            )
+            .is_err(),
+            "a differing alias must not silently target the primary profile"
+        );
+        assert_eq!(store.load_log().unwrap().events().len(), before);
+        assert_eq!(
+            std::fs::read(crate::config::wallet_path(dir.path())).unwrap(),
+            wallet_before
+        );
         assert!(attach_method_proof(
             &state,
             MethodProofRequest {
+                alias: None,
                 verification: proof
             }
         )
@@ -821,6 +847,7 @@ mod tests {
         attach_method_proof(
             &state,
             MethodProofRequest {
+                alias: None,
                 verification: renewal.clone(),
             },
         )
@@ -876,6 +903,7 @@ mod tests {
         attach_method_proof(
             &state,
             MethodProofRequest {
+                alias: None,
                 verification: renewed,
             },
         )
@@ -972,6 +1000,7 @@ mod tests {
                 attach_method_proof(
                     &state,
                     MethodProofRequest {
+                        alias: None,
                         verification: invalid
                     }
                 )
@@ -994,6 +1023,7 @@ mod tests {
         attach_method_proof(
             &state,
             MethodProofRequest {
+                alias: None,
                 verification: proof,
             },
         )
@@ -1478,6 +1508,7 @@ mod tests {
         };
         let addr = server.server_addr().to_ip().unwrap();
         let state = Arc::new(AppState {
+            alias_test_client: None,
             p2p: crate::p2p::Bridge::new(false),
             home,
             bind: addr,
@@ -1631,7 +1662,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(inspect["is_expired"], false);
-        assert_eq!(inspect["is_claimable"], false);
+        // Secure onboarding can start, but the legacy claim route still cannot
+        // treat admin authentication or an external profile as alias evidence.
+        assert_eq!(inspect["is_claimable"], true);
 
         let invites_path = home.join(satspath_core::invite_store::INVITES_FILE);
         let before = std::fs::read(&invites_path).unwrap();
@@ -1912,6 +1945,8 @@ mod tests {
             (reqwest::Method::PUT, "/v1/profile"),
             (reqwest::Method::POST, "/v1/profile/methods"),
             (reqwest::Method::POST, "/v1/profile/methods/proof"),
+            (reqwest::Method::POST, "/v1/onboarding/challenge"),
+            (reqwest::Method::POST, "/v1/onboarding/verify"),
             (reqwest::Method::POST, "/v1/profile/rotate-key"),
             (reqwest::Method::POST, "/v1/broadcast"),
             (reqwest::Method::POST, "/v1/p2p/resolve"),
@@ -2218,6 +2253,14 @@ mod tests {
             ("/v1/dns/resolve", ""),
             ("/v1/quote", "Authorization: Bearer test_token\r\n"),
             ("/v1/resolve", "Authorization: Bearer test_token\r\n"),
+            (
+                "/v1/onboarding/challenge",
+                "Authorization: Bearer test_token\r\n",
+            ),
+            (
+                "/v1/onboarding/verify",
+                "Authorization: Bearer test_token\r\n",
+            ),
         ] {
             let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
             let request = format!(
@@ -2251,7 +2294,7 @@ mod tests {
             .json()
             .await
             .unwrap();
-        assert_eq!(diag["total_payload_too_large"], 3);
+        assert_eq!(diag["total_payload_too_large"], 5);
         server.unblock();
         handle.abort();
     }

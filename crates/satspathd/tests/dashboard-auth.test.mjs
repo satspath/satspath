@@ -9,6 +9,8 @@ const ownerMutations = [
   ['POST', '/v1/send'], ['GET', '/v1/invites'], ['GET', '/v1/invites/notifications'],
   ['POST', '/v1/claim'],
   ['POST', '/v1/profile/challenge'], ['POST', '/v1/profile/verify'],
+  ['POST', '/v1/onboarding/challenge'], ['POST', '/v1/onboarding/verify'],
+  ['POST', '/v1/profile/methods/proof'],
   ['PUT', '/v1/profile'], ['POST', '/v1/profile/methods'],
   ['POST', '/v1/profile/rotate-key'], ['POST', '/v1/broadcast'],
   ['POST', '/v1/p2p/resolve'], ['POST', '/v1/invites/notifications/id/read'],
@@ -34,6 +36,56 @@ test('one unlock authenticates all owner mutations but no public requests', asyn
     assert.equal(calls.at(-1).options.headers.has('authorization'), false);
   }
   assert.equal(requiresAuthentication('POST', '/v1/future-owner-action'), true);
+});
+
+test('expired registration and claim challenges request a fresh authorization', async () => {
+  const html = await readFile(new URL('../src/index.html', import.meta.url), 'utf8');
+  for (const [name, button, responseVariable] of [
+    ['pendingDomainRegistration', 'p-save', 'response'],
+    ['pendingDomainClaim', 'c-claim-go', 'r'],
+  ]) {
+    const handler = html.match(new RegExp(`\\$\\("${button}"\\)\\.addEventListener\\("click", async \\(\\) => \\{([\\s\\S]*?)\\n  \\}\\);`));
+    assert.ok(handler, `${button} handler exists`);
+    const source = handler[1];
+    const candidateDeclaration = source.match(/const candidate = JSON\.stringify\((\{[^;]+\})\);/);
+    assert.ok(candidateDeclaration, `${button} constructs its candidate from an object`);
+    const methods = { onchain_address: 'independent-destination' };
+    const payload = { lightning_address: 'registration@example.com' };
+    const expectedMethods = button === 'p-save' ? payload : methods;
+    const candidateObject = new Function('alias', 'payload', 'methods', 'invite_id', `return (${candidateDeclaration[1]});`);
+    assert.deepEqual(candidateObject('alice@example.com', payload, methods, 'invite-1').methods, expectedMethods,
+      `${button} binds the receive methods into the candidate`);
+    const declaration = source.match(new RegExp(`const verifying = ${name}([\\s\\S]*?);`));
+    assert.ok(declaration, name);
+    const check = new Function(name, 'candidate', 'Date', `return Boolean(${name}${declaration[1]});`);
+    const clock = { now: () => 200_000 };
+    assert.equal(check(null, 'unchanged', clock), false);
+    assert.equal(check({ candidate: 'unchanged', expires_at: 199 }, 'unchanged', clock), false);
+    assert.equal(check({ candidate: 'unchanged', expires_at: 200 }, 'unchanged', clock), false);
+    assert.equal(check({ candidate: 'unchanged', expires_at: 201 }, 'unchanged', clock), true);
+    assert.equal(check({ candidate: 'changed', expires_at: 201 }, 'unchanged', clock), false);
+    const responseJson = source.match(new RegExp(`const (\\w+) = await ${responseVariable}\\.json\\(\\);`));
+    assert.ok(responseJson, `${button} reads its own response JSON`);
+    assert.match(source, new RegExp(`${name} = \\{candidate, challenge_id: ${responseJson[1]}\\.challenge_id, expires_at:`));
+    const request = source.match(new RegExp(`const ${responseVariable} = await apiFetch\\((verifying \\? [^,]+), \\{([\\s\\S]*?)\\n\\s*\\}\\);`));
+    assert.ok(request, `${button} uses its own ${responseVariable} request`);
+    assert.match(request[2], /\bmethod:\s*["']POST["']/, `${button} sends onboarding requests with POST`);
+    const endpoint = new Function('verifying', `return ${request[1]};`);
+    assert.equal(endpoint(true), '/v1/onboarding/verify', `${button} verifies a current challenge`);
+    assert.equal(endpoint(false), '/v1/onboarding/challenge', `${button} creates a fresh challenge`);
+    const bodyVariable = button === 'p-save' ? 'requestBody' : 'body';
+    assert.match(request[2], new RegExp(`body: JSON\\.stringify\\(${bodyVariable}\\)`));
+    const bodyDeclaration = source.match(new RegExp(`const ${bodyVariable} = (verifying[\\s\\S]*?);`));
+    assert.ok(bodyDeclaration, `${button} constructs the selected request body`);
+    const body = new Function('verifying', 'alias', name, 'payload', 'methods', 'invite_id', `return (${bodyDeclaration[1]});`);
+    const pending = { challenge_id: `${button}-server-challenge` };
+    assert.deepEqual(body(true, 'alice@example.com', pending, payload, methods, 'invite-1'),
+      { alias: 'alice@example.com', challenge_id: pending.challenge_id }, `${button} verifies the stored challenge`);
+    assert.deepEqual(body(false, 'alice@example.com', pending, payload, methods, 'invite-1'),
+      { ...(button === 'c-claim-go' ? { invite_id: 'invite-1' } : {}), alias: 'alice@example.com', methods: expectedMethods },
+      `${button} creates a challenge bound to the receive methods`);
+    assert.match(source, /Reloading clears the dashboard's pending challenge/);
+  }
 });
 
 test('lock and 401 remove authorization; public access remains usable', async () => {
