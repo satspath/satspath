@@ -166,6 +166,10 @@ fn thousand_duplicate_schnorr_signers_cannot_manufacture_quorum() {
     let (_a, authority, operator) = checkpoint_fixture::fixture();
     let (_policy, response) = envelope(&authority, &operator);
     let witness = generate_identity_keypair();
+    assert_eq!(
+        witness_signing_identity(&witness.public_key.to_string()),
+        witness_signing_identity(&witness.public_key.x_only_public_key().0.to_string())
+    );
     let negated = witness.public_key.negate(&secp256k1::Secp256k1::new());
     assert_eq!(
         witness_signing_identity(&witness.public_key.to_string()),

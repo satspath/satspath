@@ -168,6 +168,26 @@ impl TransactionalTransparencyStore {
             .transpose()
     }
 
+    /// Export the two complete operator-signed statements that caused quarantine.
+    /// No automatic clearing or alternate-peer fallback can remove this evidence.
+    pub fn replica_conflict(
+        &self,
+        log_id: &str,
+    ) -> Result<Option<(CheckpointCursor, TransparencyCheckpoint)>> {
+        let raw: Option<String> = self
+            .connection()?
+            .query_row(
+                "SELECT conflict_json FROM replica_trust WHERE log_id=?1",
+                [log_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .flatten();
+        raw.map(|raw| serde_json::from_str(&raw).map_err(Into::into))
+            .transpose()
+    }
+
     /// Verify a bounded contiguous journal page and a public profile, then commit
     /// the full pin and envelope together. Invalid evidence never becomes state.
     /// Authenticated root conflicts are retained even though the import fails.

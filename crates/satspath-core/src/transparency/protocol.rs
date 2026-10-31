@@ -7,6 +7,9 @@ use crate::SignedPaymentProfile;
 
 /// BIP340 verifies x-only keys: P, -P and alternate encodings are one signer.
 pub fn witness_signing_identity(pubkey: &str) -> Option<String> {
+    if let Ok(key) = pubkey.parse::<secp256k1::XOnlyPublicKey>() {
+        return Some(key.to_string());
+    }
     pubkey
         .parse::<secp256k1::PublicKey>()
         .ok()
