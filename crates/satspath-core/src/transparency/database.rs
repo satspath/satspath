@@ -43,6 +43,8 @@ impl TransactionalTransparencyStore {
              CREATE TABLE IF NOT EXISTS name_events(event_index INTEGER PRIMARY KEY, signed_event_hash TEXT NOT NULL UNIQUE, identifier_hash TEXT NOT NULL, event_json TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS checkpoints(checkpoint_index INTEGER PRIMARY KEY, checkpoint_hash TEXT NOT NULL UNIQUE, log_size INTEGER NOT NULL, checkpoint_json TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS pins(log_id TEXT PRIMARY KEY, pin_json TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS replica_trust(log_id TEXT PRIMARY KEY, policy_json TEXT NOT NULL, cursor_json TEXT, conflict_json TEXT);
+             CREATE TABLE IF NOT EXISTS replica_envelopes(log_id TEXT NOT NULL, identifier TEXT NOT NULL, envelope_json TEXT NOT NULL, PRIMARY KEY(log_id, identifier));
              CREATE TABLE IF NOT EXISTS anchors(txid TEXT PRIMARY KEY, anchor_json TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS identifier_attestations(attestation_hash TEXT PRIMARY KEY, attestation_json TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS operator_state(log_id TEXT PRIMARY KEY, operator_pubkey TEXT, operator_sequence INTEGER NOT NULL DEFAULT 0);
@@ -106,7 +108,7 @@ impl TransactionalTransparencyStore {
         Self::open_read_only(home)?.profile(alias)
     }
 
-    fn connection(&self) -> Result<Connection> {
+    pub(super) fn connection(&self) -> Result<Connection> {
         if self.read_only {
             return Connection::open_with_flags(
                 &self.path,

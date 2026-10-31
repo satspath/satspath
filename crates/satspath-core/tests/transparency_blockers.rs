@@ -465,10 +465,30 @@ fn conflicting_checkpoint_same_size_fails_on_open() {
     let dir = tempfile::tempdir().unwrap();
     let (operator, mut checkpoints) = two_checkpoint_log(dir.path());
     let mut conflict = checkpoints[1].clone();
+    conflict.map_root = Some("ff".repeat(32));
     conflict.previous_checkpoint_hash = Some(checkpoints[1].checkpoint_hash().unwrap());
     conflict.created_at += 1;
     conflict.sign(&operator).unwrap();
     checkpoints.push(conflict);
     write_checkpoints(dir.path(), &checkpoints);
     assert!(TransparencyLog::open(dir.path()).is_err());
+}
+
+#[test]
+fn signed_same_size_renewal_with_unchanged_roots_survives_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let (operator, mut checkpoints) = two_checkpoint_log(dir.path());
+    let mut renewal = checkpoints[1].clone();
+    renewal.previous_checkpoint_hash = Some(checkpoints[1].checkpoint_hash().unwrap());
+    renewal.created_at += 1;
+    renewal.sign(&operator).unwrap();
+    checkpoints.push(renewal);
+    write_checkpoints(dir.path(), &checkpoints);
+    assert_eq!(
+        TransparencyLog::open(dir.path())
+            .unwrap()
+            .checkpoints()
+            .len(),
+        3
+    );
 }

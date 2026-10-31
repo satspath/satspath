@@ -76,7 +76,9 @@ pub fn verify_checkpoint_successor(
         return Err(TransparencyError::CheckpointHistoryGap.into());
     }
     if next.created_at < previous.created_at
-        || (next.log_size == previous.log_size && next.created_at <= previous.created_at)
+        || (next.log_size == previous.log_size
+            && next.operator_sequence == previous.operator_sequence
+            && next.created_at <= previous.created_at)
     {
         return Err(TransparencyError::CheckpointClockSkew.into());
     }

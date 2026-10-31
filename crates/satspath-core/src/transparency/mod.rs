@@ -18,6 +18,8 @@ mod state_map;
 mod status;
 mod store;
 mod tree;
+#[cfg(feature = "std")]
+mod trusted_replica;
 mod verifier;
 
 #[cfg(test)]
@@ -56,8 +58,8 @@ pub use log::{validate_catena_successor, ConsistencyStatus, TransparencyLog, Tra
 pub use migration::{verify_migration_statement, MigrationExport, MigrationStatement};
 pub use proof::{MerkleConsistencyProof, MerkleInclusionProof};
 pub use protocol::{
-    witness_cosignature_message, EndpointRole, NamespaceDescriptor, ReplicaEndpoint,
-    ResolutionEnvelope, ResolutionRequest, WitnessCosignature,
+    witness_cosignature_message, witness_signing_identity, EndpointRole, NamespaceDescriptor,
+    ReplicaEndpoint, ResolutionEnvelope, ResolutionRequest, WitnessCosignature,
 };
 pub use replication::{
     detect_equivocation, select_endpoint, validate_no_rollback, ReplicaHealth,
@@ -76,6 +78,8 @@ pub use store::CheckpointStore;
 pub use tree::{
     consistency_proof, inclusion_proof, leaf_hash, merkle_root, node_hash, verify_consistency,
 };
+#[cfg(feature = "std")]
+pub use trusted_replica::{CheckpointLink, ResolutionTrustPolicy, TrustMode};
 pub use verifier::{
     next_identifier_sequence, verify_checkpoint, verify_checkpoint_inclusion,
     verify_checkpoint_state_binding, verify_checkpoint_transition, verify_consistency_proof,
@@ -88,6 +92,16 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum TransparencyError {
+    #[error("resolution trust policy mismatch or downgrade")]
+    TrustPolicyMismatch,
+    #[error("namespace history is quarantined by durable signed conflict evidence")]
+    QuarantinedHistory,
+    #[error("independent witness quorum not met")]
+    WitnessQuorumNotMet,
+    #[error("invalid resolution evidence")]
+    InvalidResolutionEvidence,
+    #[error("identifier is revoked")]
+    RevokedIdentifier,
     #[error("invalid bounded freshness policy")]
     InvalidFreshnessPolicy,
     #[error("checkpoint freshness expired")]

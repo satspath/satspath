@@ -422,10 +422,20 @@ impl WitnessQuorumPolicy {
             .map_err(|_| WitnessError::InvalidSignature)?;
 
         let mut verified_pubkeys = HashSet::new();
+        let authorized: HashSet<_> = self
+            .authorized_pubkeys
+            .iter()
+            .filter_map(|key| satspath_core::transparency::witness_signing_identity(key))
+            .collect();
 
         for cs in cosignatures {
             // Must be in authorized set
-            if !self.authorized_pubkeys.contains(&cs.witness_pubkey) {
+            let Some(identity) =
+                satspath_core::transparency::witness_signing_identity(&cs.witness_pubkey)
+            else {
+                continue;
+            };
+            if cs.version != 1 || !authorized.contains(&identity) {
                 continue;
             }
 
@@ -437,7 +447,7 @@ impl WitnessQuorumPolicy {
             // Must verify BIP-340 Schnorr signature
             let msg = cs.signing_message();
             if verify_message_signature(&msg, &cs.signature, &cs.witness_pubkey).unwrap_or(false) {
-                verified_pubkeys.insert(cs.witness_pubkey.clone());
+                verified_pubkeys.insert(identity);
             }
         }
 
@@ -487,6 +497,38 @@ mod tests {
         cp.sign(&operator_key.secret_key)
             .expect("sign test checkpoint");
         cp
+    }
+
+    #[tokio::test]
+    async fn negated_schnorr_keys_and_thousand_receipts_count_as_one_witness() {
+        let operator = generate_identity_keypair();
+        let cp = make_test_checkpoint(&operator, "canonical-quorum", 1, &"aa".repeat(32));
+        let witness =
+            WitnessService::with_generated_key("one-observer".into(), MemoryPinStore::new());
+        let receipt = witness.process_checkpoint(&cp, None).await.unwrap();
+        let negative = witness
+            .keypair
+            .public_key
+            .negate(&secp256k1::Secp256k1::new())
+            .to_string();
+        let policy =
+            WitnessQuorumPolicy::new(2, [receipt.witness_pubkey.clone(), negative.clone()]);
+        let receipts: Vec<_> = (0..1000)
+            .map(|index| {
+                let mut receipt = receipt.clone();
+                if index % 2 == 0 {
+                    receipt.witness_pubkey = negative.clone();
+                }
+                receipt
+            })
+            .collect();
+        assert!(matches!(
+            policy.verify_quorum(&cp, &receipts),
+            Err(WitnessError::QuorumNotMet {
+                required: 2,
+                actual: 1
+            })
+        ));
     }
 
     #[tokio::test]
