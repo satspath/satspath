@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../..');
-const openapiText = fs.readFileSync(path.join(repoRoot, 'docs/openapi.yaml'), 'utf8');
+const openapiText = fs.readFileSync(path.join(repoRoot, 'docs/openapi.yaml'), 'utf8').replace(/\r\n/g, '\n');
 const apiRefText = fs.readFileSync(path.join(repoRoot, 'docs/API_REFERENCE.md'), 'utf8');
 const routerText = fs.readFileSync(path.join(repoRoot, 'crates/satspathd/src/router.rs'), 'utf8');
 
@@ -157,7 +157,7 @@ function parseOpenApiOperations(yaml) {
 }
 
 test('invite guide requires owner authentication for claims and private lists', () => {
-  const guide = fs.readFileSync(path.join(repoRoot, 'docs/invite_flow.md'), 'utf8');
+  const guide = fs.readFileSync(path.join(repoRoot, 'docs/invite_flow.md'), 'utf8').replace(/\r\n/g, '\n');
   for (const endpoint of ['POST /v1/claim', 'GET /v1/invites', 'GET /v1/invites/notifications']) {
     const section = guide.split(`- **Endpoint:** \`${endpoint}\``)[1];
     assert.ok(section, endpoint);
