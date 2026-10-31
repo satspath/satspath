@@ -474,7 +474,7 @@ impl TransparencyLog {
 
     pub fn verify_checkpoint_chain_integrity(&self) -> Result<()> {
         let mut previous: Option<&TransparencyCheckpoint> = None;
-        let mut seen_sizes: HashMap<u64, String> = HashMap::new();
+        let mut seen_sizes: HashMap<u64, (String, Option<String>)> = HashMap::new();
         let mut last_catena: Option<&BitcoinAnchor> = None;
 
         for checkpoint in &self.checkpoints {
@@ -494,9 +494,9 @@ impl TransparencyLog {
                 )
                 .into());
             }
-            let hash = checkpoint.checkpoint_hash()?;
-            if let Some(other) = seen_sizes.insert(checkpoint.log_size, hash.clone()) {
-                if other != hash {
+            let commitment = (checkpoint.log_root.clone(), checkpoint.map_root.clone());
+            if let Some(other) = seen_sizes.insert(checkpoint.log_size, commitment.clone()) {
+                if other != commitment {
                     return Err(TransparencyError::CorruptCheckpointChain(
                         "conflicting checkpoint at same tree size".into(),
                     )
@@ -540,6 +540,9 @@ impl TransparencyLog {
                         None
                     };
                     super::verify_checkpoint_transition(&pin, checkpoint, consistency.as_ref())?;
+                    if checkpoint.log_size == prior.log_size {
+                        super::verify_checkpoint_successor(prior, checkpoint, None)?;
+                    }
                 }
                 _ => {}
             }

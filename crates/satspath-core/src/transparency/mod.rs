@@ -6,6 +6,7 @@ mod checkpoint;
 #[cfg(feature = "std")]
 mod database;
 mod event;
+mod freshness;
 mod gossip;
 mod log;
 mod migration;
@@ -46,6 +47,7 @@ pub use checkpoint::{
 #[cfg(feature = "std")]
 pub use database::TransactionalTransparencyStore;
 pub use event::{payment_method_descriptor_hash, profile_hash, NameAction, NameEvent};
+pub use freshness::{verify_checkpoint_successor, CheckpointCursor, FreshnessPolicy};
 pub use gossip::{
     compare_gossip_observations, gossip_topic, GossipComparison, GossipObservation,
     SplitViewEvidence, GOSSIP_FUTURE_SKEW_SECS, GOSSIP_KIND, GOSSIP_MAX_AGE_SECS, MAX_GOSSIP_BYTES,
@@ -86,6 +88,14 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum TransparencyError {
+    #[error("invalid bounded freshness policy")]
+    InvalidFreshnessPolicy,
+    #[error("checkpoint freshness expired")]
+    ExpiredCheckpoint,
+    #[error("checkpoint timestamp outside policy or non-monotonic")]
+    CheckpointClockSkew,
+    #[error("checkpoint journal predecessor missing")]
+    CheckpointHistoryGap,
     #[error("conflicting checkpoint for the same operator and tree size")]
     ConflictingCheckpoint,
     #[error("checkpoint rollback detected")]

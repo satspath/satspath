@@ -214,6 +214,81 @@ impl TransactionalTransparencyStore {
         self.load_log_from_connection(&connection)
     }
 
+    /// Append a genuine operator-signed checkpoint without fabricating owner
+    /// events or extending any profile expiry. The journal index and predecessor
+    /// commit in the same SQLite transaction, including across process restarts.
+    pub fn renew_checkpoint(
+        &self,
+        operator: &secp256k1::SecretKey,
+        now: i64,
+        minimum_interval_secs: i64,
+    ) -> Result<super::CheckpointCursor> {
+        if !(30..=3600).contains(&minimum_interval_secs) {
+            return Err(TransparencyError::InvalidFreshnessPolicy.into());
+        }
+        let mut connection = self.connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let log = self.load_log_from_connection(&tx)?;
+        let previous = log.checkpoints().last().ok_or_else(|| {
+            TransparencyError::CorruptCheckpointChain("no checkpoint to renew".into())
+        })?;
+        let index = log.checkpoints().len() as u64 - 1;
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), operator)
+            .to_string();
+        if pubkey != previous.operator_pubkey {
+            return Err(TransparencyError::UnexpectedOperatorKey.into());
+        }
+        if now < previous.created_at {
+            return Err(TransparencyError::CheckpointClockSkew.into());
+        }
+        if now.saturating_sub(previous.created_at) < minimum_interval_secs {
+            return Ok(super::CheckpointCursor {
+                index,
+                checkpoint: previous.clone(),
+            });
+        }
+        let mut next = previous.clone();
+        next.previous_checkpoint_hash = Some(previous.checkpoint_hash()?);
+        next.created_at = now;
+        next.bitcoin_anchor = None;
+        next.operator_rotation = None;
+        next.sign(operator)?;
+        super::verify_checkpoint_successor(previous, &next, None)?;
+        tx.execute("INSERT INTO checkpoints(checkpoint_index,checkpoint_hash,log_size,checkpoint_json) VALUES (?1,?2,?3,?4)",
+            params![index+1,next.checkpoint_hash()?,next.log_size,serde_json::to_string(&next)?]).map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        Ok(super::CheckpointCursor {
+            index: index + 1,
+            checkpoint: next,
+        })
+    }
+
+    /// Bounded authenticated journal backfill; an absent predecessor is never
+    /// replaced by a new trust root. Indices are not owner/operator sequences.
+    pub fn checkpoint_page(&self, from: u64, limit: u16) -> Result<Vec<super::CheckpointCursor>> {
+        if limit == 0 || limit > 256 {
+            return Err(TransparencyError::CheckpointHistoryGap.into());
+        }
+        let conn = self.connection()?;
+        let mut statement = conn.prepare("SELECT checkpoint_index,checkpoint_json FROM checkpoints WHERE checkpoint_index>=?1 ORDER BY checkpoint_index LIMIT ?2").map_err(db_error)?;
+        let result = statement
+            .query_map(params![from, limit], |row| {
+                Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_error)?
+            .map(|row| {
+                let (index, raw) = row.map_err(db_error)?;
+                Ok(super::CheckpointCursor {
+                    index,
+                    checkpoint: serde_json::from_str(&raw)?,
+                })
+            })
+            .collect();
+        result
+    }
+
     /// Atomically commits the complete security state. SQLite's WAL recovers
     /// committed transactions and discards partial transactions after crashes.
     pub fn commit_profile_event_checkpoint(
