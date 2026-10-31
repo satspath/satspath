@@ -1,0 +1,13 @@
+# Explicit source allowlist. No local wallets, staged experiments or secrets.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!crates/**
+**/target
+**/node_modules
+**/.satspath
+**/*.key
+**/*.pem
+**/.env
+**/.env.*

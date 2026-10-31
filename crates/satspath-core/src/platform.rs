@@ -1,5 +1,8 @@
+#[cfg(test)]
 use crate::privacy::{identifier_hash, mask_identifier};
-use crate::{Result, SatsPathError, SignedPaymentProfile};
+#[cfg(test)]
+use crate::SatsPathError;
+use crate::{Result, SignedPaymentProfile};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmailChallenge {
@@ -34,11 +37,13 @@ pub trait ProfilePublisher {
     fn publish_profile(&self, profile: &SignedPaymentProfile) -> Result<PublishReceipt>;
 }
 
+#[cfg(test)]
 pub struct MockEmailVerifier {
     pub now: i64,
     pub ttl_seconds: i64,
 }
 
+#[cfg(test)]
 impl EmailVerifier for MockEmailVerifier {
     fn create_challenge(&self, identifier: &str) -> Result<EmailChallenge> {
         Ok(EmailChallenge {

@@ -416,10 +416,20 @@ impl WitnessQuorumPolicy {
             .map_err(|_| WitnessError::InvalidSignature)?;
 
         let mut verified_pubkeys = HashSet::new();
+        let authorized: HashSet<_> = self
+            .authorized_pubkeys
+            .iter()
+            .filter_map(|key| satspath_core::transparency::witness_signing_identity(key))
+            .collect();
 
         for cs in cosignatures {
             // Must be in authorized set
-            if !self.authorized_pubkeys.contains(&cs.witness_pubkey) {
+            let Some(identity) =
+                satspath_core::transparency::witness_signing_identity(&cs.witness_pubkey)
+            else {
+                continue;
+            };
+            if cs.version != 1 || !authorized.contains(&identity) {
                 continue;
             }
 
@@ -431,7 +441,7 @@ impl WitnessQuorumPolicy {
             // Must verify BIP-340 Schnorr signature
             let msg = cs.signing_message();
             if verify_message_signature(&msg, &cs.signature, &cs.witness_pubkey).unwrap_or(false) {
-                verified_pubkeys.insert(cs.witness_pubkey.clone());
+                verified_pubkeys.insert(identity);
             }
         }
 

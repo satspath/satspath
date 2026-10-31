@@ -69,6 +69,7 @@ impl TransparencyLog {
 
     pub fn prepare_append(&self, event: NameEvent, profile: &SignedPaymentProfile) -> Result<Self> {
         if event.version != 1
+            || event.identifier_hash != crate::privacy::identifier_hash(&profile.profile.alias)
             || event.profile_hash != profile_hash(profile)?
             || profile.profile.sequence != Some(event.sequence)
             || event.identity_pubkey != profile.profile.identity_pubkey

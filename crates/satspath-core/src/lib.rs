@@ -7,6 +7,8 @@ pub mod crypto;
 pub mod dns;
 pub mod errors;
 pub mod execution;
+#[cfg(feature = "std")]
+pub mod lab;
 pub mod ownership;
 pub mod peer_registry;
 pub mod platform;

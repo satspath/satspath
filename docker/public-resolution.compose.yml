@@ -1,0 +1,63 @@
+x-lab: &lab
+  image: ${SATSPATH_LAB_IMAGE:?Set a disposable lab image name}
+  build:
+    context: ..
+    dockerfile: docker/public-resolution.Dockerfile
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp]
+
+services:
+  network:
+    <<: *lab
+    command: [sleep, infinity]
+  authority:
+    <<: *lab
+    network_mode: service:network
+    command: [satspathd, --no-open, --network, regtest, --home, /state/authority, --bind, '127.0.0.1:9737']
+    environment:
+      SATSPATHD_AUTH_TOKEN: ${SATSPATHD_AUTH_TOKEN:?Set a random lab token}
+      SATSPATH_ENABLE_LAB_REGISTRATION: '1'
+      SATSPATH_AUTHORITY_URL: http://127.0.0.1:9737
+      SATSPATH_REPLICA_URLS: '["http://127.0.0.1:9738"]'
+    volumes: [authority:/state/authority, public:/state/public]
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, 'http://127.0.0.1:9737/health']
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  replica:
+    <<: *lab
+    network_mode: service:network
+    command: [satspathd, --no-open, --network, regtest, --home, /state/replica, --bind, '127.0.0.1:9738', --replica-descriptor, /state/public/descriptor.json, --replica-alias, alice@lab.satspath.test, --replica-sync-seconds, '1']
+    environment:
+      SATSPATH_ENABLE_LAB_REGISTRATION: '1'
+      SATSPATH_AUTHORITY_URL: http://127.0.0.1:9738
+    volumes: [replica:/state/replica, 'public:/state/public:ro']
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, 'http://127.0.0.1:9738/v2/health']
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  alice:
+    <<: *lab
+    profiles: [tools]
+    network_mode: service:network
+    command: [lab_client, register, /state/public/descriptor.json, /state/alice, alice@lab.satspath.test, alice@example.com]
+    environment:
+      SATSPATHD_AUTH_TOKEN: ${SATSPATHD_AUTH_TOKEN:?Set a random lab token}
+    volumes: [alice:/state/alice, 'public:/state/public:ro']
+  client:
+    <<: *lab
+    profiles: [tools]
+    network_mode: service:network
+    command: [lab_client, resolve, /state/public/descriptor.json, /state/client, alice@lab.satspath.test]
+    volumes: [client:/state/client, 'public:/state/public:ro']
+
+volumes:
+  authority:
+  replica:
+  public:
+  alice:
+  client:

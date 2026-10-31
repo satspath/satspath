@@ -11,6 +11,7 @@ mod host;
 mod http;
 mod p2p;
 mod rate_limit;
+mod replica;
 mod router;
 mod server;
 mod types;
@@ -57,6 +58,38 @@ async fn run() -> Result<()> {
         .unwrap_or_else(default_home);
 
     fs::create_dir_all(&home).context("creating SATSPATH_HOME")?;
+    if cli.replica_descriptor.is_none() {
+        anyhow::ensure!(
+            cli.replica_alias.is_empty(),
+            "--replica-alias requires --replica-descriptor"
+        );
+    } else {
+        for material in [
+            "wallet.json",
+            "identity",
+            "admin.macaroon",
+            "transparency/operator.key",
+        ] {
+            anyhow::ensure!(
+                !home.join(material).try_exists()?,
+                "replica requires its own home without authority/wallet keys"
+            );
+        }
+    }
+    let replica_config = cli
+        .replica_descriptor
+        .as_deref()
+        .map(|path| {
+            replica::ReplicaConfig::load(
+                path,
+                &cli.replica_alias,
+                cli.replica_sync_seconds,
+                &network,
+                cli.p2p,
+            )
+        })
+        .transpose()?
+        .map(Arc::new);
 
     if let Some(ref sources) = cli.fee_sources {
         std::env::set_var("SATSPATH_FEE_SOURCES", sources);
@@ -67,7 +100,9 @@ async fn run() -> Result<()> {
 
     // SEC-04: Daemon API Authorization
     let macaroon_path = home.join("admin.macaroon");
-    let auth_token = if let Ok(token) = std::env::var("SATSPATHD_AUTH_TOKEN") {
+    let auth_token = if replica_config.is_some() {
+        String::new()
+    } else if let Ok(token) = std::env::var("SATSPATHD_AUTH_TOKEN") {
         let t = token.trim().to_string();
         if t.len() != 64 || hex::decode(&t).is_err() {
             anyhow::bail!(
@@ -92,7 +127,9 @@ async fn run() -> Result<()> {
         t
     };
 
-    handlers::wallet::load_or_create_identity(&home)?;
+    if replica_config.is_none() {
+        handlers::wallet::load_or_create_identity(&home)?;
+    }
 
     let behind_proxy = cli.behind_proxy
         || std::env::var("SATSPATHD_BEHIND_PROXY")
@@ -154,6 +191,7 @@ async fn run() -> Result<()> {
     let rate_limiter = Arc::new(rate_limit::RateLimiter::new(rate_limiter_config));
 
     let state = AppState {
+        replica: replica_config,
         p2p: p2p::Bridge::new(cli.p2p),
         home,
         bind,
@@ -175,6 +213,14 @@ async fn run() -> Result<()> {
         None
     };
 
+    if state.replica.is_some() {
+        let sync_state = state.clone();
+        let task = tokio::spawn(replica::synchronize(sync_state));
+        let result = serve(state, tls_config).await;
+        task.abort();
+        let _ = task.await;
+        return result;
+    }
     print_startup_status(&state)?;
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     let bridge = cli
@@ -206,15 +252,15 @@ mod tests {
         profile::{rotate_profile_key, sign_and_store},
         quote::{pay_response, quote_response},
         resolve::resolve_v2_envelope,
-        send::send_response,
         wallet::{load_or_create_identity, save_wallet},
     };
     use crate::rate_limit;
     use crate::server::{audit_binding_security, serve_server};
-    use crate::types::{now, PayRequest, PayResponse, QuoteRequest, SendRequest, SendResponse};
+    use crate::types::{now, PayRequest, PayResponse, QuoteRequest};
 
     fn test_state(home: &Path) -> AppState {
         AppState {
+            replica: None,
             p2p: crate::p2p::Bridge::new(false),
             home: home.to_owned(),
             bind: "127.0.0.1:0".parse().unwrap(),
@@ -518,7 +564,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(quote, QuoteResponse::NoRoute { ref reason } if reason.contains("ownership proof"))
+            matches!(quote, QuoteResponse::NoRoute { ref reason } if reason.contains("namespace authorization"))
         );
         let preview = quote_response(
             &state,
@@ -609,13 +655,8 @@ mod tests {
         sign_and_store(dir.path(), &mut wallet, "devnet").unwrap();
         save_wallet(dir.path(), &wallet).unwrap();
 
-        let env = resolve_v2_envelope(&state, "alice@example.com").unwrap();
-        assert_eq!(env.version, 2);
-        assert_eq!(env.identifier, "alice@example.com");
-        assert_eq!(env.signed_profile.profile.alias, "alice@example.com");
-        assert_eq!(env.namespace_descriptor.version, 2);
-        assert!(!env.name_events.is_empty());
-
+        // Legacy self-asserted profiles cannot manufacture namespace authority.
+        assert!(resolve_v2_envelope(&state, "alice@example.com").is_err());
         let not_found = resolve_v2_envelope(&state, "bob@example.com");
         assert!(not_found.is_err());
     }
@@ -641,6 +682,7 @@ mod tests {
         };
         let addr = server.server_addr().to_ip().unwrap();
         let state = Arc::new(AppState {
+            replica: None,
             p2p: crate::p2p::Bridge::new(false),
             home,
             bind: addr,
@@ -717,7 +759,15 @@ mod tests {
                 .send()
                 .await
                 .unwrap();
-            assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
+            assert_eq!(
+                response.status(),
+                if path == "/v1/dashboard/auth" {
+                    reqwest::StatusCode::OK
+                } else {
+                    reqwest::StatusCode::BAD_REQUEST
+                },
+                "{path}"
+            );
             assert!(response.headers().get("set-cookie").is_none());
             assert!(!response.text().await.unwrap().contains("test_token"));
         }
@@ -1010,140 +1060,27 @@ mod tests {
         server.unblock();
     }
 
-    #[tokio::test]
-    async fn test_end_to_end_invite_claim_flow() {
+    #[test]
+    fn invite_is_not_namespace_authorization_and_rejection_preserves_state() {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
-        load_or_create_identity(dir.path()).unwrap();
-
-        // 1. Sender initiates send to unregistered alias
-        let send_res = send_response(
-            &state,
-            SendRequest {
-                recipient: "carol@example.com".into(),
-                amount_sats: 25_000,
-                routing_ok: Some(true),
-            },
-        )
-        .await;
-
-        let claim_url = match send_res {
-            SendResponse::Invite { claim_url, .. } => claim_url,
-            other => panic!("expected SendResponse::Invite, got {other:?}"),
-        };
-
-        // Extract invite_id from claim_url
-        let invite_id = claim_url
-            .split("invite_id=")
-            .nth(1)
-            .unwrap()
-            .split('&')
-            .next()
-            .unwrap();
-
-        // 2. Receiver inspects invite
-        let inspect = crate::handlers::claim::inspect_invite_handler(&state, invite_id).unwrap();
-        assert_eq!(inspect.invite_id, invite_id);
-        assert_eq!(inspect.amount_sats, 25_000);
-        assert!(inspect.is_claimable);
-        assert!(!inspect.is_expired);
-        assert!(inspect.sender_verified);
-
-        // 3. Receiver claims invite with lightning address
-        let claim_res = crate::handlers::claim::claim_invite_handler(
-            &state,
-            crate::types::ClaimRequest {
-                invite_id: invite_id.to_string(),
-                alias: "carol@example.com".into(),
-                signed_profile: None,
-                lightning_address: Some("carol@getalby.com".into()),
-                onchain_address: None,
-                onchain_pubkey: None,
-                ark_server: None,
-                ark_pubkey: None,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(claim_res.status, "claimed");
-        assert_eq!(claim_res.alias, "carol@example.com");
-        assert_eq!(claim_res.amount_sats, 25_000);
-        assert!(!claim_res.profile_pubkey.is_empty());
-
-        // 4. Verify invite is now ClaimedWithPublicProfile
-        let re_inspect = crate::handlers::claim::inspect_invite_handler(&state, invite_id).unwrap();
-        assert_eq!(
-            re_inspect.status,
-            satspath_core::InviteStatus::ClaimedWithPublicProfile
-        );
-        assert!(!re_inspect.is_claimable);
-
-        // 5. Verify claim notification exists for sender
-        let notifications = crate::handlers::claim::list_notifications_handler(&state).unwrap();
-        assert_eq!(notifications.len(), 1);
-        assert_eq!(notifications[0].invite_id, invite_id);
-        assert_eq!(notifications[0].amount_sats, 25_000);
-        assert!(!notifications[0].read);
-
-        // 6. Sender marks notification as read
-        crate::handlers::claim::mark_notification_read_handler(
-            &state,
-            &notifications[0].notification_id,
-        )
-        .unwrap();
-        let updated_notifications =
-            crate::handlers::claim::list_notifications_handler(&state).unwrap();
-        assert!(updated_notifications[0].read);
-
-        // 7. Double claiming fails with error
-        let double_claim = crate::handlers::claim::claim_invite_handler(
-            &state,
-            crate::types::ClaimRequest {
-                invite_id: invite_id.to_string(),
-                alias: "carol@example.com".into(),
-                signed_profile: None,
-                lightning_address: Some("carol@getalby.com".into()),
-                onchain_address: None,
-                onchain_pubkey: None,
-                ark_server: None,
-                ark_pubkey: None,
-            },
-        );
-        assert!(double_claim.is_err());
-        assert!(double_claim
-            .unwrap_err()
-            .to_string()
-            .contains("already been claimed"));
-
-        // 8. Sender can now re-resolve carol@example.com in the transparency log
-        let store = satspath_core::TransactionalTransparencyStore::open(dir.path()).unwrap();
-        let profile = store.profile("carol@example.com").unwrap();
-        assert!(profile.is_some());
-        assert_eq!(profile.unwrap().profile.alias, "carol@example.com");
-    }
-
-    #[tokio::test]
-    async fn test_expired_and_mismatched_claims() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(dir.path());
-        load_or_create_identity(dir.path()).unwrap();
-
-        let mut store = satspath_core::InviteStore::open(dir.path()).unwrap();
-        let expired_invite = satspath_core::create_invite_record(
+        let invite = satspath_core::create_invite_record(
             "alice@example.com",
-            10_000,
+            100,
             None,
-            "sender-fp".into(),
-            -10, // already expired
+            "sender".into(),
+            3600,
         );
-        let expired_id = expired_invite.invite_id.clone();
-        store.insert(expired_invite).unwrap();
-
-        // Expired claim fails
-        let expired_err = crate::handlers::claim::claim_invite_handler(
+        let invite_id = invite.invite_id.clone();
+        satspath_core::InviteStore::open(dir.path())
+            .unwrap()
+            .insert(invite)
+            .unwrap();
+        let before = std::fs::read(dir.path().join("invites.json")).ok();
+        let err = crate::handlers::claim::claim_invite_handler(
             &state,
             crate::types::ClaimRequest {
-                invite_id: expired_id.clone(),
+                invite_id: invite_id.clone(),
                 alias: "alice@example.com".into(),
                 signed_profile: None,
                 lightning_address: Some("alice@example.com".into()),
@@ -1154,33 +1091,14 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(expired_err.to_string().contains("expired"));
-
-        // Mismatched alias claim fails
-        let valid_invite = satspath_core::create_invite_record(
-            "bob@example.com",
-            50_000,
-            None,
-            "sender-fp".into(),
-            3600,
+        assert!(err.to_string().contains("namespace authorization"));
+        assert_eq!(before, std::fs::read(dir.path().join("invites.json")).ok());
+        assert!(
+            crate::handlers::claim::inspect_invite_handler(&state, &invite_id)
+                .unwrap()
+                .is_claimable
         );
-        let valid_id = valid_invite.invite_id.clone();
-        store.insert(valid_invite).unwrap();
-
-        let mismatch_err = crate::handlers::claim::claim_invite_handler(
-            &state,
-            crate::types::ClaimRequest {
-                invite_id: valid_id,
-                alias: "mallory@example.com".into(),
-                signed_profile: None,
-                lightning_address: Some("mallory@example.com".into()),
-                onchain_address: None,
-                onchain_pubkey: None,
-                ark_server: None,
-                ark_pubkey: None,
-            },
-        )
-        .unwrap_err();
-        assert!(mismatch_err.to_string().contains("does not match"));
+        assert!(!dir.path().join("wallet.json").exists());
+        assert!(!dir.path().join("satspath-transparency-v1.sqlite3").exists());
     }
 }

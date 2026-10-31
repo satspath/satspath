@@ -42,12 +42,16 @@ pub use log::{ConsistencyStatus, TransparencyLog, TransparencyStatus};
 pub use migration::{verify_migration_statement, MigrationExport, MigrationStatement};
 pub use proof::{MerkleConsistencyProof, MerkleInclusionProof};
 pub use protocol::{
-    witness_cosignature_message, EndpointRole, NamespaceDescriptor, ReplicaEndpoint,
-    ResolutionEnvelope, ResolutionRequest, WitnessCosignature,
+    witness_cosignature_message, witness_signing_identity, EndpointRole, NamespaceDescriptor,
+    ReplicaEndpoint, ResolutionEnvelope, ResolutionRequest, WitnessCosignature,
 };
 pub use replication::{
     detect_equivocation, select_endpoint, validate_no_rollback, ReplicaHealth,
     MAX_STALENESS_WINDOW_SECS,
+};
+#[cfg(feature = "std")]
+pub use replication::{
+    fetch_lab_resolution, resolve_lab_network, validate_lab_origin, ReplicaFetchError,
 };
 pub use resolver::{
     verify_namespace_binding, verify_witness_quorum, verify_witness_quorum_against_checkpoint,

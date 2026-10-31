@@ -249,6 +249,26 @@ async fn test_witness_quorum_policy_evaluation() {
     let sig1 = w1.process_checkpoint(&cp, None).await.unwrap();
     let sig2 = w2.process_checkpoint(&cp, None).await.unwrap();
 
+    let mut opposite = sig1.clone();
+    let prefix = if opposite.witness_pubkey.starts_with("02") {
+        "03"
+    } else {
+        "02"
+    };
+    opposite.witness_pubkey.replace_range(..2, prefix);
+    assert!(
+        opposite.verify(&cp).unwrap(),
+        "P and -P verify the same Schnorr signature"
+    );
+    let duplicate_policy = WitnessQuorumPolicy::new(
+        2,
+        vec![sig1.witness_pubkey.clone(), opposite.witness_pubkey.clone()],
+    );
+    assert!(matches!(
+        duplicate_policy.verify_quorum(&cp, &[sig1.clone(), opposite]),
+        Err(WitnessError::QuorumNotMet { actual: 1, .. })
+    ));
+
     let policy = WitnessQuorumPolicy::new(2, vec![w1.witness_pubkey(), w2.witness_pubkey()]);
 
     let verified_count = policy.verify_quorum(&cp, &[sig1.clone(), sig2]).unwrap();

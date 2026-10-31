@@ -389,7 +389,8 @@ pub fn next_identifier_sequence(
 }
 
 pub fn verify_event_profile(event: &NameEvent, profile: &SignedPaymentProfile) -> Result<bool> {
-    if event.profile_hash != profile_hash(profile)?
+    if event.identifier_hash != crate::privacy::identifier_hash(&profile.profile.alias)
+        || event.profile_hash != profile_hash(profile)?
         || event.identity_pubkey != profile.profile.identity_pubkey
     {
         return Err(TransparencyError::ProfileHashMismatch.into());

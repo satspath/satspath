@@ -21,6 +21,15 @@ pub(crate) const IDENTITY_SUBDIR: &str = "identity";
     version = "0.1.0"
 )]
 pub(crate) struct Cli {
+    /// Lab-only read-only replica. Out-of-band trusted authority descriptor JSON.
+    #[arg(long)]
+    pub(crate) replica_descriptor: Option<PathBuf>,
+    /// Public synthetic identifiers to mirror (repeat, maximum 32).
+    #[arg(long)]
+    pub(crate) replica_alias: Vec<String>,
+    /// Poll interval in seconds; freshness remains fixed at 300 seconds.
+    #[arg(long, default_value_t = 10)]
+    pub(crate) replica_sync_seconds: u64,
     /// Enable experimental public-profile Hyperswarm transport (requires Node >=20 and SDK npm ci).
     #[arg(long)]
     pub(crate) p2p: bool,
@@ -86,6 +95,7 @@ pub(crate) struct WalletState {
 
 #[derive(Clone)]
 pub(crate) struct AppState {
+    pub(crate) replica: Option<Arc<crate::replica::ReplicaConfig>>,
     pub(crate) p2p: Arc<crate::p2p::Bridge>,
     pub(crate) home: PathBuf,
     pub(crate) bind: SocketAddr,

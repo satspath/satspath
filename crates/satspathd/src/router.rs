@@ -82,6 +82,9 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
         }
     }
 
+    if state.replica.is_some() {
+        return crate::replica::handle(request, state);
+    }
     let is_mutation = !matches!(method, Method::Get | Method::Head | Method::Options);
     let is_public_mutation = path == "/v1/receive"
         || path == "/v1/send"
@@ -97,7 +100,41 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
         }
     }
 
+    if is_mutation
+        && matches!(
+            path.as_str(),
+            "/v1/profile" | "/v1/profile/methods" | "/v1/profile/rotate-key"
+        )
+    {
+        request.respond(json_error(StatusCode(403), anyhow::anyhow!("legacy wallet mutation disabled until namespace authorization is integrated; use signed lab registration")))?;
+        return Ok(());
+    }
+
     let response = match (method.clone(), path.as_str()) {
+        (Method::Post, "/v1/lab/profiles/mutate") => {
+            let body = read_json(&mut request);
+            let _guard = state.mutation_lock.lock().await;
+            match body.and_then(|body| crate::handlers::lab::mutate(state, body)) {
+                Ok(value) => json_response(StatusCode(200), &value),
+                Err(error) => json_error(StatusCode(400), error),
+            }
+        }
+        (Method::Post, "/v1/lab/registrations/reserve") => {
+            let body = read_json(&mut request);
+            let _guard = state.mutation_lock.lock().await;
+            match body.and_then(|body| crate::handlers::lab::reserve(state, body)) {
+                Ok(value) => json_response(StatusCode(200), &value),
+                Err(error) => json_error(StatusCode(400), error),
+            }
+        }
+        (Method::Post, "/v1/lab/registrations/complete") => {
+            let body = read_json(&mut request);
+            let _guard = state.mutation_lock.lock().await;
+            match body.and_then(|body| crate::handlers::lab::complete(state, body)) {
+                Ok(value) => json_response(StatusCode(200), &value),
+                Err(error) => json_error(StatusCode(400), error),
+            }
+        }
         (Method::Options, _) => empty_response(StatusCode(204)),
         (Method::Get, "/") | (Method::Get, "/claim") => html_response(INDEX_HTML),
         (Method::Get, "/dashboard-auth.mjs") => crate::ui::dashboard_auth_script(),
@@ -131,13 +168,23 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
                 }
                 Err(_) => (-1, false),
             };
-            let resp = v2_api::build_health_response(checkpoint_age, log_ok, 1);
+            // An open local log is not a deployed independent witness quorum.
+            let resp = v2_api::build_health_response(checkpoint_age, false, 0);
             let status = if resp.status == "healthy" {
                 StatusCode(200)
             } else {
                 StatusCode(503)
             };
-            json_response(status, &resp)
+            json_response(
+                status,
+                &serde_json::json!({
+                    "version":resp.version,"status":resp.status,"checkpoint_age_secs":checkpoint_age,
+                    "role":"authority","witness_quorum_healthy":false,"replica_count":0,
+                    "lab_resolution_ready":log_ok && crate::handlers::lab::enabled()
+                        && matches!(state.network.as_str(),"regtest"|"devnet"),
+                    "production_ready":false,
+                }),
+            )
         }
         (Method::Get, "/.well-known/satspath-authority")
         | (Method::Get, v2_api::routes::NAMESPACE) => {

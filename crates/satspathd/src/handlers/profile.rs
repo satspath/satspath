@@ -53,46 +53,16 @@ pub(crate) fn update_profile(
     profile_response(state)
 }
 
-pub(crate) fn create_challenge(_state: &AppState, body: AliasRequest) -> Result<serde_json::Value> {
-    use satspath_core::platform::{EmailVerifier, MockEmailVerifier};
-    let verifier = MockEmailVerifier {
-        now: chrono::Utc::now().timestamp(),
-        ttl_seconds: 600,
-    };
-    let challenge = verifier.create_challenge(&body.alias)?;
-    Ok(serde_json::json!({
-        "challenge_id": challenge.challenge_id,
-        "message": "A mock verification code was sent. (MOCK: use the email address itself as the token)",
-    }))
+pub(crate) fn create_challenge(
+    _state: &AppState,
+    _body: AliasRequest,
+) -> Result<serde_json::Value> {
+    anyhow::bail!("legacy mock alias verification disabled; use admin-authorized /v1/lab/registrations/reserve and /complete")
 }
 
-pub(crate) fn verify_challenge(state: &AppState, body: VerifyRequest) -> Result<ProfileResponse> {
-    use satspath_core::platform::{EmailVerifier, MockEmailVerifier};
-    let verifier = MockEmailVerifier {
-        now: chrono::Utc::now().timestamp(),
-        ttl_seconds: 600,
-    };
-    let verified = verifier.verify_challenge(&body.token)?;
-
-    if verified.identifier_hash != satspath_core::privacy::identifier_hash(&body.alias) {
-        anyhow::bail!("invalid verification token for this alias");
-    }
-
-    let mut wallet = load_or_create_identity(&state.home)?;
-    wallet.alias = Some(body.alias);
-    wallet.updated_at = Some(chrono::Utc::now().timestamp());
-
-    // Only sign and store if there are methods already. Otherwise just save the wallet state.
-    if wallet.lightning_address.is_some()
-        || wallet.onchain_address.is_some()
-        || wallet.ark_server.is_some()
-    {
-        sign_and_store(&state.home, &mut wallet, &state.network)?;
-    }
-    save_wallet(&state.home, &wallet)?;
-    profile_response(state)
+pub(crate) fn verify_challenge(_state: &AppState, _body: VerifyRequest) -> Result<ProfileResponse> {
+    anyhow::bail!("legacy mock tokens are not namespace authorization; use signed lab registration")
 }
-
 pub(crate) fn update_profile_methods(
     state: &AppState,
     body: ProfileUpdateRequest,

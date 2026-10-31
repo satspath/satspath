@@ -97,40 +97,49 @@ pub(crate) async fn anchor_latest_checkpoint(
 pub(crate) fn namespace_descriptor(
     state: &AppState,
 ) -> Result<satspath_core::transparency::NamespaceDescriptor> {
-    let domain =
-        std::env::var("SATSPATH_AUTHORITY_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
-    let wallet = crate::handlers::wallet::load_wallet(&state.home)?;
-    let authority_pubkey = wallet.identity_pubkey.clone().unwrap_or_else(|| {
-        "0000000000000000000000000000000000000000000000000000000000000000".to_string()
+    satspath_core::lab::require_lab(
+        &state.network,
+        super::lab::enabled(),
+        "authority@lab.satspath.test",
+    )?;
+    let operator = load_or_create_transparency_operator(&state.home)?;
+    let authority_pubkey =
+        secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &operator).to_string();
+    let log = transparency_log(state)?;
+    let endpoint = std::env::var("SATSPATH_AUTHORITY_URL")
+        .unwrap_or_else(|_| format!("http://{}", state.bind));
+    let parsed = url::Url::parse(&endpoint)?;
+    let loopback = parsed.host_str().is_some_and(|h| {
+        h == "localhost"
+            || h.parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
     });
-    let log = transparency_log(state).ok();
-    let log_id = log
-        .as_ref()
-        .map(|l| l.log_id().to_string())
-        .unwrap_or_else(|| format!("satspath:{domain}"));
-    let endpoint_urls = if let Ok(custom_url) = std::env::var("SATSPATH_AUTHORITY_URL") {
-        vec![custom_url]
-    } else if domain != "localhost" {
-        vec![format!("https://{domain}/v2")]
-    } else {
-        vec![format!("http://{}/v2", state.bind)]
-    };
-    let quorum = std::env::var("SATSPATH_WITNESS_QUORUM")
-        .ok()
-        .and_then(|q| q.parse::<u8>().ok())
-        .unwrap_or(1);
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback) {
+        anyhow::bail!("lab endpoint requires HTTPS or explicit loopback HTTP");
+    }
     let now = chrono::Utc::now().timestamp();
-
-    Ok(satspath_core::transparency::NamespaceDescriptor {
+    let mut endpoints = vec![endpoint];
+    if let Ok(json) = std::env::var("SATSPATH_REPLICA_URLS") {
+        let replicas: Vec<String> = serde_json::from_str(&json)?;
+        anyhow::ensure!(replicas.len() <= 7, "at most seven replica origins allowed");
+        for origin in replicas {
+            satspath_core::transparency::validate_lab_origin(&origin)?;
+            anyhow::ensure!(!endpoints.contains(&origin), "duplicate endpoint");
+            endpoints.push(origin);
+        }
+    }
+    let mut descriptor = satspath_core::transparency::NamespaceDescriptor {
         version: 2,
-        domain,
-        log_id,
+        domain: satspath_core::lab::LAB_NAMESPACE.into(),
+        log_id: log.log_id().into(),
         authority_pubkey,
-        endpoint_urls,
-        witness_quorum: quorum,
+        endpoint_urls: endpoints,
+        witness_quorum: 0,
         witness_pubkeys: vec![],
         valid_from: now,
-        expires_at: now + 30 * 86400,
+        expires_at: now + 3600,
         signature: String::new(),
-    })
+    };
+    descriptor.sign(&operator)?;
+    Ok(descriptor)
 }

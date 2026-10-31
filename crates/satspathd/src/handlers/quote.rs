@@ -27,6 +27,12 @@ pub(crate) async fn quote_response(
             }
         }
     };
+    if !resolved.verification.identifier_verified || body.recipient.ends_with("@lab.satspath.test")
+    {
+        return satspath_router::QuoteResponse::NoRoute {
+            reason: "namespace authorization is incomplete; synthetic lab profiles are not payment-ready".into(),
+        };
+    }
     let allowed: Vec<String> = resolved
         .verification
         .payment_method_states

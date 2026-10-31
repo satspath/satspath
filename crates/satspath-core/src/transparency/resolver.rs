@@ -50,7 +50,9 @@ impl VerificationDimensions {
     }
 }
 
-/// Verify that a namespace descriptor is well-formed and its signature is valid.
+/// Check a descriptor without an external DNSSEC/WebPKI/pin trust anchor.
+/// A self-signature cannot establish namespace authority: valid descriptors
+/// remain Skipped here. Use an explicitly anchored verification policy.
 pub fn verify_namespace_binding(
     descriptor: &NamespaceDescriptor,
     expected_domain: &str,
@@ -70,7 +72,10 @@ pub fn verify_namespace_binding(
     if descriptor.expires_at <= descriptor.valid_from {
         return DimensionStatus::Failed("invalid validity window".into());
     }
-    DimensionStatus::Verified
+    match descriptor.verify(chrono::Utc::now().timestamp()) {
+        Ok(true) => DimensionStatus::Skipped,
+        _ => DimensionStatus::Failed("invalid or expired namespace descriptor signature".into()),
+    }
 }
 
 /// Verify that witness cosignatures meet the quorum requirement.
@@ -110,9 +115,16 @@ pub fn verify_witness_quorum_against_checkpoint(
     };
 
     let mut verified_pubkeys = std::collections::HashSet::new();
+    let authorized: std::collections::HashSet<_> = allowed_pubkeys
+        .iter()
+        .filter_map(|key| super::witness_signing_identity(key))
+        .collect();
 
     for cs in cosignatures {
-        if !allowed_pubkeys.contains(&cs.witness_pubkey) {
+        let Some(schnorr_identity) = super::witness_signing_identity(&cs.witness_pubkey) else {
+            continue;
+        };
+        if cs.version != 1 || !authorized.contains(&schnorr_identity) {
             continue;
         }
 
@@ -131,7 +143,7 @@ pub fn verify_witness_quorum_against_checkpoint(
         if crate::crypto::verify_message_signature(&msg, &cs.signature, &cs.witness_pubkey)
             .unwrap_or(false)
         {
-            verified_pubkeys.insert(cs.witness_pubkey.clone());
+            verified_pubkeys.insert(schnorr_identity);
         }
     }
 
